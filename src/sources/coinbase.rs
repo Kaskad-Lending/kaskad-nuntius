@@ -1,0 +1,59 @@
+use async_trait::async_trait;
+use eyre::Result;
+use serde::Deserialize;
+
+use crate::types::{Asset, PricePoint, now_secs};
+use super::PriceSource;
+
+pub struct Coinbase {
+    client: reqwest::Client,
+}
+
+impl Coinbase {
+    pub fn new(client: reqwest::Client) -> Self {
+        Self { client }
+    }
+
+    fn pair_for(asset: Asset) -> Option<&'static str> {
+        match asset {
+            Asset::EthUsd => Some("ETH-USD"),
+            Asset::BtcUsd => Some("BTC-USD"),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CoinbaseResponse {
+    data: CoinbasePrice,
+}
+
+#[derive(Deserialize)]
+struct CoinbasePrice {
+    amount: String,
+}
+
+#[async_trait]
+impl PriceSource for Coinbase {
+    async fn fetch_price(&self, asset: Asset) -> Result<Option<PricePoint>> {
+        let pair = match Self::pair_for(asset) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let url = format!("https://api.coinbase.com/v2/prices/{}/spot", pair);
+        let resp: CoinbaseResponse = self.client.get(&url).send().await?.json().await?;
+        let price: f64 = resp.data.amount.parse()?;
+
+        Ok(Some(PricePoint {
+            price,
+            volume: 0.0,
+            timestamp: now_secs(),
+            source: "coinbase".into(),
+        }))
+    }
+
+    fn name(&self) -> &'static str {
+        "coinbase"
+    }
+}
