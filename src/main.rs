@@ -3,6 +3,7 @@ mod sources;
 mod aggregator;
 mod signer;
 mod publisher;
+mod vsock_client;
 
 use std::collections::HashMap;
 

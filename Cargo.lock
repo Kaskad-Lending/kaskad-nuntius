@@ -1419,6 +1419,7 @@ dependencies = [
  "eyre",
  "hex",
  "k256",
+ "libc",
  "rand 0.8.5",
  "reqwest",
  "serde",
