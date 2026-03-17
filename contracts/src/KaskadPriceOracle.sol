@@ -1,28 +1,54 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title KaskadPriceOracle
-/// @notice Receives signed price updates from a TEE oracle enclave and stores them on-chain.
-/// @dev Signature verification via ecrecover. Designed as the single source of truth
-///      for the Kaskad lending protocol (Aave V3 fork on Galleon testnet).
+/// @title KaskadPriceOracle (Permissionless)
+/// @notice Fully permissionless price oracle. No owner, no admin.
+///         Enclave registers itself via TEE attestation proof.
+///         Only code with the correct PCR0 hash can become the oracle signer.
 contract KaskadPriceOracle {
     // ─── Types ───────────────────────────────────────────────────────────
 
     struct PriceData {
-        uint256 price;        // fixed-point, 8 decimals (e.g. 212926000000 = $2129.26)
-        uint256 timestamp;    // unix seconds when the price was observed
-        uint8   numSources;   // number of data sources used in aggregation
+        uint256 price;        // fixed-point, 8 decimals
+        uint256 timestamp;    // unix seconds
+        uint8   numSources;   // number of sources used
         bytes32 sourcesHash;  // keccak256 commitment of source data
         uint80  roundId;      // incrementing round counter
     }
 
+    struct EnclaveInfo {
+        address signer;           // derived ethereum address
+        uint256 registeredAt;     // block.timestamp of registration
+        bytes32 pcr0;             // enclave image hash
+        bool    active;           // currently active
+    }
+
+    // ─── Immutable Config ────────────────────────────────────────────────
+
+    /// @notice Expected enclave image hash. Set at deploy, NEVER changes.
+    ///         This is the sha384 hash of the Docker image → EIF build.
+    ///         Anyone can reproduce: build the same Dockerfile → get the same PCR0.
+    bytes32 public immutable expectedPCR0;
+
+    /// @notice Address of the attestation verifier contract.
+    ///         Immutable — cannot be changed after deployment.
+    IAttestationVerifier public immutable verifier;
+
+    /// @notice Number of decimals for price values.
+    uint8 public constant DECIMALS = 8;
+
+    /// @notice Maximum price change per update in basis points (circuit breaker).
+    ///         If a price moves more than this in a single update, the update is rejected.
+    ///         Protects against flash crashes and oracle manipulation.
+    uint16 public constant MAX_PRICE_CHANGE_BPS = 1500; // 15%
+
+    /// @notice Minimum time between updates in seconds (rate limiter).
+    uint256 public constant MIN_UPDATE_DELAY = 5;
+
     // ─── State ───────────────────────────────────────────────────────────
 
-    /// @notice Owner (deployer). Can register/revoke oracle signers.
-    address public owner;
-
-    /// @notice Authorized oracle signer (TEE enclave address).
-    address public oracleSigner;
+    /// @notice Currently registered enclave.
+    EnclaveInfo public enclave;
 
     /// @notice Latest price data per asset.
     mapping(bytes32 => PriceData) public latestPrices;
@@ -33,10 +59,13 @@ contract KaskadPriceOracle {
     /// @notice Current round ID per asset.
     mapping(bytes32 => uint80) public currentRound;
 
-    /// @notice Number of decimals for price values.
-    uint8 public constant DECIMALS = 8;
-
     // ─── Events ──────────────────────────────────────────────────────────
+
+    event EnclaveRegistered(
+        address indexed signer,
+        bytes32 pcr0,
+        uint256 timestamp
+    );
 
     event PriceUpdated(
         bytes32 indexed assetId,
@@ -46,49 +75,61 @@ contract KaskadPriceOracle {
         uint80  roundId
     );
 
-    event OracleSignerUpdated(address indexed oldSigner, address indexed newSigner);
-    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
-
     // ─── Errors ──────────────────────────────────────────────────────────
 
-    error Unauthorized();
+    error InvalidAttestation();
+    error PCR0Mismatch(bytes32 provided, bytes32 expected);
     error InvalidSignature();
     error StalePrice(uint256 provided, uint256 current);
-    error ZeroAddress();
+    error NoEnclaveRegistered();
     error InsufficientSources();
+    error PriceChangeExceedsLimit(uint256 changeBps, uint256 maxBps);
+    error UpdateTooFrequent(uint256 elapsed, uint256 minDelay);
 
     // ─── Constructor ─────────────────────────────────────────────────────
 
-    constructor(address _oracleSigner) {
-        if (_oracleSigner == address(0)) revert ZeroAddress();
-        owner = msg.sender;
-        oracleSigner = _oracleSigner;
+    /// @param _expectedPCR0 The expected enclave image hash. IMMUTABLE.
+    /// @param _verifier     Address of the attestation verifier. IMMUTABLE.
+    constructor(bytes32 _expectedPCR0, address _verifier) {
+        expectedPCR0 = _expectedPCR0;
+        verifier = IAttestationVerifier(_verifier);
     }
 
-    // ─── Admin ───────────────────────────────────────────────────────────
+    // NO owner. NO admin. NO setOracleSigner(). NO transferOwnership().
 
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert Unauthorized();
-        _;
-    }
+    // ─── Enclave Registration (permissionless) ───────────────────────────
 
-    /// @notice Set a new oracle signer address (e.g. after enclave re-attestation).
-    function setOracleSigner(address _newSigner) external onlyOwner {
-        if (_newSigner == address(0)) revert ZeroAddress();
-        emit OracleSignerUpdated(oracleSigner, _newSigner);
-        oracleSigner = _newSigner;
-    }
+    /// @notice Register an enclave as the oracle signer.
+    ///         Anyone can call this, but only a valid attestation from an
+    ///         enclave running the expected code (PCR0) will succeed.
+    /// @param attestationDoc  Raw attestation document from TEE (CBOR-encoded COSE_Sign1 for Nitro)
+    function registerEnclave(bytes calldata attestationDoc) external {
+        // 1. Verify attestation document via the verifier contract
+        (
+            bool valid,
+            bytes32 pcr0,
+            address enclaveAddress
+        ) = verifier.verifyAttestation(attestationDoc);
 
-    /// @notice Transfer ownership.
-    function transferOwnership(address _newOwner) external onlyOwner {
-        if (_newOwner == address(0)) revert ZeroAddress();
-        emit OwnershipTransferred(owner, _newOwner);
-        owner = _newOwner;
+        if (!valid) revert InvalidAttestation();
+
+        // 2. Check PCR0 matches our expected enclave image
+        if (pcr0 != expectedPCR0) revert PCR0Mismatch(pcr0, expectedPCR0);
+
+        // 3. Register the enclave signer
+        enclave = EnclaveInfo({
+            signer: enclaveAddress,
+            registeredAt: block.timestamp,
+            pcr0: pcr0,
+            active: true
+        });
+
+        emit EnclaveRegistered(enclaveAddress, pcr0, block.timestamp);
     }
 
     // ─── Core: Price Update ──────────────────────────────────────────────
 
-    /// @notice Submit a signed price update from the oracle enclave.
+    /// @notice Submit a signed price update from the registered enclave.
     /// @param assetId     keccak256 of the asset symbol (e.g. keccak256("ETH/USD"))
     /// @param price       price in fixed-point with 8 decimals
     /// @param timestamp   unix timestamp of the observation
@@ -103,13 +144,35 @@ contract KaskadPriceOracle {
         bytes32 sourcesHash,
         bytes calldata signature
     ) external {
-        // Require at least 2 independent sources (except governance-set assets)
+        // Must have a registered enclave
+        if (!enclave.active) revert NoEnclaveRegistered();
+
+        // Require at least 1 source
         if (numSources < 1) revert InsufficientSources();
 
-        // Prevent stale/replay updates
         PriceData storage current = latestPrices[assetId];
+
+        // Prevent stale/replay updates
         if (current.timestamp > 0 && timestamp <= current.timestamp) {
             revert StalePrice(timestamp, current.timestamp);
+        }
+
+        // Rate limiter: prevent spam updates
+        if (current.timestamp > 0 && timestamp - current.timestamp < MIN_UPDATE_DELAY) {
+            revert UpdateTooFrequent(timestamp - current.timestamp, MIN_UPDATE_DELAY);
+        }
+
+        // Circuit breaker: reject extreme price changes
+        if (current.price > 0) {
+            uint256 changeBps;
+            if (price > current.price) {
+                changeBps = ((price - current.price) * 10000) / current.price;
+            } else {
+                changeBps = ((current.price - price) * 10000) / current.price;
+            }
+            if (changeBps > MAX_PRICE_CHANGE_BPS) {
+                revert PriceChangeExceedsLimit(changeBps, MAX_PRICE_CHANGE_BPS);
+            }
         }
 
         // Verify signature
@@ -121,7 +184,7 @@ contract KaskadPriceOracle {
         );
 
         address recovered = _recover(ethSignedHash, signature);
-        if (recovered != oracleSigner) revert InvalidSignature();
+        if (recovered != enclave.signer) revert InvalidSignature();
 
         // Store
         uint80 newRound = currentRound[assetId] + 1;
@@ -162,6 +225,11 @@ contract KaskadPriceOracle {
         return (data.price, data.timestamp, data.numSources);
     }
 
+    /// @notice Get the active enclave signer address.
+    function oracleSigner() external view returns (address) {
+        return enclave.signer;
+    }
+
     // ─── Internal ────────────────────────────────────────────────────────
 
     function _recover(bytes32 hash, bytes calldata sig) internal pure returns (address) {
@@ -183,4 +251,19 @@ contract KaskadPriceOracle {
         if (recovered == address(0)) revert InvalidSignature();
         return recovered;
     }
+}
+
+/// @title IAttestationVerifier
+/// @notice Interface for TEE attestation verification.
+///         Implementations: NitroVerifier (AWS), TDXVerifier (Intel), MockVerifier (testing).
+interface IAttestationVerifier {
+    /// @notice Verify a TEE attestation document.
+    /// @param attestationDoc Raw attestation bytes
+    /// @return valid          Whether the attestation is cryptographically valid
+    /// @return pcr0           The enclave image measurement hash
+    /// @return enclaveAddress The Ethereum address derived from the enclave's key
+    function verifyAttestation(bytes calldata attestationDoc)
+        external
+        view
+        returns (bool valid, bytes32 pcr0, address enclaveAddress);
 }
