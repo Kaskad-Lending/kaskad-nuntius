@@ -2,6 +2,7 @@ mod types;
 mod sources;
 mod aggregator;
 mod signer;
+mod publisher;
 
 use std::collections::HashMap;
 

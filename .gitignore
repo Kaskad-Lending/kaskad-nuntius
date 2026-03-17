@@ -2,3 +2,5 @@
 reference/
 .env
 *.eif
+contracts/cache/
+contracts/out/
