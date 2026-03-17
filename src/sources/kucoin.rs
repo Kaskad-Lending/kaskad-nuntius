@@ -1,0 +1,66 @@
+use async_trait::async_trait;
+use eyre::Result;
+use serde::Deserialize;
+
+use crate::types::{Asset, PricePoint, now_secs};
+use super::PriceSource;
+
+pub struct Kucoin {
+    client: reqwest::Client,
+}
+
+impl Kucoin {
+    pub fn new(client: reqwest::Client) -> Self {
+        Self { client }
+    }
+
+    fn symbol_for(asset: Asset) -> Option<&'static str> {
+        match asset {
+            Asset::EthUsd => Some("ETH-USDT"),
+            Asset::BtcUsd => Some("BTC-USDT"),
+            Asset::KasUsd => Some("KAS-USDT"),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct KucoinResponse {
+    data: KucoinTickerData,
+}
+
+#[derive(Deserialize)]
+struct KucoinTickerData {
+    price: String,
+    #[serde(default)]
+    vol: String,
+}
+
+#[async_trait]
+impl PriceSource for Kucoin {
+    async fn fetch_price(&self, asset: Asset) -> Result<Option<PricePoint>> {
+        let symbol = match Self::symbol_for(asset) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let url = format!(
+            "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={}",
+            symbol
+        );
+        let resp: KucoinResponse = self.client.get(&url).send().await?.json().await?;
+        let price: f64 = resp.data.price.parse()?;
+        let volume: f64 = resp.data.vol.parse().unwrap_or(0.0);
+
+        Ok(Some(PricePoint {
+            price,
+            volume,
+            timestamp: now_secs(),
+            source: "kucoin".into(),
+        }))
+    }
+
+    fn name(&self) -> &'static str {
+        "kucoin"
+    }
+}

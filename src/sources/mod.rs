@@ -3,6 +3,10 @@ pub mod okx;
 pub mod bybit;
 pub mod coinbase;
 pub mod coingecko;
+pub mod mexc;
+pub mod kucoin;
+pub mod gateio;
+pub mod governance;
 
 use async_trait::async_trait;
 use eyre::Result;

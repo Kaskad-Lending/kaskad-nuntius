@@ -93,14 +93,25 @@ async fn main() -> Result<()> {
         .user_agent("KaskadOracle/0.1")
         .build()?;
 
-    // Init sources
+    // Init sources (8 total: 5 major CEX + 3 additional for KAS + governance for IGRA)
+    let igra_price = std::env::var("IGRA_PRICE")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.10); // default: $0.10 presale price
+
     let price_sources: Vec<Box<dyn PriceSource>> = vec![
         Box::new(sources::binance::Binance::new(client.clone())),
         Box::new(sources::okx::Okx::new(client.clone())),
         Box::new(sources::bybit::Bybit::new(client.clone())),
         Box::new(sources::coinbase::Coinbase::new(client.clone())),
         Box::new(sources::coingecko::CoinGecko::new(client.clone())),
+        Box::new(sources::mexc::Mexc::new(client.clone())),
+        Box::new(sources::kucoin::Kucoin::new(client.clone())),
+        Box::new(sources::gateio::GateIo::new(client.clone())),
+        Box::new(sources::governance::GovernancePrice::new(igra_price)),
     ];
+
+    info!(igra_price = igra_price, "IGRA governance price set");
 
     // Assets to track
     let assets = vec![
@@ -108,6 +119,7 @@ async fn main() -> Result<()> {
         Asset::BtcUsd,
         Asset::KasUsd,
         Asset::UsdcUsd,
+        Asset::IgraUsd,
     ];
 
     let mut state = OracleState::new();
