@@ -12,12 +12,14 @@ terraform {
     }
   }
 
-  # Remote state in S3 (created manually or via bootstrap)
-  backend "s3" {
-    bucket = "kaskad-terraform-state"
-    key    = "tee-oracle/terraform.tfstate"
-    region = "us-east-1"
-  }
+  # Local backend for initial setup.
+  # Migrate to S3 once IAM is properly configured:
+  #   backend "s3" {
+  #     bucket = "kaskad-terraform-state"
+  #     key    = "tee-oracle/terraform.tfstate"
+  #     region = "us-east-1"
+  #   }
+
 }
 
 provider "aws" {
