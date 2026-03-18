@@ -1,0 +1,154 @@
+name: Nitro Enclave Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_type:
+        description: 'EC2 instance type (must support Nitro Enclaves)'
+        required: false
+        default: 'c5.xlarge'
+      keep_instance:
+        description: 'Keep instance after test (for debugging)'
+        required: false
+        default: 'false'
+
+env:
+  AWS_REGION: us-east-1
+  AMI_ID: ami-0c7217cdde317cfec  # Ubuntu 22.04 LTS x86_64 (us-east-1)
+
+jobs:
+  nitro-test:
+    name: Enclave E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Launch EC2 instance
+        id: ec2
+        run: |
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id ${{ env.AMI_ID }} \
+            --instance-type ${{ inputs.instance_type }} \
+            --key-name ${{ secrets.AWS_KEY_PAIR_NAME }} \
+            --security-group-ids ${{ secrets.AWS_SECURITY_GROUP }} \
+            --subnet-id ${{ secrets.AWS_SUBNET_ID }} \
+            --enclave-options Enabled=true \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=kaskad-nitro-ci},{Key=Environment,Value=ci}]' \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "Launched instance: $INSTANCE_ID"
+
+          # Wait for running
+          aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+          
+          # Get public IP
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+          echo "ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
+          echo "Instance IP: $PUBLIC_IP"
+
+      - name: Wait for SSH
+        run: |
+          echo "Waiting for SSH on ${{ steps.ec2.outputs.ip }}..."
+          for i in $(seq 1 30); do
+            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+              -i /tmp/ssh_key.pem ubuntu@${{ steps.ec2.outputs.ip }} \
+              "echo 'SSH ready'" 2>/dev/null && break
+            sleep 10
+          done
+
+      - name: Setup SSH key
+        run: |
+          echo "${{ secrets.AWS_SSH_KEY }}" > /tmp/ssh_key.pem
+          chmod 600 /tmp/ssh_key.pem
+
+      - name: Install dependencies on EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/ssh_key.pem \
+            ubuntu@${{ steps.ec2.outputs.ip }} << 'SETUP'
+          set -ex
+          
+          # Install Nitro CLI
+          sudo amazon-linux-extras install aws-nitro-enclaves-cli -y 2>/dev/null || \
+          sudo apt-get update && sudo apt-get install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel
+          
+          # Install Docker
+          sudo apt-get install -y docker.io
+          sudo usermod -aG docker ubuntu
+          sudo usermod -aG ne ubuntu
+          
+          # Allocate enclave resources
+          sudo sed -i 's/memory_mib: .*/memory_mib: 512/' /etc/nitro_enclaves/allocator.yaml
+          sudo sed -i 's/cpu_count: .*/cpu_count: 2/' /etc/nitro_enclaves/allocator.yaml
+          sudo systemctl restart nitro-enclaves-allocator.service
+          
+          # Install Rust
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source ~/.cargo/env
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get install -y musl-tools
+          SETUP
+
+      - name: Build & test enclave
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/ssh_key.pem \
+            ubuntu@${{ steps.ec2.outputs.ip }} << 'TEST'
+          set -ex
+          source ~/.cargo/env
+          
+          # Clone repo
+          git clone https://github.com/${{ github.repository }}.git /tmp/oracle
+          cd /tmp/oracle
+          git checkout ${{ github.sha }}
+          
+          # Build Docker image
+          sudo docker build -t kaskad-oracle .
+          
+          # Build EIF
+          sudo nitro-cli build-enclave \
+            --docker-uri kaskad-oracle:latest \
+            --output-file /tmp/kaskad-oracle.eif | tee /tmp/build_output.json
+          
+          # Extract PCR0
+          PCR0=$(cat /tmp/build_output.json | python3 -c "import json,sys; print(json.load(sys.stdin)['Measurements']['PCR0'])")
+          echo "PCR0: $PCR0"
+          
+          # Run enclave
+          ENCLAVE_ID=$(sudo nitro-cli run-enclave \
+            --eif-path /tmp/kaskad-oracle.eif \
+            --cpu-count 2 \
+            --memory 512 \
+            --debug-mode \
+            --query 'EnclaveID' --output text)
+          echo "Enclave ID: $ENCLAVE_ID"
+          
+          # Check enclave is running
+          sudo nitro-cli describe-enclaves
+          
+          # Terminate enclave
+          sudo nitro-cli terminate-enclave --enclave-id $ENCLAVE_ID
+          
+          echo "✅ Enclave test passed! PCR0: $PCR0"
+          TEST
+
+      - name: Terminate EC2 instance
+        if: always() && inputs.keep_instance != 'true'
+        run: |
+          aws ec2 terminate-instances \
+            --instance-ids ${{ steps.ec2.outputs.instance_id }}
+          echo "Instance terminated: ${{ steps.ec2.outputs.instance_id }}"
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f /tmp/ssh_key.pem
