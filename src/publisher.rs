@@ -91,7 +91,7 @@ impl Publisher {
             Self::rlp_encode_u64(nonce),
             Self::rlp_encode_u256(gas_price),
             Self::rlp_encode_u64(gas_limit),
-            self.contract_address.to_vec(),
+            Self::rlp_encode_bytes(self.contract_address.as_slice()), // 20-byte address
             vec![0x80], // value = 0
             Self::rlp_encode_bytes(&calldata),
             Self::rlp_encode_u64(self.chain_id),

@@ -94,7 +94,37 @@ async fn main() -> Result<()> {
         .user_agent("KaskadOracle/0.1")
         .build()?;
 
-    // Init sources (8 total: 5 major CEX + 3 additional for KAS + governance for IGRA)
+    // Init publisher (optional — if env vars set, push on-chain; otherwise log-only)
+    let maybe_publisher = match (
+        std::env::var("RPC_URL"),
+        std::env::var("ORACLE_CONTRACT"),
+        std::env::var("TX_SIGNER_KEY"),
+    ) {
+        (Ok(rpc), Ok(contract), Ok(tx_key)) => {
+            let chain_id: u64 = std::env::var("CHAIN_ID")
+                .unwrap_or_else(|_| "31337".into())
+                .parse()
+                .unwrap_or(31337);
+
+            let contract_addr: alloy_primitives::Address = contract.parse()
+                .map_err(|e| eyre::eyre!("invalid ORACLE_CONTRACT: {}", e))?;
+
+            info!(
+                rpc_url = %rpc,
+                contract = %contract_addr,
+                chain_id = chain_id,
+                "Publisher initialized — prices will be pushed on-chain"
+            );
+
+            Some(publisher::Publisher::new(rpc, contract_addr, tx_key, chain_id))
+        }
+        _ => {
+            warn!("Missing RPC_URL/ORACLE_CONTRACT/TX_SIGNER_KEY — running in log-only mode (no on-chain publishing)");
+            None
+        }
+    };
+
+    // Init sources (9 total: 5 major CEX + 3 additional for KAS + governance for IGRA)
     let igra_price = std::env::var("IGRA_PRICE")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
@@ -123,10 +153,14 @@ async fn main() -> Result<()> {
         Asset::IgraUsd,
     ];
 
+    // Single-run mode: run once and exit (for testing)
+    let single_run = std::env::var("SINGLE_RUN").is_ok();
+
     let mut state = OracleState::new();
 
     info!(
         assets = ?assets.iter().map(|a| a.symbol()).collect::<Vec<_>>(),
+        single_run = single_run,
         "Starting oracle loop"
     );
 
@@ -178,14 +212,15 @@ async fn main() -> Result<()> {
             }
 
             // 5. Convert to fixed point
+            let timestamp = now_secs();
             let price_fixed = aggregator::to_fixed_point(median, ORACLE_DECIMALS);
             let sources_hash = aggregator::sources_hash(&prices);
 
             // 6. Sign
-            let (signature, signer_addr) = signer.sign_price_update(
+            let (signature, _signer_addr) = signer.sign_price_update(
                 asset.id(),
                 price_fixed,
-                now_secs(),
+                timestamp,
                 prices.len() as u8,
                 sources_hash,
             )?;
@@ -195,15 +230,43 @@ async fn main() -> Result<()> {
                 price = format!("{:.6}", median),
                 price_fixed = %price_fixed,
                 num_sources = prices.len(),
-                signature_len = signature.len(),
                 "✅ signed price update"
             );
 
-            // 7. Record update
-            state.record_update(asset, median);
+            // 7. Push to chain (if publisher available)
+            if let Some(ref pub_) = maybe_publisher {
+                match pub_.submit_price(
+                    asset.id(),
+                    price_fixed,
+                    timestamp,
+                    prices.len() as u8,
+                    sources_hash,
+                    signature,
+                ).await {
+                    Ok(tx_hash) => {
+                        info!(
+                            asset = asset.symbol(),
+                            tx_hash = %tx_hash,
+                            "📤 submitted to chain"
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            asset = asset.symbol(),
+                            error = %e,
+                            "❌ failed to submit to chain"
+                        );
+                    }
+                }
+            }
 
-            // TODO: 8. Push to chain via publisher
-            // publisher.submit_price(asset.id(), price_fixed, now_secs(), prices.len() as u8, sources_hash, signature).await?;
+            // 8. Record update
+            state.record_update(asset, median);
+        }
+
+        if single_run {
+            info!("✅ Single run complete, exiting");
+            break;
         }
 
         info!(
@@ -212,4 +275,7 @@ async fn main() -> Result<()> {
         );
         tokio::time::sleep(std::time::Duration::from_secs(FETCH_INTERVAL_SECS)).await;
     }
+
+    Ok(())
 }
+

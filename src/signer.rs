@@ -75,12 +75,13 @@ impl OracleSigner for MockSigner {
         // Construct the message hash: keccak256(abi.encodePacked(...))
         // This matches the Solidity verification:
         //   keccak256(abi.encodePacked(assetId, price, timestamp, numSources, sourcesHash))
+        // IMPORTANT: timestamp is uint256 in Solidity → 32 bytes, NOT u64 (8 bytes)
         let mut payload = Vec::new();
-        payload.extend_from_slice(asset_id.as_slice());
-        payload.extend_from_slice(&price.to_be_bytes::<32>());
-        payload.extend_from_slice(&timestamp.to_be_bytes());
-        payload.extend_from_slice(&[num_sources]);
-        payload.extend_from_slice(sources_hash.as_slice());
+        payload.extend_from_slice(asset_id.as_slice());             // bytes32 → 32 bytes
+        payload.extend_from_slice(&price.to_be_bytes::<32>());       // uint256 → 32 bytes
+        payload.extend_from_slice(&U256::from(timestamp).to_be_bytes::<32>()); // uint256 → 32 bytes
+        payload.extend_from_slice(&[num_sources]);                   // uint8   → 1 byte
+        payload.extend_from_slice(sources_hash.as_slice());          // bytes32 → 32 bytes
 
         let message_hash = Keccak256::digest(&payload);
 
