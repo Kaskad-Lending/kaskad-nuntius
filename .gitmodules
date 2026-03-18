@@ -1,0 +1,3 @@
+[submodule "contracts/lib/nitro-prover"]
+	path = contracts/lib/nitro-prover
+	url = https://github.com/marlinprotocol/NitroProver.git
