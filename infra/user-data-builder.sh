@@ -25,11 +25,11 @@ echo "Building commit: $COMMIT"
 dnf install -y docker git aws-nitro-enclaves-cli
 systemctl start docker
 
-# ─── Clone & checkout ────────────────────────────────
-rm -rf /tmp/build
-git clone https://github.com/${github_org}/${github_repo}.git /tmp/build
-cd /tmp/build
-git checkout $COMMIT
+# ─── Pull source from S3 ─────────────────────────────
+rm -rf /tmp/build && mkdir -p /tmp/build
+aws s3 cp s3://${eif_bucket}/builds/$COMMIT/source.zip /tmp/source.zip
+unzip -q /tmp/source.zip -d /tmp/build/
+cd /tmp/build/
 
 # ─── Docker build ────────────────────────────────────
 echo "Building Docker image..."

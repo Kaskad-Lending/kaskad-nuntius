@@ -27,6 +27,8 @@ resource "aws_instance" "builder" {
     github_repo = var.github_repo
   }))
 
+  user_data_replace_on_change = true
+
   tags = {
     Name        = "${var.project_name}-builder"
     BuildCommit = "none" # Updated by CI before starting
