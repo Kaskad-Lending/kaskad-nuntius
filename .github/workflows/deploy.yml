@@ -47,9 +47,11 @@ jobs:
       - name: Wait for build to complete
         run: |
           echo "Waiting for build on ${{ env.BUILDER_INSTANCE_ID }}..."
-          # Wait until the instance stops itself after the build
+          # First wait for instance to be running to avoid 'pending' failure in stopped waiter
+          aws ec2 wait instance-running --instance-ids ${{ env.BUILDER_INSTANCE_ID }}
+          # Now wait until the instance stops itself after the build
           aws ec2 wait instance-stopped --instance-ids ${{ env.BUILDER_INSTANCE_ID }}
-        timeout-minutes: 20
+        timeout-minutes: 30
 
       - name: Trigger production refresh
         run: |
