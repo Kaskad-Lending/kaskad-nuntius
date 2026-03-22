@@ -92,22 +92,28 @@ jobs:
             --query "Command.CommandId" --output text)
           
           echo "SSM Command ID: $CMD_ID"
-          aws ssm wait command-executed --command-id "$CMD_ID" --instance-id ${{ steps.builder.outputs.instance_id }}
           
-          # Check command result
-          STATUS=$(aws ssm get-command-invocation \
-            --command-id "$CMD_ID" \
-            --instance-id ${{ steps.builder.outputs.instance_id }} \
-            --query "Status" --output text)
-          
-          if [ "$STATUS" != "Success" ]; then
-            echo "SSM command failed with status: $STATUS"
-            aws ssm get-command-invocation \
+          # Custom waiter loop (aws ssm wait has a short default timeout)
+          while true; do
+            # Wait for command to finish
+            STATUS=$(aws ssm get-command-invocation \
               --command-id "$CMD_ID" \
               --instance-id ${{ steps.builder.outputs.instance_id }} \
-              --query "StandardErrorContent" --output text
-            exit 1
-          fi
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            
+            echo "Build Status: $STATUS"
+            if [ "$STATUS" == "Success" ]; then
+              break
+            elif [[ "$STATUS" == "Failed" || "$STATUS" == "Cancelled" || "$STATUS" == "TimedOut" ]]; then
+              echo "SSM command failed with status: $STATUS"
+              aws ssm get-command-invocation \
+                --command-id "$CMD_ID" \
+                --instance-id ${{ steps.builder.outputs.instance_id }} \
+                --query "{Out:StandardOutputContent,Err:StandardErrorContent}" --output json
+              exit 1
+            fi
+            sleep 30
+          done
         timeout-minutes: 25
 
       - name: Stop builder instance

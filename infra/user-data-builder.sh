@@ -22,7 +22,12 @@ fi
 echo "Building commit: $COMMIT"
 
 # ─── Install dependencies ────────────────────────────
-dnf install -y docker git aws-nitro-enclaves-cli
+dnf install -y aws-nitro-enclaves-cli git
+
+# Fix for AL2023: nitro-cli 1.4.4 expects blobs in /usr/share/nitro_enclaves/blobs/ 
+# but they are installed in /usr/share/nitro_enclaves/blobs/x86_64/
+ln -sf /usr/share/nitro_enclaves/blobs/x86_64/cmdline /usr/share/nitro_enclaves/blobs/cmdline
+ln -sf /usr/share/nitro_enclaves/blobs/x86_64/linux.bin /usr/share/nitro_enclaves/blobs/linux.bin
 systemctl start docker
 
 # ─── Pull source from S3 ─────────────────────────────

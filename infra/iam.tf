@@ -176,10 +176,11 @@ resource "aws_iam_role_policy" "github_ci" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "StartBuilder"
+        Sid    = "BuilderLifecycle"
         Effect = "Allow"
         Action = [
           "ec2:StartInstances",
+          "ec2:StopInstances",
           "ec2:CreateTags"
         ]
         Resource = ["*"]
@@ -188,6 +189,18 @@ resource "aws_iam_role_policy" "github_ci" {
             "ec2:ResourceTag/Name" = "${var.project_name}-builder"
           }
         }
+      },
+      {
+        Sid    = "BuilderSSM"
+        Effect = "Allow"
+        Action = [
+          "ssm:SendCommand",
+          "ssm:GetCommandInvocation",
+          "ssm:ListCommands",
+          "ssm:ListCommandInvocations",
+          "ssm:DescribeInstanceInformation"
+        ]
+        Resource = ["*"]
       },
       {
         Sid    = "DescribeInstances"
