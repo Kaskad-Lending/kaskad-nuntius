@@ -35,14 +35,22 @@ jobs:
           role-to-assume: ${{ env.OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Get builder instance ID
+      - name: Start builder instance
         id: builder
         run: |
-          ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=${{ env.BUILDER_NAME }}" "Name=instance-state-name,Values=running,stopped,pending,stopping" \
-            --query 'Reservations[].Instances[0].InstanceId' \
-            --output text)
-          echo "instance_id=$ID" >> $GITHUB_OUTPUT
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=${{ env.BUILDER_NAME }}" "Name=instance-state-name,Values=running,stopped,stopping,pending" --query "Reservations[].Instances[0].InstanceId" --output text)
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          
+          STATE=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[].Instances[0].State.Name" --output text)
+          echo "Current state: $STATE"
+          
+          if [ "$STATE" == "stopping" ]; then
+            echo "Instance is stopping, waiting for it to stop..."
+            aws ec2 wait instance-stopped --instance-ids $INSTANCE_ID
+          fi
+          
+          aws ec2 start-instances --instance-ids $INSTANCE_ID
+          aws ec2 wait instance-running --instance-ids $INSTANCE_ID
 
       - name: Zip source and upload to S3
         run: |
