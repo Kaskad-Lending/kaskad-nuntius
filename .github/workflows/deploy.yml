@@ -20,6 +20,7 @@ env:
   BUILDER_NAME: kaskad-oracle-builder
   OIDC_ROLE_ARN: arn:aws:iam::095931689333:role/kaskad-oracle-github-ci
   PROD_ASG_NAME: kaskad-oracle-prod-asg
+  EIF_BUCKET: kaskad-oracle-eif
 
 jobs:
   deploy:
@@ -43,29 +44,76 @@ jobs:
             --output text)
           echo "instance_id=$ID" >> $GITHUB_OUTPUT
 
-      - name: Tag builder with commit
-        run: |
-          aws ec2 create-tags \
-            --resources ${{ steps.builder.outputs.instance_id }} \
-            --tags Key=BuildCommit,Value=${{ github.sha }}
-
       - name: Zip source and upload to S3
         run: |
           zip -r source.zip . -x "*.git*" "target/*" "infra/.terraform/*"
-          aws s3 cp source.zip s3://kaskad-oracle-eif/builds/${{ github.sha }}/source.zip
+          aws s3 cp source.zip s3://${{ env.EIF_BUCKET }}/builds/${{ github.sha }}/source.zip
 
       - name: Start builder instance
         run: |
           aws ec2 start-instances --instance-ids ${{ steps.builder.outputs.instance_id }}
-
-      - name: Wait for build to complete
-        run: |
-          echo "Waiting for build on ${{ steps.builder.outputs.instance_id }}..."
-          # First wait for instance to be running to avoid 'pending' failure in stopped waiter
           aws ec2 wait instance-running --instance-ids ${{ steps.builder.outputs.instance_id }}
-          # Now wait until the instance stops itself after the build
-          aws ec2 wait instance-stopped --instance-ids ${{ steps.builder.outputs.instance_id }}
-        timeout-minutes: 30
+
+      - name: Wait for SSM agent
+        run: |
+          echo "Waiting for SSM agent to be online..."
+          for i in {1..30}; do
+            STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=${{ steps.builder.outputs.instance_id }}" \
+              --query "InstanceInformationList[0].PingStatus" --output text)
+            if [ "$STATUS" == "Online" ]; then
+              echo "SSM agent is online!"
+              exit 0
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 10
+          done
+          echo "SSM agent timeout"
+          exit 1
+
+      - name: Run build via SSM
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids ${{ steps.builder.outputs.instance_id }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "export COMMIT=${{ github.sha }}",
+              "export eif_bucket=${{ env.EIF_BUCKET }}",
+              "export aws_region=${{ env.AWS_REGION }}",
+              "rm -rf /tmp/build && mkdir -p /tmp/build",
+              "aws s3 cp s3://$eif_bucket/builds/$COMMIT/source.zip /tmp/source.zip",
+              "unzip -q /tmp/source.zip -d /tmp/build/",
+              "cd /tmp/build/",
+              "docker build -t kaskad-oracle:latest .",
+              "nitro-cli build-enclave --docker-uri kaskad-oracle:latest --output-file /tmp/oracle.eif > /tmp/build-output.json",
+              "aws s3 cp /tmp/oracle.eif s3://$eif_bucket/latest.eif",
+              "aws s3 cp /tmp/build-output.json s3://$eif_bucket/pcr0.json"
+            ]' \
+            --query "Command.CommandId" --output text)
+          
+          echo "SSM Command ID: $CMD_ID"
+          aws ssm wait command-executed --command-id "$CMD_ID" --instance-id ${{ steps.builder.outputs.instance_id }}
+          
+          # Check command result
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id ${{ steps.builder.outputs.instance_id }} \
+            --query "Status" --output text)
+          
+          if [ "$STATUS" != "Success" ]; then
+            echo "SSM command failed with status: $STATUS"
+            aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id ${{ steps.builder.outputs.instance_id }} \
+              --query "StandardErrorContent" --output text
+            exit 1
+          fi
+        timeout-minutes: 25
+
+      - name: Stop builder instance
+        if: always()
+        run: |
+          aws ec2 stop-instances --instance-ids ${{ steps.builder.outputs.instance_id }}
 
       - name: Trigger production refresh
         run: |

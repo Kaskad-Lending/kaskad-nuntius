@@ -102,24 +102,41 @@ resource "aws_security_group" "builder" {
 
 # ─── VPC Endpoints (SSM for debugging without SSH) ────────────
 
-resource "aws_vpc_endpoint" "ssm" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ssm"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.public.id]
-  security_group_ids  = [aws_security_group.prod.id]
-  private_dns_enabled = true
+resource "aws_security_group" "vpc_endpoints" {
+  name        = "${var.project_name}-vpce-sg"
+  description = "Security group for VPC Endpoints"
+  vpc_id      = aws_vpc.main.id
 
-  tags = { Name = "${var.project_name}-ssm-endpoint" }
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.main.cidr_block]
+  }
+
+  tags = {
+    Name = "${var.project_name}-vpce-sg"
+  }
+}
+
+resource "aws_vpc_endpoint" "ssm" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.aws_region}.ssm"
+  vpc_endpoint_type = "Interface"
+  subnet_ids        = [aws_subnet.public.id]
+
+  security_group_ids = [aws_security_group.vpc_endpoints.id]
+
+  private_dns_enabled = true
 }
 
 resource "aws_vpc_endpoint" "ssm_messages" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ssmmessages"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.public.id]
-  security_group_ids  = [aws_security_group.prod.id]
-  private_dns_enabled = true
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.aws_region}.ssmmessages"
+  vpc_endpoint_type = "Interface"
+  subnet_ids        = [aws_subnet.public.id]
 
-  tags = { Name = "${var.project_name}-ssm-messages-endpoint" }
+  security_group_ids = [aws_security_group.vpc_endpoints.id]
+
+  private_dns_enabled = true
 }

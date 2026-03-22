@@ -85,6 +85,11 @@ resource "aws_iam_role" "builder" {
   })
 }
 
+resource "aws_iam_role_policy_attachment" "builder_ssm" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  role       = aws_iam_role.builder.name
+}
+
 resource "aws_iam_role_policy" "builder" {
   name = "${var.project_name}-builder-policy"
   role = aws_iam_role.builder.id
@@ -93,10 +98,18 @@ resource "aws_iam_role_policy" "builder" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "WriteEIF"
+        Sid    = "S3Access"
         Effect = "Allow"
-        Action = ["s3:PutObject"]
-        Resource = ["${aws_s3_bucket.eif.arn}/*"]
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:PutObjectTagging"
+        ]
+        Resource = [
+          aws_s3_bucket.eif.arn,
+          "${aws_s3_bucket.eif.arn}/*"
+        ]
       },
       {
         Sid    = "SelfStop"
@@ -187,9 +200,12 @@ resource "aws_iam_role_policy" "github_ci" {
         Resource = ["*"]
       },
       {
-        Sid    = "ReadBuildArtifacts"
+        Sid    = "ReadWriteBuildArtifacts"
         Effect = "Allow"
-        Action = ["s3:GetObject"]
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject"
+        ]
         Resource = ["${aws_s3_bucket.eif.arn}/*"]
       },
       {
