@@ -77,11 +77,13 @@ jobs:
             --instance-ids ${{ steps.builder.outputs.instance_id }} \
             --document-name "AWS-RunShellScript" \
             --parameters 'commands=[
+              "set -e",
               "export COMMIT=${{ github.sha }}",
               "export eif_bucket=${{ env.EIF_BUCKET }}",
               "export aws_region=${{ env.AWS_REGION }}",
               "sudo dnf install -y aws-nitro-enclaves-cli awscli docker git",
               "sudo systemctl start docker",
+              "sudo mkdir -p /usr/share/nitro_enclaves/blobs",
               "sudo ln -sf /usr/share/nitro_enclaves/blobs/x86_64/cmdline /usr/share/nitro_enclaves/blobs/cmdline",
               "sudo ln -sf /usr/share/nitro_enclaves/blobs/x86_64/linux.bin /usr/share/nitro_enclaves/blobs/linux.bin",
               "rm -rf /tmp/build && mkdir -p /tmp/build",
