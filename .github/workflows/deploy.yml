@@ -1,0 +1,59 @@
+name: Production Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'Cargo.*'
+      - 'Dockerfile'
+      - 'enclave/**'
+      - 'infra/user-data-builder.sh'
+  workflow_dispatch:
+
+permissions:
+  id-token: write # Required for OIDC
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  BUILDER_INSTANCE_ID: i-03e99f1243a1cc39c
+  OIDC_ROLE_ARN: arn:aws:iam::095931689333:role/kaskad-oracle-github-ci
+  PROD_ASG_NAME: kaskad-oracle-prod-asg
+
+jobs:
+  deploy:
+    name: Build & Deploy EIF
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Tag builder with commit
+        run: |
+          aws ec2 create-tags \
+            --resources ${{ env.BUILDER_INSTANCE_ID }} \
+            --tags Key=BuildCommit,Value=${{ github.sha }}
+
+      - name: Start builder instance
+        run: |
+          aws ec2 start-instances --instance-ids ${{ env.BUILDER_INSTANCE_ID }}
+
+      - name: Wait for build to complete
+        run: |
+          echo "Waiting for build on ${{ env.BUILDER_INSTANCE_ID }}..."
+          # Wait until the instance stops itself after the build
+          aws ec2 wait instance-stopped --instance-ids ${{ env.BUILDER_INSTANCE_ID }}
+        timeout-minutes: 20
+
+      - name: Trigger production refresh
+        run: |
+          aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name ${{ env.PROD_ASG_NAME }} \
+            --preferences '{"MinHealthyPercentage": 0}' 
+          echo "Production ASG refresh started."
