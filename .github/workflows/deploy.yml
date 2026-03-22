@@ -57,11 +57,6 @@ jobs:
           zip -r source.zip . -x "*.git*" "target/*" "infra/.terraform/*"
           aws s3 cp source.zip s3://${{ env.EIF_BUCKET }}/builds/${{ github.sha }}/source.zip
 
-      - name: Start builder instance
-        run: |
-          aws ec2 start-instances --instance-ids ${{ steps.builder.outputs.instance_id }}
-          aws ec2 wait instance-running --instance-ids ${{ steps.builder.outputs.instance_id }}
-
       - name: Wait for SSM agent
         run: |
           echo "Waiting for SSM agent to be online..."
