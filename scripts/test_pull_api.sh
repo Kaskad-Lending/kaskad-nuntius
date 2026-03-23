@@ -31,18 +31,28 @@ fi
 echo ""
 
 echo "▸ Starting Anvil..."
-anvil --port ${ANVIL_PORT} --silent &
+anvil --port ${ANVIL_PORT} --gas-limit 3000000000 --code-size-limit 1000000 --block-time 1 --silent &
 ANVIL_PID=$!
 trap "kill $ANVIL_PID 2>/dev/null || true" EXIT
 sleep 2
 
 echo "▸ Deploying contracts..."
 cd ${CONTRACTS_DIR}
-DEPLOY_OUTPUT=$(ORACLE_SIGNER=${SIGNER_ADDR} forge script script/Deploy.s.sol --rpc-url ${RPC_URL} --broadcast --private-key ${DEPLOYER_KEY} 2>/dev/null)
-ORACLE_ADDR=$(echo "$DEPLOY_OUTPUT" | grep "KaskadPriceOracle deployed at:" | awk '{print $NF}')
+
+if [ -n "$ATTESTATION_HEX" ] && [ "$ATTESTATION_HEX" != "null" ]; then
+    echo "  (Using REAL AWS Nitro Attestation Verifier)"
+    export ATTESTATION_DOC="0x${ATTESTATION_HEX}"
+    yes | forge script script/DeployReal.s.sol --rpc-url ${RPC_URL} --broadcast --private-key ${DEPLOYER_KEY} | tee deploy.log
+else
+    echo "  (Using Mock Verifier)"
+    ORACLE_SIGNER=${SIGNER_ADDR} forge script script/Deploy.s.sol --rpc-url ${RPC_URL} --broadcast --private-key ${DEPLOYER_KEY} | tee deploy.log
+fi
+
+ORACLE_ADDR=$(cat deploy.log | grep "KaskadPriceOracle deployed at:" | awk '{print $NF}')
 
 if [ -z "$ORACLE_ADDR" ]; then
     echo "  ✗ Failed to find deployed Oracle address"
+    cat deploy.log
     exit 1
 fi
 echo "  ✓ Oracle at: ${ORACLE_ADDR}"
