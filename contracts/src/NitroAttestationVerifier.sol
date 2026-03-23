@@ -34,10 +34,10 @@ contract NitroAttestationVerifier is IAttestationVerifier {
     ///         PCR0 = enclave image measurement.
     bytes public pcrFlags;
 
-    /// @param _certManager Address of deployed CertManager contract
+    /// @param _nitroProver Address of deployed NitroProver contract
     /// @param _maxAge Maximum acceptable attestation age in seconds (e.g. 300 = 5 min)
-    constructor(address _certManager, uint256 _maxAge) {
-        nitroProver = new NitroProver(CertManager(_certManager));
+    constructor(address _nitroProver, uint256 _maxAge) {
+        nitroProver = NitroProver(_nitroProver);
         maxAttestationAge = _maxAge;
 
         // We only validate PCR0 (bit 0 set = 0x00000001).

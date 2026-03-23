@@ -7,19 +7,26 @@ import "../src/KaskadAggregatorV3.sol";
 import "../src/NitroAttestationVerifier.sol";
 import "nitro-prover/CertManager.sol";
 
+import {NitroProver} from "nitro-prover/NitroProver.sol";
+
 contract DeployReal is Script {
     function run() external {
+        uint256 deployerKey = vm.envUint("DEPLOYER_KEY");
         bytes memory attestationDoc = vm.envBytes("ATTESTATION_DOC");
 
-        vm.startBroadcast();
+        vm.startBroadcast(deployerKey);
 
-        // 1. Deploy CertManager
+        // Deploy CertManager
         CertManager certManager = new CertManager();
+        certManager.initialize();
         console.log("CertManager deployed at:", address(certManager));
 
-        // 2. Deploy NitroAttestationVerifier
-        uint256 maxAge = 365 days; // Relaxed maxAge for testing
-        NitroAttestationVerifier verifier = new NitroAttestationVerifier(address(certManager), maxAge);
+        NitroProver prover = new NitroProver(certManager);
+        console.log("NitroProver deployed at:", address(prover));
+
+        // Deploy NitroAttestationVerifier
+        uint256 maxAge = 365 days; // 1 year for tests
+        NitroAttestationVerifier verifier = new NitroAttestationVerifier(address(prover), maxAge);
         console.log("NitroAttestationVerifier deployed at:", address(verifier));
 
         // Extract real pcr0 and signer from the doc by doing a view call
