@@ -45,9 +45,16 @@ struct PriceResponse {
     signer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     num_assets: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attestation_doc: Option<String>,
 }
 
-pub async fn run_price_server(port: u32, store: PriceStore, signer_address: String) -> Result<()> {
+pub async fn run_price_server(
+    port: u32,
+    store: PriceStore,
+    signer_address: String,
+    attestation_doc_bytes: Option<Vec<u8>>,
+) -> Result<()> {
     info!(port = port, "Starting VSOCK price server");
 
     let listener = create_listener(port)?;
@@ -57,9 +64,10 @@ pub async fn run_price_server(port: u32, store: PriceStore, signer_address: Stri
         let (stream, _addr) = accept_connection(&listener)?;
         let store = store.clone();
         let signer = signer_address.clone();
+        let attestation = attestation_doc_bytes.clone();
 
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = handle_connection(stream, &store, &signer) {
+            if let Err(e) = handle_connection(stream, &store, &signer, &attestation) {
                 warn!(error = %e, "price server connection error");
             }
         });
@@ -70,6 +78,7 @@ fn handle_connection(
     mut stream: std::net::TcpStream,
     store: &PriceStore,
     signer_address: &str,
+    attestation_doc: &Option<Vec<u8>>,
 ) -> Result<()> {
     use std::io::{Read, Write};
 
@@ -86,7 +95,7 @@ fn handle_connection(
     stream.read_exact(&mut req_buf)?;
 
     let request: PriceRequest = serde_json::from_slice(&req_buf)?;
-    let response = process_request(&request, store, signer_address);
+    let response = process_request(&request, store, signer_address, attestation_doc);
 
     // Write response
     let resp_bytes = serde_json::to_vec(&response)?;
@@ -101,6 +110,7 @@ fn process_request(
     request: &PriceRequest,
     store: &PriceStore,
     signer_address: &str,
+    attestation_doc: &Option<Vec<u8>>,
 ) -> PriceResponse {
     match request.method.as_str() {
         "get_prices" => {
@@ -113,6 +123,7 @@ fn process_request(
                 status: None,
                 signer: Some(signer_address.to_string()),
                 num_assets: Some(store.len()),
+                attestation_doc: None,
             }
         }
         "get_price" => {
@@ -126,6 +137,7 @@ fn process_request(
                         status: None,
                         signer: None,
                         num_assets: None,
+                        attestation_doc: None,
                     }
                 }
             };
@@ -138,6 +150,7 @@ fn process_request(
                     status: None,
                     signer: Some(signer_address.to_string()),
                     num_assets: None,
+                    attestation_doc: None,
                 },
                 None => PriceResponse {
                     prices: None,
@@ -146,7 +159,19 @@ fn process_request(
                     status: None,
                     signer: None,
                     num_assets: None,
+                    attestation_doc: None,
                 },
+            }
+        }
+        "get_attestation" => {
+            PriceResponse {
+                prices: None,
+                price: None,
+                error: if attestation_doc.is_none() { Some("Attestation document missing".into()) } else { None },
+                status: None,
+                signer: Some(signer_address.to_string()),
+                num_assets: None,
+                attestation_doc: attestation_doc.as_ref().map(|doc| hex::encode(doc)), // encode bytes as hex string
             }
         }
         "health" => {
@@ -158,6 +183,7 @@ fn process_request(
                 status: Some("ok".to_string()),
                 signer: Some(signer_address.to_string()),
                 num_assets: Some(store.len()),
+                attestation_doc: None,
             }
         }
         _ => PriceResponse {
@@ -167,6 +193,7 @@ fn process_request(
             status: None,
             signer: None,
             num_assets: None,
+            attestation_doc: None,
         },
     }
 }

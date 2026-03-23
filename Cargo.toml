@@ -43,6 +43,8 @@ rand = "0.8"
 # VSOCK support (Linux only, for Nitro Enclave)
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+aws-nitro-enclaves-nsm-api = "0.4"
+
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -18,6 +18,18 @@ if [ -z "$SIGNER_ADDR" ] || [ "$SIGNER_ADDR" == "null" ]; then
 fi
 echo "  ✓ Signer: $SIGNER_ADDR"
 
+echo "▸ Fetching Attestation Document from ALB..."
+ATTESTATION_HEX=$(curl -s $ALB_URL/attestation | jq -r '.attestation_doc')
+
+if [ -z "$ATTESTATION_HEX" ] || [ "$ATTESTATION_HEX" == "null" ]; then
+    echo "  ⚠ Failed to get attestation doc (Enclave might be running in Mock mode locally)"
+else
+    DOC_LEN=$((${#ATTESTATION_HEX} / 2))
+    echo "  ✓ Real AWS Nitro Attestation doc downloaded: $DOC_LEN bytes"
+    echo "  (Locally bypassing actual AWS Root CA on-chain check using MockVerifier)"
+fi
+echo ""
+
 echo "▸ Starting Anvil..."
 anvil --port ${ANVIL_PORT} --silent &
 ANVIL_PID=$!

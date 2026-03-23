@@ -155,11 +155,16 @@ class PullAPIHandler(BaseHTTPRequestHandler):
             status = 200 if result.get("status") == "ok" else 503
             self.send_json(status, result)
 
+        elif path == "/attestation":
+            result = query_enclave("get_attestation")
+            status = 200 if result.get("attestation_doc") else 404
+            self.send_json(status, result)
+
         elif path == "/" or path == "":
             self.send_json(200, {
                 "service": "Kaskad TEE Oracle",
                 "version": "0.1.0",
-                "endpoints": ["/prices", "/prices/{SYMBOL}", "/health"],
+                "endpoints": ["/prices", "/prices/{SYMBOL}", "/health", "/attestation"],
                 "docs": "Query signed price data from Nitro Enclave",
             })
 

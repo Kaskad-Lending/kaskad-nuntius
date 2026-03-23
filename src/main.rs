@@ -71,16 +71,31 @@ async fn main() -> Result<()> {
     info!("🚀 Kaskad TEE Oracle starting...");
 
     // Init signer
-    let signer = match std::env::var("ORACLE_PRIVATE_KEY") {
-        Ok(key) => {
-            info!("Using private key from ORACLE_PRIVATE_KEY env");
-            MockSigner::new(&key)?
+    let enclave_mode = std::env::var("ENCLAVE_MODE").is_ok();
+    
+    let signer: Box<dyn OracleSigner> = if enclave_mode {
+        #[cfg(target_os = "linux")]
+        {
+            info!("Running in ENCLAVE mode — Initializing EnclaveSigner via NSM");
+            Box::new(signer::EnclaveSigner::new().expect("Failed to init EnclaveSigner"))
         }
-        Err(_) => {
-            info!("No ORACLE_PRIVATE_KEY found, generating random key for testing");
-            MockSigner::random()
+        #[cfg(not(target_os = "linux"))]
+        {
+            panic!("Enclave mode requested but target is not Linux/Nitro compatible");
+        }
+    } else {
+        match std::env::var("ORACLE_PRIVATE_KEY") {
+            Ok(key) => {
+                info!("Using private key from ORACLE_PRIVATE_KEY env");
+                Box::new(MockSigner::new(&key)?)
+            }
+            Err(_) => {
+                info!("No ORACLE_PRIVATE_KEY found, generating random key for testing");
+                Box::new(MockSigner::random())
+            }
         }
     };
+    
     let signer_address = format!("0x{}", hex::encode(signer.address()));
     info!(address = %signer_address, "Oracle signer initialized");
 
@@ -95,8 +110,9 @@ async fn main() -> Result<()> {
 
     let server_store = price_store.clone();
     let server_signer_address = signer_address.clone();
+    let attestation_doc = signer.attestation_doc();
     tokio::spawn(async move {
-        if let Err(e) = price_server::run_price_server(vsock_port, server_store, server_signer_address).await {
+        if let Err(e) = price_server::run_price_server(vsock_port, server_store, server_signer_address, attestation_doc).await {
             error!(error = %e, "Price server failed");
         }
     });
