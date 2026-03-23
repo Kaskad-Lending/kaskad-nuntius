@@ -90,9 +90,10 @@ jobs:
               "aws s3 cp s3://$eif_bucket/builds/$COMMIT/source.zip /tmp/source.zip",
               "unzip -q /tmp/source.zip -d /tmp/build/",
               "cd /tmp/build && sudo docker build -t kaskad-oracle:latest .",
-              "sudo nitro-cli build-enclave --docker-uri kaskad-oracle:latest --output-file /tmp/oracle.eif > /tmp/build-output.json",
-              "aws s3 cp /tmp/oracle.eif s3://$eif_bucket/latest.eif",
-              "aws s3 cp /tmp/build-output.json s3://$eif_bucket/pcr0.json"
+              "sudo nitro-cli build-enclave --docker-uri kaskad-oracle:latest --output-file /tmp/oracle.eif",
+              "sudo chown $(whoami):$(whoami) /tmp/oracle.eif",
+              "ls -la /tmp/oracle.eif",
+              "aws s3 cp /tmp/oracle.eif s3://$eif_bucket/latest.eif"
             ]' \
             --query "Command.CommandId" --output text)
           
