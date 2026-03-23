@@ -245,7 +245,18 @@ fn create_listener(port: u32) -> Result<std::net::TcpListener> {
 
 #[cfg(target_os = "linux")]
 fn accept_connection(listener: &std::net::TcpListener) -> Result<(std::net::TcpStream, ())> {
-    let (stream, _) = listener.accept()?;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    
+    let fd = listener.as_raw_fd();
+    let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
+    let mut len: libc::socklen_t = std::mem::size_of::<libc::sockaddr>() as libc::socklen_t;
+    
+    let client_fd = unsafe { libc::accept(fd, &mut addr as *mut _, &mut len) };
+    if client_fd < 0 {
+        return Err(eyre::eyre!("libc::accept failed on VSOCK"));
+    }
+    
+    let stream = unsafe { std::net::TcpStream::from_raw_fd(client_fd) };
     Ok((stream, ()))
 }
 
