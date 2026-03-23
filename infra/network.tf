@@ -42,10 +42,17 @@ resource "aws_route_table_association" "public" {
 
 resource "aws_security_group" "prod" {
   name_prefix = "${var.project_name}-prod-"
-  description = "Prod oracle: NO inbound, HTTPS outbound only"
+  description = "Prod oracle: ALB inbound on 8080, HTTPS outbound"
   vpc_id      = aws_vpc.main.id
 
-  # NO ingress rules — zero inbound ports, no SSH
+  # Allow ALB → instance on port 8080
+  ingress {
+    description     = "Pull API from ALB"
+    from_port       = 8080
+    to_port         = 8080
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
 
   egress {
     description = "HTTPS (RPC, APIs)"

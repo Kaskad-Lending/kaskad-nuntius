@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{B256, FixedBytes};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// A single price observation from a data source.
 #[derive(Debug, Clone)]
@@ -10,6 +10,20 @@ pub struct PricePoint {
     pub volume: f64,
     pub timestamp: u64,
     pub source: String,
+}
+
+/// A signed price update ready for external consumption (pull API).
+#[derive(Debug, Clone, Serialize)]
+pub struct SignedPriceUpdate {
+    pub asset_id: String,
+    pub asset_symbol: String,
+    pub price: String,
+    pub price_human: String,
+    pub timestamp: u64,
+    pub num_sources: u8,
+    pub sources_hash: String,
+    pub signature: String,
+    pub signer: String,
 }
 
 /// Supported assets.

@@ -2,24 +2,28 @@ mod types;
 mod sources;
 mod aggregator;
 mod signer;
-mod publisher;
-mod vsock_client;
+mod price_server;
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use eyre::Result;
 use tracing::{info, warn, error};
 
-use types::{Asset, PricePoint, now_secs};
+use types::{Asset, PricePoint, SignedPriceUpdate, now_secs};
 use sources::PriceSource;
 use signer::{OracleSigner, MockSigner};
 
 const ORACLE_DECIMALS: u8 = 8;
 const FETCH_INTERVAL_SECS: u64 = 30;
 
-/// Tracks the last pushed price and timestamp per asset.
+/// Shared state: latest signed prices, accessible by the VSOCK server.
+pub type PriceStore = Arc<RwLock<HashMap<String, SignedPriceUpdate>>>;
+
+/// Tracks the last pushed price and timestamp per asset (for deviation/heartbeat logic).
 struct OracleState {
-    last_prices: HashMap<Asset, (f64, u64)>, // (price, timestamp)
+    last_prices: HashMap<Asset, (f64, u64)>,
 }
 
 impl OracleState {
@@ -29,24 +33,18 @@ impl OracleState {
         }
     }
 
-    /// Returns true if we should push a new price update.
     fn should_update(&self, asset: Asset, new_price: f64) -> bool {
         match self.last_prices.get(&asset) {
-            None => true, // First update
+            None => true,
             Some((last_price, last_ts)) => {
                 let now = now_secs();
-
-                // Heartbeat check
                 if now - last_ts >= asset.heartbeat_seconds() {
                     return true;
                 }
-
-                // Deviation check
                 let deviation_bps = ((new_price - last_price) / last_price * 10000.0).abs() as u16;
                 if deviation_bps >= asset.deviation_threshold_bps() {
                     return true;
                 }
-
                 false
             }
         }
@@ -59,7 +57,6 @@ impl OracleState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Init logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -67,7 +64,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Load config
     let _ = dotenvy::dotenv();
 
     info!("🚀 Kaskad TEE Oracle starting...");
@@ -83,10 +79,25 @@ async fn main() -> Result<()> {
             MockSigner::random()
         }
     };
-    info!(
-        address = format!("0x{}", hex::encode(signer.address())),
-        "Oracle signer initialized"
-    );
+    let signer_address = format!("0x{}", hex::encode(signer.address()));
+    info!(address = %signer_address, "Oracle signer initialized");
+
+    // Shared price store
+    let price_store: PriceStore = Arc::new(RwLock::new(HashMap::new()));
+
+    // Start VSOCK price server (pull API)
+    let vsock_port: u32 = std::env::var("VSOCK_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5001);
+
+    let server_store = price_store.clone();
+    let server_signer_address = signer_address.clone();
+    tokio::spawn(async move {
+        if let Err(e) = price_server::run_price_server(vsock_port, server_store, server_signer_address).await {
+            error!(error = %e, "Price server failed");
+        }
+    });
 
     // Init HTTP client
     let client = reqwest::Client::builder()
@@ -94,41 +105,11 @@ async fn main() -> Result<()> {
         .user_agent("KaskadOracle/0.1")
         .build()?;
 
-    // Init publisher (optional — if env vars set, push on-chain; otherwise log-only)
-    let maybe_publisher = match (
-        std::env::var("RPC_URL"),
-        std::env::var("ORACLE_CONTRACT"),
-        std::env::var("TX_SIGNER_KEY"),
-    ) {
-        (Ok(rpc), Ok(contract), Ok(tx_key)) => {
-            let chain_id: u64 = std::env::var("CHAIN_ID")
-                .unwrap_or_else(|_| "31337".into())
-                .parse()
-                .unwrap_or(31337);
-
-            let contract_addr: alloy_primitives::Address = contract.parse()
-                .map_err(|e| eyre::eyre!("invalid ORACLE_CONTRACT: {}", e))?;
-
-            info!(
-                rpc_url = %rpc,
-                contract = %contract_addr,
-                chain_id = chain_id,
-                "Publisher initialized — prices will be pushed on-chain"
-            );
-
-            Some(publisher::Publisher::new(rpc, contract_addr, tx_key, chain_id))
-        }
-        _ => {
-            warn!("Missing RPC_URL/ORACLE_CONTRACT/TX_SIGNER_KEY — running in log-only mode (no on-chain publishing)");
-            None
-        }
-    };
-
-    // Init sources (9 total: 5 major CEX + 3 additional for KAS + governance for IGRA)
+    // Init sources
     let igra_price = std::env::var("IGRA_PRICE")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.10); // default: $0.10 presale price
+        .unwrap_or(0.10);
 
     let price_sources: Vec<Box<dyn PriceSource>> = vec![
         Box::new(sources::binance::Binance::new(client.clone())),
@@ -144,7 +125,6 @@ async fn main() -> Result<()> {
 
     info!(igra_price = igra_price, "IGRA governance price set");
 
-    // Assets to track
     let assets = vec![
         Asset::EthUsd,
         Asset::BtcUsd,
@@ -153,9 +133,7 @@ async fn main() -> Result<()> {
         Asset::IgraUsd,
     ];
 
-    // Single-run mode: run once and exit (for testing)
     let single_run = std::env::var("SINGLE_RUN").is_ok();
-
     let mut state = OracleState::new();
 
     info!(
@@ -164,7 +142,7 @@ async fn main() -> Result<()> {
         "Starting oracle loop"
     );
 
-    // Main oracle loop
+    // Main oracle loop: fetch → aggregate → sign → store
     loop {
         for &asset in &assets {
             // 1. Fetch from all sources
@@ -201,7 +179,7 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // 4. Check if we should push
+            // 4. Check if we should update
             if !state.should_update(asset, median) {
                 info!(
                     asset = asset.symbol(),
@@ -233,34 +211,27 @@ async fn main() -> Result<()> {
                 "✅ signed price update"
             );
 
-            // 7. Push to chain (if publisher available)
-            if let Some(ref pub_) = maybe_publisher {
-                match pub_.submit_price(
-                    asset.id(),
-                    price_fixed,
-                    timestamp,
-                    prices.len() as u8,
-                    sources_hash,
-                    signature,
-                ).await {
-                    Ok(tx_hash) => {
-                        info!(
-                            asset = asset.symbol(),
-                            tx_hash = %tx_hash,
-                            "📤 submitted to chain"
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            asset = asset.symbol(),
-                            error = %e,
-                            "❌ failed to submit to chain"
-                        );
-                    }
-                }
+            // 7. Store signed update (instead of pushing on-chain)
+            let update = SignedPriceUpdate {
+                asset_id: format!("0x{}", hex::encode(asset.id().as_slice())),
+                asset_symbol: asset.symbol().to_string(),
+                price: format!("{}", price_fixed),
+                price_human: format!("{:.8}", median),
+                timestamp,
+                num_sources: prices.len() as u8,
+                sources_hash: format!("0x{}", hex::encode(sources_hash.as_slice())),
+                signature: format!("0x{}", hex::encode(&signature)),
+                signer: signer_address.clone(),
+            };
+
+            {
+                let mut store = price_store.write().await;
+                store.insert(asset.symbol().to_string(), update);
             }
 
-            // 8. Record update
+            info!(asset = asset.symbol(), "📦 stored signed update for pull API");
+
+            // 8. Record update locally
             state.record_update(asset, median);
         }
 
@@ -278,4 +249,3 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-

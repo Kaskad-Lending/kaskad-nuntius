@@ -32,6 +32,7 @@ resource "aws_launch_template" "prod" {
     enclave_cpu_count   = var.enclave_cpu_count
     enclave_memory_mib  = var.enclave_memory_mib
     vsock_proxy_script  = file("${path.module}/../enclave/vsock_proxy.py")
+    pull_api_script     = file("${path.module}/../enclave/pull_api.py")
   }))
 
   tag_specifications {
