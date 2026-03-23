@@ -157,6 +157,9 @@ contract KaskadPriceOracle {
             revert StalePrice(timestamp, current.timestamp);
         }
 
+        // Prevent Chronos-DoS (future timestamp lockout via host OS clock manipulation)
+        require(timestamp <= block.timestamp + 1 hours, "Future timestamp exceeds tolerance");
+
         // Rate limiter: prevent spam updates
         if (current.timestamp > 0 && timestamp - current.timestamp < MIN_UPDATE_DELAY) {
             revert UpdateTooFrequent(timestamp - current.timestamp, MIN_UPDATE_DELAY);

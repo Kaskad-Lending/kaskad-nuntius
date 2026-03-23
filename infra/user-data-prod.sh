@@ -8,7 +8,7 @@ echo "Instance ID: $(ec2-metadata -i | cut -d' ' -f2)"
 echo "Timestamp: $(date -u)"
 
 # ─── Install dependencies ────────────────────────────
-dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker python3 amazon-cloudwatch-agent
+dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker python3 amazon-cloudwatch-agent socat tinyproxy
 
 # ─── Configure enclave allocator ─────────────────────
 cat > /etc/nitro_enclaves/allocator.yaml << EOF
@@ -66,19 +66,28 @@ aws s3 cp s3://${eif_bucket}/pcr0.json /opt/kaskad/pcr0.json || true
 
 echo "EIF downloaded: $(ls -lh /opt/kaskad/oracle.eif)"
 
-# ─── Create VSOCK proxy (outbound: enclave → internet) ───
-cat > /opt/kaskad/vsock_proxy.py << 'PROXY'
-${vsock_proxy_script}
-PROXY
+# ─── Create VSOCK proxy (outbound: enclave TCP → SOCKS5) ───
+cat > /etc/tinyproxy/tinyproxy.conf << 'TINYPROXY'
+User tinyproxy
+Group tinyproxy
+Port 8888
+Timeout 600
+LogLevel Info
+MaxClients 100
+Allow 127.0.0.1
+ConnectPort 443
+TINYPROXY
+
+systemctl enable --now tinyproxy
 
 cat > /etc/systemd/system/kaskad-vsock-proxy.service << 'SVC'
 [Unit]
-Description=Kaskad VSOCK Proxy (outbound)
-After=network.target
+Description=Kaskad VSOCK to Tinyproxy Bridge (outbound)
+After=network.target tinyproxy.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/kaskad/vsock_proxy.py
+ExecStart=/usr/bin/socat VSOCK-LISTEN:5000,fork,reuseaddr TCP:127.0.0.1:8888
 Restart=always
 RestartSec=5
 StandardOutput=file:/var/log/kaskad-vsock-proxy.log

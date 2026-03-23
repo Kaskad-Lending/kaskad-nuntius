@@ -4,7 +4,6 @@ mod aggregator;
 mod signer;
 mod price_server;
 mod http_client;
-pub mod vsock_client;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -169,8 +168,12 @@ async fn main() -> Result<()> {
             // 1. Fetch from all sources
             let mut prices = sources::fetch_all(&price_sources, asset).await;
 
-            if prices.is_empty() {
-                warn!(asset = asset.symbol(), "no prices fetched, skipping");
+            if prices.len() < 5 {
+                warn!(
+                    asset = asset.symbol(),
+                    num_sources = prices.len(),
+                    "Data Quorum (5) not met. Skipping update to prevent Liquidity Eclipse."
+                );
                 continue;
             }
 
