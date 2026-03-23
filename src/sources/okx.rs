@@ -6,11 +6,11 @@ use crate::types::{Asset, PricePoint, now_secs};
 use super::PriceSource;
 
 pub struct Okx {
-    client: reqwest::Client,
+    client: crate::http_client::HttpClient,
 }
 
 impl Okx {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: crate::http_client::HttpClient) -> Self {
         Self { client }
     }
 
@@ -49,7 +49,7 @@ impl PriceSource for Okx {
             "https://www.okx.com/api/v5/market/ticker?instId={}",
             inst_id
         );
-        let resp: OkxResponse = self.client.get(&url).send().await?.json().await?;
+        let resp: OkxResponse = self.client.get_json(&url).await?;
         let ticker = resp
             .data
             .first()

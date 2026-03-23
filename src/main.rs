@@ -3,6 +3,8 @@ mod sources;
 mod aggregator;
 mod signer;
 mod price_server;
+mod http_client;
+pub mod vsock_client;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -99,11 +101,14 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Init HTTP client
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .user_agent("KaskadOracle/0.1")
-        .build()?;
+    // Init HTTP client — auto-detect enclave mode
+    let enclave_mode = std::env::var("ENCLAVE_MODE").is_ok();
+    if enclave_mode {
+        info!("Running in ENCLAVE mode — HTTP routed through VSOCK proxy");
+    } else {
+        info!("Running in HOST mode — HTTP via direct connection");
+    }
+    let client = http_client::HttpClient::new(enclave_mode);
 
     // Init sources
     let igra_price = std::env::var("IGRA_PRICE")

@@ -6,11 +6,11 @@ use crate::types::{Asset, PricePoint, now_secs};
 use super::PriceSource;
 
 pub struct GateIo {
-    client: reqwest::Client,
+    client: crate::http_client::HttpClient,
 }
 
 impl GateIo {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: crate::http_client::HttpClient) -> Self {
         Self { client }
     }
 
@@ -45,7 +45,7 @@ impl PriceSource for GateIo {
             "https://api.gateio.ws/api/v4/spot/tickers?currency_pair={}",
             pair
         );
-        let resp: GateIoResponse = self.client.get(&url).send().await?.json().await?;
+        let resp: GateIoResponse = self.client.get_json(&url).await?;
         let ticker = resp
             .first()
             .ok_or_else(|| eyre::eyre!("no ticker data from Gate.io"))?;

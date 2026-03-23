@@ -6,11 +6,11 @@ use crate::types::{Asset, PricePoint, now_secs};
 use super::PriceSource;
 
 pub struct Kucoin {
-    client: reqwest::Client,
+    client: crate::http_client::HttpClient,
 }
 
 impl Kucoin {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: crate::http_client::HttpClient) -> Self {
         Self { client }
     }
 
@@ -48,7 +48,7 @@ impl PriceSource for Kucoin {
             "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={}",
             symbol
         );
-        let resp: KucoinResponse = self.client.get(&url).send().await?.json().await?;
+        let resp: KucoinResponse = self.client.get_json(&url).await?;
         let price: f64 = resp.data.price.parse()?;
         let volume: f64 = resp.data.vol.parse().unwrap_or(0.0);
 

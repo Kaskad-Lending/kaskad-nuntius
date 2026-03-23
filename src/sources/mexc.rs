@@ -6,11 +6,11 @@ use crate::types::{Asset, PricePoint, now_secs};
 use super::PriceSource;
 
 pub struct Mexc {
-    client: reqwest::Client,
+    client: crate::http_client::HttpClient,
 }
 
 impl Mexc {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: crate::http_client::HttpClient) -> Self {
         Self { client }
     }
 
@@ -42,7 +42,7 @@ impl PriceSource for Mexc {
             "https://api.mexc.com/api/v3/ticker/price?symbol={}",
             symbol
         );
-        let resp: MexcTicker = self.client.get(&url).send().await?.json().await?;
+        let resp: MexcTicker = self.client.get_json(&url).await?;
         let price: f64 = resp.price.parse()?;
 
         Ok(Some(PricePoint {

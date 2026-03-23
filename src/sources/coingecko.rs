@@ -7,11 +7,11 @@ use crate::types::{Asset, PricePoint, now_secs};
 use super::PriceSource;
 
 pub struct CoinGecko {
-    client: reqwest::Client,
+    client: crate::http_client::HttpClient,
 }
 
 impl CoinGecko {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: crate::http_client::HttpClient) -> Self {
         Self { client }
     }
 
@@ -41,7 +41,7 @@ impl PriceSource for CoinGecko {
             "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd",
             coin_id
         );
-        let resp: CoinGeckoResponse = self.client.get(&url).send().await?.json().await?;
+        let resp: CoinGeckoResponse = self.client.get_json(&url).await?;
 
         let price = resp
             .get(coin_id)

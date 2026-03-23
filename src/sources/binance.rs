@@ -6,11 +6,11 @@ use crate::types::{Asset, PricePoint, now_secs};
 use super::PriceSource;
 
 pub struct Binance {
-    client: reqwest::Client,
+    client: crate::http_client::HttpClient,
 }
 
 impl Binance {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: crate::http_client::HttpClient) -> Self {
         Self { client }
     }
 
@@ -43,7 +43,7 @@ impl PriceSource for Binance {
             "https://api.binance.com/api/v3/ticker/price?symbol={}",
             symbol
         );
-        let resp: BinanceTicker = self.client.get(&url).send().await?.json().await?;
+        let resp: BinanceTicker = self.client.get_json(&url).await?;
         let price: f64 = resp.price.parse()?;
 
         Ok(Some(PricePoint {

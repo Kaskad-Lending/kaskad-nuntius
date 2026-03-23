@@ -6,11 +6,11 @@ use crate::types::{Asset, PricePoint, now_secs};
 use super::PriceSource;
 
 pub struct Bybit {
-    client: reqwest::Client,
+    client: crate::http_client::HttpClient,
 }
 
 impl Bybit {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: crate::http_client::HttpClient) -> Self {
         Self { client }
     }
 
@@ -53,7 +53,7 @@ impl PriceSource for Bybit {
             "https://api.bybit.com/v5/market/tickers?category=spot&symbol={}",
             symbol
         );
-        let resp: BybitResponse = self.client.get(&url).send().await?.json().await?;
+        let resp: BybitResponse = self.client.get_json(&url).await?;
         let ticker = resp
             .result
             .list

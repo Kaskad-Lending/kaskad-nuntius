@@ -26,5 +26,6 @@ COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/kaskad-oracl
 # Environment variables are injected at EIF build time or via VSOCK.
 
 ENV RUST_LOG=info
+ENV ENCLAVE_MODE=1
 
 ENTRYPOINT ["/usr/local/bin/kaskad-oracle"]

@@ -6,11 +6,11 @@ use crate::types::{Asset, PricePoint, now_secs};
 use super::PriceSource;
 
 pub struct Coinbase {
-    client: reqwest::Client,
+    client: crate::http_client::HttpClient,
 }
 
 impl Coinbase {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: crate::http_client::HttpClient) -> Self {
         Self { client }
     }
 
@@ -42,7 +42,7 @@ impl PriceSource for Coinbase {
         };
 
         let url = format!("https://api.coinbase.com/v2/prices/{}/spot", pair);
-        let resp: CoinbaseResponse = self.client.get(&url).send().await?.json().await?;
+        let resp: CoinbaseResponse = self.client.get_json(&url).await?;
         let price: f64 = resp.data.amount.parse()?;
 
         Ok(Some(PricePoint {
