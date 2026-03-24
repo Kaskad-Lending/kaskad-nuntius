@@ -8,7 +8,8 @@ echo "Instance ID: $(ec2-metadata -i | cut -d' ' -f2)"
 echo "Timestamp: $(date -u)"
 
 # ─── Install dependencies ────────────────────────────
-dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker python3 amazon-cloudwatch-agent socat tinyproxy
+dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker python3 amazon-cloudwatch-agent
+dnf install -y socat || echo "WARN: socat not in dnf, will install from source if needed"
 
 # ─── Configure enclave allocator ─────────────────────
 cat > /etc/nitro_enclaves/allocator.yaml << EOF
@@ -66,24 +67,107 @@ aws s3 cp s3://${eif_bucket}/pcr0.json /opt/kaskad/pcr0.json || true
 
 echo "EIF downloaded: $(ls -lh /opt/kaskad/oracle.eif)"
 
-# ─── Create VSOCK proxy (outbound: enclave TCP → SOCKS5) ───
-cat > /etc/tinyproxy/tinyproxy.conf << 'TINYPROXY'
-User tinyproxy
-Group tinyproxy
-Port 8888
-Timeout 600
-LogLevel Info
-MaxClients 100
-Allow 127.0.0.1
-ConnectPort 443
-TINYPROXY
+# ─── Create HTTP CONNECT proxy (Python, stdlib only) ───
+cat > /opt/kaskad/http_connect_proxy.py << 'CONNECTPROXY'
+"""Minimal HTTP CONNECT proxy using only Python stdlib.
+Listens on 127.0.0.1:8888.  The enclave's socat bridges VSOCK:5000 → this.
+reqwest inside the enclave does HTTP CONNECT through this to reach exchanges via TLS.
+"""
+import socket, threading, select, sys
 
-systemctl enable --now tinyproxy
+LISTEN_ADDR = ("127.0.0.1", 8888)
 
+def relay(src, dst):
+    try:
+        while True:
+            data = src.recv(65536)
+            if not data:
+                break
+            dst.sendall(data)
+    except Exception:
+        pass
+    finally:
+        try: src.close()
+        except: pass
+        try: dst.close()
+        except: pass
+
+def handle_client(client_sock):
+    try:
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = client_sock.recv(4096)
+            if not chunk:
+                client_sock.close()
+                return
+            data += chunk
+
+        first_line = data.split(b"\r\n")[0].decode()
+        parts = first_line.split()
+        if len(parts) < 3 or parts[0] != "CONNECT":
+            client_sock.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+            client_sock.close()
+            return
+
+        host_port = parts[1]
+        if ":" in host_port:
+            host, port = host_port.rsplit(":", 1)
+            port = int(port)
+        else:
+            host, port = host_port, 443
+
+        remote = socket.create_connection((host, port), timeout=10)
+        client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+
+        t1 = threading.Thread(target=relay, args=(client_sock, remote), daemon=True)
+        t2 = threading.Thread(target=relay, args=(remote, client_sock), daemon=True)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+    except Exception as e:
+        print(f"[connect-proxy] error: {e}", file=sys.stderr)
+        try: client_sock.close()
+        except: pass
+
+def main():
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(LISTEN_ADDR)
+    srv.listen(128)
+    print(f"[connect-proxy] Listening on {LISTEN_ADDR}", flush=True)
+    while True:
+        client, addr = srv.accept()
+        threading.Thread(target=handle_client, args=(client,), daemon=True).start()
+
+if __name__ == "__main__":
+    main()
+CONNECTPROXY
+
+cat > /etc/systemd/system/kaskad-connect-proxy.service << 'SVC'
+[Unit]
+Description=Kaskad HTTP CONNECT Proxy (stdlib Python)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/kaskad/http_connect_proxy.py
+Restart=always
+RestartSec=5
+StandardOutput=file:/var/log/kaskad-vsock-proxy.log
+StandardError=file:/var/log/kaskad-vsock-proxy.log
+
+[Install]
+WantedBy=multi-user.target
+SVC
+
+systemctl enable --now kaskad-connect-proxy.service
+
+# ─── VSOCK-to-TCP bridge: enclave VSOCK:5000 → local TCP:8888 ───
 cat > /etc/systemd/system/kaskad-vsock-proxy.service << 'SVC'
 [Unit]
-Description=Kaskad VSOCK to Tinyproxy Bridge (outbound)
-After=network.target tinyproxy.service
+Description=Kaskad VSOCK to HTTP CONNECT Bridge (outbound)
+After=network.target kaskad-connect-proxy.service
 
 [Service]
 Type=simple
