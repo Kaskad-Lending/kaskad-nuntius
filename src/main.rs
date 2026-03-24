@@ -176,11 +176,11 @@ async fn main() -> Result<()> {
             // 1. Fetch from all sources
             let mut prices = sources::fetch_all(&price_sources, asset).await;
 
-            if prices.len() < 5 {
+            if prices.len() < 3 {
                 warn!(
                     asset = asset.symbol(),
                     num_sources = prices.len(),
-                    "Data Quorum (5) not met. Skipping update to prevent Liquidity Eclipse."
+                    "Data Quorum (3) not met. Skipping update to prevent Liquidity Eclipse."
                 );
                 continue;
             }
