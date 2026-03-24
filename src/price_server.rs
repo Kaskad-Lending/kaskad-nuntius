@@ -11,11 +11,10 @@
 ///   {"method": "get_prices"}                     → all prices
 ///   {"method": "get_price", "asset": "ETH/USD"}  → single asset
 ///   {"method": "health"}                         → server status
-
 use crate::PriceStore;
 use eyre::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::io::FromRawFd;
@@ -167,7 +166,11 @@ fn process_request(
             PriceResponse {
                 prices: None,
                 price: None,
-                error: if attestation_doc.is_none() { Some("Attestation document missing".into()) } else { None },
+                error: if attestation_doc.is_none() {
+                    Some("Attestation document missing".into())
+                } else {
+                    None
+                },
                 status: None,
                 signer: Some(signer_address.to_string()),
                 num_assets: None,
@@ -273,16 +276,16 @@ fn create_listener(port: u32) -> Result<std::net::TcpListener> {
 #[cfg(target_os = "linux")]
 fn accept_connection(listener: &std::net::TcpListener) -> Result<(std::net::TcpStream, ())> {
     use std::os::unix::io::{AsRawFd, FromRawFd};
-    
+
     let fd = listener.as_raw_fd();
     let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
     let mut len: libc::socklen_t = std::mem::size_of::<libc::sockaddr>() as libc::socklen_t;
-    
+
     let client_fd = unsafe { libc::accept(fd, &mut addr as *mut _, &mut len) };
     if client_fd < 0 {
         return Err(eyre::eyre!("libc::accept failed on VSOCK"));
     }
-    
+
     let stream = unsafe { std::net::TcpStream::from_raw_fd(client_fd) };
     Ok((stream, ()))
 }

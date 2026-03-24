@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use eyre::Result;
 use serde::Deserialize;
 
-use crate::types::{Asset, PricePoint, now_secs};
 use super::PriceSource;
+use crate::types::{now_secs, Asset, PricePoint};
 
 pub struct Mexc {
     client: crate::http_client::HttpClient,
@@ -38,10 +38,7 @@ impl PriceSource for Mexc {
             None => return Ok(None),
         };
 
-        let url = format!(
-            "https://api.mexc.com/api/v3/ticker/price?symbol={}",
-            symbol
-        );
+        let url = format!("https://api.mexc.com/api/v3/ticker/price?symbol={}", symbol);
         let resp: MexcTicker = self.client.get_json(&url).await?;
         let price: f64 = resp.price.parse()?;
 

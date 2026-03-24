@@ -1,20 +1,20 @@
-mod types;
-mod sources;
 mod aggregator;
-mod signer;
-mod price_server;
 mod http_client;
+mod price_server;
+mod signer;
+mod sources;
+mod types;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use eyre::Result;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
-use types::{Asset, PricePoint, SignedPriceUpdate, now_secs};
+use signer::{MockSigner, OracleSigner};
 use sources::PriceSource;
-use signer::{OracleSigner, MockSigner};
+use types::{now_secs, Asset, PricePoint, SignedPriceUpdate};
 
 const ORACLE_DECIMALS: u8 = 8;
 const FETCH_INTERVAL_SECS: u64 = 30;
@@ -60,8 +60,7 @@ impl OracleState {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -71,7 +70,7 @@ async fn main() -> Result<()> {
 
     // Init signer
     let enclave_mode = std::env::var("ENCLAVE_MODE").is_ok();
-    
+
     let signer: Box<dyn OracleSigner> = if enclave_mode {
         #[cfg(target_os = "linux")]
         {
@@ -94,7 +93,7 @@ async fn main() -> Result<()> {
             }
         }
     };
-    
+
     let signer_address = format!("0x{}", hex::encode(signer.address()));
     info!(address = %signer_address, "Oracle signer initialized");
 
@@ -111,7 +110,14 @@ async fn main() -> Result<()> {
     let server_signer_address = signer_address.clone();
     let attestation_doc = signer.attestation_doc();
     tokio::spawn(async move {
-        if let Err(e) = price_server::run_price_server(vsock_port, server_store, server_signer_address, attestation_doc).await {
+        if let Err(e) = price_server::run_price_server(
+            vsock_port,
+            server_store,
+            server_signer_address,
+            attestation_doc,
+        )
+        .await
+        {
             error!(error = %e, "Price server failed");
         }
     });
@@ -261,7 +267,10 @@ async fn main() -> Result<()> {
                 store.insert(asset.symbol().to_string(), update);
             }
 
-            info!(asset = asset.symbol(), "📦 stored signed update for pull API");
+            info!(
+                asset = asset.symbol(),
+                "📦 stored signed update for pull API"
+            );
 
             // 8. Record update locally
             state.record_update(asset, median);
@@ -272,10 +281,7 @@ async fn main() -> Result<()> {
             break;
         }
 
-        info!(
-            "💤 sleeping {} seconds...",
-            FETCH_INTERVAL_SECS
-        );
+        info!("💤 sleeping {} seconds...", FETCH_INTERVAL_SECS);
         tokio::time::sleep(std::time::Duration::from_secs(FETCH_INTERVAL_SECS)).await;
     }
 
@@ -286,7 +292,11 @@ async fn main() -> Result<()> {
 /// and forwards each TCP connection to the Host OS via AF_VSOCK (CID {remote_cid}, port {remote_port}).
 /// This allows `reqwest` to use a local HTTP proxy that transparently tunnels through VSOCK.
 #[cfg(target_os = "linux")]
-async fn run_vsock_tcp_bridge(local_port: u16, remote_cid: u32, remote_port: u32) -> eyre::Result<()> {
+async fn run_vsock_tcp_bridge(
+    local_port: u16,
+    remote_cid: u32,
+    remote_port: u32,
+) -> eyre::Result<()> {
     use std::os::unix::io::FromRawFd;
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", local_port)).await?;
@@ -349,7 +359,11 @@ async fn bridge_connection(
 
         if ret < 0 {
             unsafe { libc::close(fd) };
-            return Err(eyre::eyre!("VSOCK connect to CID {} port {} failed", remote_cid, remote_port));
+            return Err(eyre::eyre!(
+                "VSOCK connect to CID {} port {} failed",
+                remote_cid,
+                remote_port
+            ));
         }
 
         Ok(unsafe { std::net::TcpStream::from_raw_fd(fd) })

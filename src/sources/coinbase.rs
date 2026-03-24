@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use eyre::Result;
 use serde::Deserialize;
 
-use crate::types::{Asset, PricePoint, now_secs};
 use super::PriceSource;
+use crate::types::{now_secs, Asset, PricePoint};
 
 pub struct Coinbase {
     client: crate::http_client::HttpClient,

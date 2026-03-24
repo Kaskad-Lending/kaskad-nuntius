@@ -1,6 +1,6 @@
 use alloy_primitives::{B256, U256};
 use eyre::Result;
-use k256::ecdsa::{SigningKey, Signature, signature::Signer as K256Signer};
+use k256::ecdsa::{signature::Signer as K256Signer, Signature, SigningKey};
 use sha3::{Digest, Keccak256};
 
 /// Trait for signing oracle payloads.
@@ -80,11 +80,11 @@ impl OracleSigner for MockSigner {
         //   keccak256(abi.encodePacked(assetId, price, timestamp, numSources, sourcesHash))
         // IMPORTANT: timestamp is uint256 in Solidity → 32 bytes, NOT u64 (8 bytes)
         let mut payload = Vec::new();
-        payload.extend_from_slice(asset_id.as_slice());             // bytes32 → 32 bytes
-        payload.extend_from_slice(&price.to_be_bytes::<32>());       // uint256 → 32 bytes
+        payload.extend_from_slice(asset_id.as_slice()); // bytes32 → 32 bytes
+        payload.extend_from_slice(&price.to_be_bytes::<32>()); // uint256 → 32 bytes
         payload.extend_from_slice(&U256::from(timestamp).to_be_bytes::<32>()); // uint256 → 32 bytes
-        payload.extend_from_slice(&[num_sources]);                   // uint8   → 1 byte
-        payload.extend_from_slice(sources_hash.as_slice());          // bytes32 → 32 bytes
+        payload.extend_from_slice(&[num_sources]); // uint8   → 1 byte
+        payload.extend_from_slice(sources_hash.as_slice()); // bytes32 → 32 bytes
 
         let message_hash = Keccak256::digest(&payload);
 
@@ -136,11 +136,11 @@ impl EnclaveSigner {
         // 2. Generate random ECDSA secp256k1 keypair
         let signing_key = SigningKey::random(&mut rand::thread_rng());
         let verifying_key = signing_key.verifying_key();
-        
+
         // Output uncompressed public key (65 bytes): 0x04 + X + Y
         let pubkey_bytes = verifying_key.to_encoded_point(false);
         let pubkey_slice = pubkey_bytes.as_bytes();
-        
+
         let pubkey_uncompressed = &pubkey_slice[1..];
         let hash = Keccak256::digest(pubkey_uncompressed);
         let mut address = [0u8; 20];

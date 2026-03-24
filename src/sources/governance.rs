@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use eyre::Result;
 
-use crate::types::{Asset, PricePoint, now_secs};
 use super::PriceSource;
+use crate::types::{now_secs, Asset, PricePoint};
 
 /// Governance-set price source for IGRA (presale token).
 ///

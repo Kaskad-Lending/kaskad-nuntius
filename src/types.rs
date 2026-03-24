@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alloy_primitives::{B256, FixedBytes};
+use alloy_primitives::{FixedBytes, B256};
 use serde::{Deserialize, Serialize};
 
 /// A single price observation from a data source.
@@ -58,20 +58,20 @@ impl Asset {
     /// Deviation threshold in basis points before pushing on-chain.
     pub fn deviation_threshold_bps(&self) -> u16 {
         match self {
-            Asset::EthUsd | Asset::BtcUsd => 50,   // 0.5%
-            Asset::KasUsd => 200,                    // 2% (exotic, volatile)
-            Asset::UsdcUsd => 10,                    // 0.1% (stablecoin)
-            Asset::IgraUsd => 0,                     // governance-set, always push
+            Asset::EthUsd | Asset::BtcUsd => 50, // 0.5%
+            Asset::KasUsd => 200,                // 2% (exotic, volatile)
+            Asset::UsdcUsd => 10,                // 0.1% (stablecoin)
+            Asset::IgraUsd => 0,                 // governance-set, always push
         }
     }
 
     /// Heartbeat interval in seconds (max time between updates).
     pub fn heartbeat_seconds(&self) -> u64 {
         match self {
-            Asset::EthUsd | Asset::BtcUsd => 3600,  // 1 hour
-            Asset::KasUsd => 1800,                    // 30 min
-            Asset::UsdcUsd => 86400,                  // 24 hours
-            Asset::IgraUsd => 86400,                  // 24 hours
+            Asset::EthUsd | Asset::BtcUsd => 3600, // 1 hour
+            Asset::KasUsd => 1800,                 // 30 min
+            Asset::UsdcUsd => 86400,               // 24 hours
+            Asset::IgraUsd => 86400,               // 24 hours
         }
     }
 }

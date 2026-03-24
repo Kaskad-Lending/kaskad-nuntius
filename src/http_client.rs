@@ -2,10 +2,9 @@
 ///
 /// Outside enclave: uses reqwest (direct HTTPS).
 /// Inside enclave: routes reqwest traffic through a local `socat` TCP socket (port 5000),
-/// which tunnels via VSOCK to the Untrusted Host OS, which then forwards the encrypted 
-/// TLS stream via an HTTP CONNECT proxy. 
+/// which tunnels via VSOCK to the Untrusted Host OS, which then forwards the encrypted
+/// TLS stream via an HTTP CONNECT proxy.
 /// Native TLS termination happens explicitly *inside* the enclave boundary!
-
 use eyre::Result;
 
 /// HTTP client that works both inside and outside the enclave.
@@ -36,14 +35,19 @@ impl HttpClient {
     /// Perform an HTTPS GET request using native TLS.
     pub async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let resp = self.reqwest_client.get(url).send().await?;
-        
+
         let status = resp.status();
         let body = resp.text().await?;
-        
+
         if !status.is_success() {
-            return Err(eyre::eyre!("HTTP {} from {}: {}", status, url, &body[..body.len().min(200)]));
+            return Err(eyre::eyre!(
+                "HTTP {} from {}: {}",
+                status,
+                url,
+                &body[..body.len().min(200)]
+            ));
         }
-        
+
         let parsed: T = serde_json::from_str(&body)?;
         Ok(parsed)
     }

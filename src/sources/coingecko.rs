@@ -3,8 +3,8 @@ use eyre::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use crate::types::{Asset, PricePoint, now_secs};
 use super::PriceSource;
+use crate::types::{now_secs, Asset, PricePoint};
 
 pub struct CoinGecko {
     client: crate::http_client::HttpClient,
