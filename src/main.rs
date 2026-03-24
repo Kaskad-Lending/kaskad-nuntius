@@ -116,10 +116,18 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Init HTTP client — auto-detect enclave mode
+    // Start VSOCK→TCP bridge for outbound HTTP proxy (enclave mode only)
     let enclave_mode = std::env::var("ENCLAVE_MODE").is_ok();
     if enclave_mode {
-        info!("Running in ENCLAVE mode — HTTP routed through VSOCK proxy");
+        info!("Running in ENCLAVE mode — starting VSOCK→TCP bridge on 127.0.0.1:5000");
+        #[cfg(target_os = "linux")]
+        tokio::spawn(async {
+            if let Err(e) = run_vsock_tcp_bridge(5000, 3, 5000).await {
+                error!(error = %e, "VSOCK→TCP bridge failed");
+            }
+        });
+        // Give the bridge a moment to start listening
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     } else {
         info!("Running in HOST mode — HTTP via direct connection");
     }
@@ -269,6 +277,98 @@ async fn main() -> Result<()> {
             FETCH_INTERVAL_SECS
         );
         tokio::time::sleep(std::time::Duration::from_secs(FETCH_INTERVAL_SECS)).await;
+    }
+
+    Ok(())
+}
+
+/// VSOCK→TCP bridge: listens on 127.0.0.1:{local_port} inside the enclave,
+/// and forwards each TCP connection to the Host OS via AF_VSOCK (CID {remote_cid}, port {remote_port}).
+/// This allows `reqwest` to use a local HTTP proxy that transparently tunnels through VSOCK.
+#[cfg(target_os = "linux")]
+async fn run_vsock_tcp_bridge(local_port: u16, remote_cid: u32, remote_port: u32) -> eyre::Result<()> {
+    use std::os::unix::io::FromRawFd;
+
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", local_port)).await?;
+    info!(port = local_port, "VSOCK→TCP bridge listening");
+
+    loop {
+        let (tcp_stream, _) = listener.accept().await?;
+        let cid = remote_cid;
+        let port = remote_port;
+
+        tokio::spawn(async move {
+            if let Err(e) = bridge_connection(tcp_stream, cid, port).await {
+                warn!(error = %e, "VSOCK bridge connection failed");
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn bridge_connection(
+    tcp_stream: tokio::net::TcpStream,
+    remote_cid: u32,
+    remote_port: u32,
+) -> eyre::Result<()> {
+    use std::os::unix::io::FromRawFd;
+
+    // Create VSOCK socket and connect to Remote CID
+    let vsock_stream = tokio::task::spawn_blocking(move || -> eyre::Result<std::net::TcpStream> {
+        const AF_VSOCK: i32 = 40;
+
+        let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0) };
+        if fd < 0 {
+            return Err(eyre::eyre!("failed to create VSOCK socket"));
+        }
+
+        #[repr(C)]
+        struct SockaddrVm {
+            svm_family: u16,
+            svm_reserved1: u16,
+            svm_port: u32,
+            svm_cid: u32,
+            svm_zero: [u8; 4],
+        }
+
+        let addr = SockaddrVm {
+            svm_family: AF_VSOCK as u16,
+            svm_reserved1: 0,
+            svm_port: remote_port,
+            svm_cid: remote_cid,
+            svm_zero: [0; 4],
+        };
+
+        let ret = unsafe {
+            libc::connect(
+                fd,
+                &addr as *const SockaddrVm as *const libc::sockaddr,
+                std::mem::size_of::<SockaddrVm>() as u32,
+            )
+        };
+
+        if ret < 0 {
+            unsafe { libc::close(fd) };
+            return Err(eyre::eyre!("VSOCK connect to CID {} port {} failed", remote_cid, remote_port));
+        }
+
+        Ok(unsafe { std::net::TcpStream::from_raw_fd(fd) })
+    })
+    .await??;
+
+    vsock_stream.set_nonblocking(true)?;
+    let vsock_stream = tokio::net::TcpStream::from_std(vsock_stream)?;
+
+    // Bidirectional relay
+    let (mut tcp_read, mut tcp_write) = tokio::io::split(tcp_stream);
+    let (mut vsock_read, mut vsock_write) = tokio::io::split(vsock_stream);
+
+    let t1 = tokio::io::copy(&mut tcp_read, &mut vsock_write);
+    let t2 = tokio::io::copy(&mut vsock_read, &mut tcp_write);
+
+    tokio::select! {
+        _ = t1 => {},
+        _ = t2 => {},
     }
 
     Ok(())
