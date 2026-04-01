@@ -21,7 +21,7 @@ COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/kaskad-oracl
 # VSOCK→TCP bridge that tunnels reqwest HTTP CONNECT requests to the Host OS.
 # TLS termination happens natively inside the enclave boundary.
 
-ENV RUST_LOG=info
+ENV RUST_LOG=debug
 ENV ENCLAVE_MODE=1
 
 ENTRYPOINT ["/usr/local/bin/kaskad-oracle"]
