@@ -127,13 +127,35 @@ async fn main() -> Result<()> {
     if enclave_mode {
         info!("Running in ENCLAVE mode — starting VSOCK→TCP bridge on 127.0.0.1:5000");
         #[cfg(target_os = "linux")]
-        tokio::spawn(async {
-            if let Err(e) = run_vsock_tcp_bridge(5000, 3, 5000).await {
-                error!(error = %e, "VSOCK→TCP bridge failed");
-            }
-        });
-        // Give the bridge a moment to start listening
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        {
+            // Bind TCP listener synchronously so we know it's ready before fetching prices
+            let bridge_listener = match tokio::net::TcpListener::bind("127.0.0.1:5000").await {
+                Ok(l) => {
+                    info!("VSOCK→TCP bridge bound to 127.0.0.1:5000");
+                    l
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to bind VSOCK→TCP bridge on 127.0.0.1:5000");
+                    return Err(e.into());
+                }
+            };
+            tokio::spawn(async move {
+                loop {
+                    match bridge_listener.accept().await {
+                        Ok((tcp_stream, _)) => {
+                            tokio::spawn(async move {
+                                if let Err(e) = bridge_connection(tcp_stream, 3, 5000).await {
+                                    warn!(error = %e, "VSOCK bridge connection failed");
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "VSOCK bridge accept failed");
+                        }
+                    }
+                }
+            });
+        }
     } else {
         info!("Running in HOST mode — HTTP via direct connection");
     }
