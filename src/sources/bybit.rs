@@ -37,6 +37,7 @@ struct BybitResult {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BybitTicker {
+    symbol: String,
     last_price: String,
     volume24h: String,
 }
@@ -60,6 +61,9 @@ impl PriceSource for Bybit {
             .first()
             .ok_or_else(|| eyre::eyre!("no ticker data from Bybit"))?;
 
+        if ticker.symbol != symbol {
+            return Err(eyre::eyre!("bybit symbol mismatch: expected {}, got {}", symbol, ticker.symbol));
+        }
         let price: f64 = ticker.last_price.parse()?;
         let volume: f64 = ticker.volume24h.parse().unwrap_or(0.0);
 

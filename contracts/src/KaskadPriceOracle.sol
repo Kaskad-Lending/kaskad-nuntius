@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+
 /// @title KaskadPriceOracle (Permissionless)
 /// @notice Fully permissionless price oracle. No owner, no admin.
 ///         Enclave registers itself via TEE attestation proof.
@@ -45,6 +47,13 @@ contract KaskadPriceOracle {
     /// @notice Minimum time between updates in seconds (rate limiter).
     uint256 public constant MIN_UPDATE_DELAY = 5;
 
+    /// @notice If the last update is older than this, skip the circuit breaker.
+    ///         Prevents permanent asset lockout after extended downtime.
+    uint256 public constant CIRCUIT_BREAKER_STALENESS = 4 hours;
+
+    /// @notice Maximum allowed future timestamp offset (Chronos-DoS protection).
+    uint256 public constant MAX_FUTURE_TIMESTAMP = 5 minutes;
+
     // ─── State ───────────────────────────────────────────────────────────
 
     /// @notice Currently registered enclave.
@@ -85,6 +94,8 @@ contract KaskadPriceOracle {
     error InsufficientSources();
     error PriceChangeExceedsLimit(uint256 changeBps, uint256 maxBps);
     error UpdateTooFrequent(uint256 elapsed, uint256 minDelay);
+    error FutureTimestamp(uint256 timestamp, uint256 maxAllowed);
+    error NoPriceData(bytes32 assetId);
 
     // ─── Constructor ─────────────────────────────────────────────────────
 
@@ -158,15 +169,18 @@ contract KaskadPriceOracle {
         }
 
         // Prevent Chronos-DoS (future timestamp lockout via host OS clock manipulation)
-        require(timestamp <= block.timestamp + 1 hours, "Future timestamp exceeds tolerance");
+        if (timestamp > block.timestamp + MAX_FUTURE_TIMESTAMP) {
+            revert FutureTimestamp(timestamp, block.timestamp + MAX_FUTURE_TIMESTAMP);
+        }
 
         // Rate limiter: prevent spam updates
         if (current.timestamp > 0 && timestamp - current.timestamp < MIN_UPDATE_DELAY) {
             revert UpdateTooFrequent(timestamp - current.timestamp, MIN_UPDATE_DELAY);
         }
 
-        // Circuit breaker: reject extreme price changes
-        if (current.price > 0) {
+        // Circuit breaker: reject extreme price changes.
+        // Bypassed if the last update is stale (prevents permanent asset lockout after downtime).
+        if (current.price > 0 && block.timestamp - current.timestamp < CIRCUIT_BREAKER_STALENESS) {
             uint256 changeBps;
             if (price > current.price) {
                 changeBps = ((price - current.price) * 10000) / current.price;
@@ -186,7 +200,7 @@ contract KaskadPriceOracle {
             abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash)
         );
 
-        address recovered = _recover(ethSignedHash, signature);
+        address recovered = ECDSA.recover(ethSignedHash, signature);
         if (recovered != enclave.signer) revert InvalidSignature();
 
         // Store
@@ -208,13 +222,14 @@ contract KaskadPriceOracle {
 
     // ─── Reads ───────────────────────────────────────────────────────────
 
-    /// @notice Get the latest price for an asset.
+    /// @notice Get the latest price for an asset. Reverts if no price has been set.
     function getLatestPrice(bytes32 assetId)
         external
         view
         returns (uint256 price, uint256 timestamp, uint8 numSources, uint80 roundId)
     {
         PriceData storage data = latestPrices[assetId];
+        if (data.timestamp == 0) revert NoPriceData(assetId);
         return (data.price, data.timestamp, data.numSources, data.roundId);
     }
 
@@ -233,27 +248,6 @@ contract KaskadPriceOracle {
         return enclave.signer;
     }
 
-    // ─── Internal ────────────────────────────────────────────────────────
-
-    function _recover(bytes32 hash, bytes calldata sig) internal pure returns (address) {
-        if (sig.length != 65) revert InvalidSignature();
-
-        bytes32 r;
-        bytes32 s;
-        uint8 v;
-
-        assembly {
-            r := calldataload(sig.offset)
-            s := calldataload(add(sig.offset, 32))
-            v := byte(0, calldataload(add(sig.offset, 64)))
-        }
-
-        if (v < 27) v += 27;
-
-        address recovered = ecrecover(hash, v, r, s);
-        if (recovered == address(0)) revert InvalidSignature();
-        return recovered;
-    }
 }
 
 /// @title IAttestationVerifier

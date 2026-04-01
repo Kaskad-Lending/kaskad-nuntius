@@ -147,18 +147,58 @@ This minimizes gas cost while keeping prices fresh — same model as Chainlink.
 ## Quick Start
 
 ```bash
-# Run with test key (auto-generated)
+# Run oracle with test key (auto-generated)
 cargo run
 
 # Run with specific key
 ORACLE_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 cargo run
 
 # Run tests
-cargo test
+cargo test                              # Rust unit tests
+cd contracts && forge test -vvv         # Solidity tests (45 tests incl. E2E)
+
+# Run relayer
+cd relayer && cp .env.example .env      # fill in values
+npm run dev
+
+# E2E integration test (Anvil + real CEX APIs + relayer)
+bash scripts/e2e_relayer.sh
 
 # Verbose logging
 RUST_LOG=debug cargo run
 ```
+
+## Contracts
+
+| Contract | Purpose |
+|----------|---------|
+| `KaskadPriceOracle` | Permissionless oracle. OZ ECDSA verification, circuit breaker (15% + 4h staleness bypass), rate limiter (5s), future timestamp cap (5 min) |
+| `KaskadAggregatorV3` | Chainlink `IAggregatorV3` wrapper (one per asset) |
+| `KaskadRouter` | Atomic price-update + Aave action. `borrowWithPrices`, `withdrawWithPrices`, `liquidateWithPrices`. Validates MAX_PRICE_AGE=60s |
+| `NitroAttestationVerifier` | On-chain AWS Nitro attestation verification (Marlin NitroProver) |
+
+## Relayer
+
+Permissionless TypeScript service (`relayer/`). Polls oracle pull API, verifies EIP-191 signatures locally, submits `updatePrice()` via ethers.js. Anyone can run a relayer — contract verifies only the enclave signature.
+
+Users can also push prices directly via `KaskadRouter` (pull oracle pattern) — frontend fetches signed price from enclave, bundles with Aave action in one TX.
+
+## Deployments
+
+### Galleon Testnet (Chain ID: 38836)
+
+Full addresses in [`contracts/deployments/galleon.json`](contracts/deployments/galleon.json).
+
+| Contract | Address |
+|----------|---------|
+| KaskadPriceOracle | `0x876a9d20eC033AA3b3DA43b742079eC16fB0C989` |
+| ETH/USD Aggregator | `0xee25D927c926BcA73912f0B3b88B7274Df42ffd8` |
+| BTC/USD Aggregator | `0x3A0d0e305f5cE7FE541A56f88c433DBABD2E8aB0` |
+| USDC/USD Aggregator | `0xB7836b00Cb8a452b47315D720f16fEf4f6D25Ae8` |
+| KAS/USD Aggregator | `0xc578C1E1CE67D5782e0D27C8b268bD1FBd4707f3` |
+| KaskadRouter | `0xdA23732c1Ac6Ea18EE5Bc04A629b8CD1E9fEDe9C` |
+
+Integrates with Kaskad lending protocol (`lending-onchain`). IGRA and KSKD stay on MockPriceOracle (governance/computed prices).
 
 ## Configuration
 
@@ -167,34 +207,26 @@ Environment variables (`.env` file supported):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ORACLE_PRIVATE_KEY` | random | Hex-encoded secp256k1 private key |
-| `RUST_LOG` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
-| `RPC_URL` | — | Galleon testnet RPC endpoint (planned) |
-
-## TEE Development
-
-For local testing without real TEE hardware:
-
-| Approach | Command | What it tests |
-|----------|---------|---------------|
-| **Mock signer** | `cargo run` | Full flow with local key |
-| **QEMU Nitro** | `qemu-system-x86_64 -machine nitro-enclave ...` | EIF boot, VSOCK, attestation format |
-| **Foundry/Anvil** | `forge test` / `anvil` | On-chain signature verification |
-
-The oracle uses a trait-based signer — `MockSigner` runs locally, `EnclaveSigner` (planned) reads the key from TEE key management (Nitro KMS or TDX HKDF-derived key via quex-vault pattern).
+| `ENCLAVE_MODE` | unset | Enable EnclaveSigner + VSOCK bridge |
+| `SINGLE_RUN` | unset | Exit after one oracle loop |
+| `VSOCK_PORT` | 5001 | Pull API server port |
+| `IGRA_PRICE` | 0.10 | Governance-set IGRA price |
+| `RUST_LOG` | info | Tracing filter level |
 
 ## Roadmap
 
-- [x] Multi-source price fetcher (5 CEX APIs)
+- [x] Multi-source price fetcher (8 CEX/DEX APIs)
 - [x] Weighted median aggregation + MAD outlier rejection
-- [x] EIP-191 compatible signer
+- [x] EIP-191 compatible signer (MockSigner + EnclaveSigner)
 - [x] Deviation/heartbeat update triggers
-- [ ] Smart contracts (`KaskadPriceOracle.sol`, `IAggregatorV3` wrapper)
-- [ ] On-chain publisher (Galleon testnet)
-- [ ] IGRA governance-set price module
-- [ ] Nitro Enclave build (Docker → EIF)
-- [ ] VSOCK proxy service
-- [ ] Attestation integration (on-chain enclave registration)
-- [ ] ZKP aggregation proofs (circom circuits, Phase 3)
+- [x] Smart contracts (KaskadPriceOracle, AggregatorV3, Router)
+- [x] Permissionless relayer (TypeScript)
+- [x] Pull API (VSOCK/TCP price server)
+- [x] Security audit + fixes (OZ ECDSA, circuit breaker staleness, symbol validation)
+- [x] Galleon testnet deployment
+- [x] Aave V3 integration (KaskadRouter — atomic price+action)
+- [ ] Nitro Enclave attestation on-chain (NitroAttestationVerifier deployed, needs real attestation)
+- [ ] ZKP aggregation proofs (Phase 3)
 
 ## License
 

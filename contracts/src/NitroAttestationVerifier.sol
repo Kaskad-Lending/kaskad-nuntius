@@ -23,6 +23,9 @@ import "../src/KaskadPriceOracle.sol";
 ///      e) Derives Ethereum address from enclave key
 ///   4. Returns (valid, pcr0, enclaveAddress) to the oracle contract
 contract NitroAttestationVerifier is IAttestationVerifier {
+    error InvalidPCR0Length(uint256 length);
+    error PCR0NotFound();
+    error InvalidPublicKeyLength(uint256 length);
     /// @notice Marlin NitroProver instance (handles CBOR/COSE/P384 verification).
     NitroProver public immutable nitroProver;
 
@@ -96,7 +99,7 @@ contract NitroAttestationVerifier is IAttestationVerifier {
                 bytes memory pcr0Bytes = pcrs[i][1];
                 // PCR0 is 48 bytes (SHA-384). Pack first 32 bytes into bytes32.
                 // The oracle contract will compare this with expectedPCR0.
-                require(pcr0Bytes.length == 48, "Invalid PCR0 length");
+                if (pcr0Bytes.length != 48) revert InvalidPCR0Length(pcr0Bytes.length);
                 bytes32 result;
                 assembly {
                     result := mload(add(pcr0Bytes, 32))
@@ -104,7 +107,7 @@ contract NitroAttestationVerifier is IAttestationVerifier {
                 return result;
             }
         }
-        revert("PCR0 not found");
+        revert PCR0NotFound();
     }
 
     /// @dev Derive Ethereum address from enclave public key.
@@ -123,7 +126,7 @@ contract NitroAttestationVerifier is IAttestationVerifier {
             // Already stripped prefix
             return address(uint160(uint256(keccak256(publicKey))));
         } else {
-            revert("Invalid public key length");
+            revert InvalidPublicKeyLength(publicKey.length);
         }
     }
 }

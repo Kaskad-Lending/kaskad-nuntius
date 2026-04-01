@@ -26,6 +26,7 @@ impl GateIo {
 
 #[derive(Deserialize)]
 struct GateIoTicker {
+    currency_pair: String,
     last: String,
     base_volume: String,
 }
@@ -50,6 +51,9 @@ impl PriceSource for GateIo {
             .first()
             .ok_or_else(|| eyre::eyre!("no ticker data from Gate.io"))?;
 
+        if ticker.currency_pair != pair {
+            return Err(eyre::eyre!("gateio pair mismatch: expected {}, got {}", pair, ticker.currency_pair));
+        }
         let price: f64 = ticker.last.parse()?;
         let volume: f64 = ticker.base_volume.parse().unwrap_or(0.0);
 

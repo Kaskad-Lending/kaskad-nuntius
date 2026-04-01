@@ -8,6 +8,7 @@ optimizer_runs = 1
 # NitroProver remappings (Marlin attestation verification)
 remappings = [
     "forge-std/=lib/forge-std/src/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
     "nitro-prover/=lib/nitro-prover/src/",
     "marlinprotocol/solidity-cbor/=lib/nitro-prover/lib/solidity-cbor/packages/solidity-cbor/contracts/",
     "marlinprotocol/P384/=lib/nitro-prover/lib/P384/contracts/",

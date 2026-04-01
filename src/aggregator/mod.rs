@@ -2,7 +2,8 @@ use crate::types::PricePoint;
 use alloy_primitives::U256;
 
 /// Compute the weighted median of a set of price observations.
-/// If all weights are equal (or zero), degrades to a standard median.
+/// If fewer than half of sources report volume, uses equal weighting
+/// to prevent a single volume-reporting source from dominating.
 pub fn weighted_median(prices: &[PricePoint]) -> Option<f64> {
     if prices.is_empty() {
         return None;
@@ -11,11 +12,19 @@ pub fn weighted_median(prices: &[PricePoint]) -> Option<f64> {
         return Some(prices[0].price);
     }
 
-    // Assign weights: use volume if available, else equal weight
+    // Use volume weighting only if a majority of sources report volume.
+    // Otherwise, fall back to equal weight to prevent skew.
+    let sources_with_volume = prices.iter().filter(|p| p.volume > 0.0).count();
+    let use_volume = sources_with_volume * 2 > prices.len();
+
     let mut weighted: Vec<(f64, f64)> = prices
         .iter()
         .map(|p| {
-            let weight = if p.volume > 0.0 { p.volume } else { 1.0 };
+            let weight = if use_volume && p.volume > 0.0 {
+                p.volume
+            } else {
+                1.0
+            };
             (p.price, weight)
         })
         .collect();

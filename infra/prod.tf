@@ -94,6 +94,9 @@ resource "aws_autoscaling_group" "prod" {
     }
   }
 
+  # Publish ASG metrics to CloudWatch (required for alarms)
+  enabled_metrics = ["GroupInServiceInstances", "GroupDesiredCapacity", "GroupTotalInstances"]
+
   tag {
     key                 = "Name"
     value               = "${var.project_name}-prod-asg"

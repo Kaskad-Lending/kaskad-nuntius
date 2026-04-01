@@ -31,6 +31,8 @@ struct KucoinResponse {
 
 #[derive(Deserialize)]
 struct KucoinTickerData {
+    #[serde(default)]
+    symbol: String,
     price: String,
     #[serde(default)]
     vol: String,
@@ -49,6 +51,9 @@ impl PriceSource for Kucoin {
             symbol
         );
         let resp: KucoinResponse = self.client.get_json(&url).await?;
+        if !resp.data.symbol.is_empty() && resp.data.symbol != symbol {
+            return Err(eyre::eyre!("kucoin symbol mismatch: expected {}, got {}", symbol, resp.data.symbol));
+        }
         let price: f64 = resp.data.price.parse()?;
         let volume: f64 = resp.data.vol.parse().unwrap_or(0.0);
 

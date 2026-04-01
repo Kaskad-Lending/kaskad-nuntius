@@ -205,6 +205,18 @@ fn process_request(
 
 #[cfg(target_os = "linux")]
 fn create_listener(port: u32) -> Result<std::net::TcpListener> {
+    // In enclave mode, use VSOCK. Otherwise, fall back to TCP for local development.
+    if std::env::var("ENCLAVE_MODE").is_ok() {
+        create_vsock_listener(port)
+    } else {
+        info!(port = port, "Using TCP fallback for development (no ENCLAVE_MODE)");
+        let listener = std::net::TcpListener::bind(format!("127.0.0.1:{}", port))?;
+        Ok(listener)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn create_vsock_listener(port: u32) -> Result<std::net::TcpListener> {
     use std::mem;
 
     const AF_VSOCK: i32 = 40;
@@ -214,7 +226,6 @@ fn create_listener(port: u32) -> Result<std::net::TcpListener> {
         return Err(eyre::eyre!("failed to create VSOCK socket"));
     }
 
-    // SO_REUSEADDR
     let optval: libc::c_int = 1;
     unsafe {
         libc::setsockopt(
@@ -267,30 +278,11 @@ fn create_listener(port: u32) -> Result<std::net::TcpListener> {
 
 #[cfg(not(target_os = "linux"))]
 fn create_listener(port: u32) -> Result<std::net::TcpListener> {
-    // Development fallback: TCP on localhost
     let listener = std::net::TcpListener::bind(format!("127.0.0.1:{}", port))?;
     info!(port = port, "Using TCP fallback for development");
     Ok(listener)
 }
 
-#[cfg(target_os = "linux")]
-fn accept_connection(listener: &std::net::TcpListener) -> Result<(std::net::TcpStream, ())> {
-    use std::os::unix::io::{AsRawFd, FromRawFd};
-
-    let fd = listener.as_raw_fd();
-    let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
-    let mut len: libc::socklen_t = std::mem::size_of::<libc::sockaddr>() as libc::socklen_t;
-
-    let client_fd = unsafe { libc::accept(fd, &mut addr as *mut _, &mut len) };
-    if client_fd < 0 {
-        return Err(eyre::eyre!("libc::accept failed on VSOCK"));
-    }
-
-    let stream = unsafe { std::net::TcpStream::from_raw_fd(client_fd) };
-    Ok((stream, ()))
-}
-
-#[cfg(not(target_os = "linux"))]
 fn accept_connection(listener: &std::net::TcpListener) -> Result<(std::net::TcpStream, ())> {
     let (stream, _) = listener.accept()?;
     Ok((stream, ()))

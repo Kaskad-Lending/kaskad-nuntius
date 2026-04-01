@@ -8,6 +8,7 @@ import "./KaskadPriceOracle.sol";
 /// @dev Deploy one instance per asset. Allows Aave V3 (and other protocols expecting
 ///      Chainlink-style oracles) to read Kaskad oracle prices without modifications.
 contract KaskadAggregatorV3 {
+    error RoundIdOverflow(uint256 roundId);
     KaskadPriceOracle public immutable oracle;
     bytes32 public immutable assetId;
     string public description;
@@ -84,12 +85,14 @@ contract KaskadAggregatorV3 {
 
     /// @notice Get answer by round.
     function getAnswer(uint256 _roundId) external view returns (int256) {
+        if (_roundId > type(uint80).max) revert RoundIdOverflow(_roundId);
         (uint256 price, , ) = oracle.getRoundData(assetId, uint80(_roundId));
         return int256(price);
     }
 
     /// @notice Get timestamp by round.
     function getTimestamp(uint256 _roundId) external view returns (uint256) {
+        if (_roundId > type(uint80).max) revert RoundIdOverflow(_roundId);
         (, uint256 timestamp, ) = oracle.getRoundData(assetId, uint80(_roundId));
         return timestamp;
     }

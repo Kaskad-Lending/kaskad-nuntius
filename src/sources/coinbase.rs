@@ -31,6 +31,8 @@ struct CoinbaseResponse {
 #[derive(Deserialize)]
 struct CoinbasePrice {
     amount: String,
+    base: String,
+    currency: String,
 }
 
 #[async_trait]
@@ -43,6 +45,10 @@ impl PriceSource for Coinbase {
 
         let url = format!("https://api.coinbase.com/v2/prices/{}/spot", pair);
         let resp: CoinbaseResponse = self.client.get_json(&url).await?;
+        let expected_base = pair.split('-').next().unwrap_or("");
+        if resp.data.base != expected_base {
+            return Err(eyre::eyre!("coinbase base mismatch: expected {}, got {}", expected_base, resp.data.base));
+        }
         let price: f64 = resp.data.amount.parse()?;
 
         Ok(Some(PricePoint {

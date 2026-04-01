@@ -1,0 +1,39 @@
+{
+  "chainId": 38836,
+  "network": "Galleon Testnet",
+  "rpc": "https://galleon-testnet.igralabs.com:8545",
+  "deployedAt": "2026-04-01",
+
+  "teeOracle": {
+    "KaskadPriceOracle": "0x876a9d20eC033AA3b3DA43b742079eC16fB0C989",
+    "MockAttestationVerifier": "0x70324a49CB0F5e6a5b0d1Ce41fDF926b03DD709B",
+    "enclaveSigner": "0x0edb8e42a8acdc79e5c4b4249b89e13e9a2c7d6e"
+  },
+
+  "aggregators": {
+    "ETH/USD": "0xee25D927c926BcA73912f0B3b88B7274Df42ffd8",
+    "BTC/USD": "0x3A0d0e305f5cE7FE541A56f88c433DBABD2E8aB0",
+    "USDC/USD": "0xB7836b00Cb8a452b47315D720f16fEf4f6D25Ae8",
+    "KAS/USD": "0xc578C1E1CE67D5782e0D27C8b268bD1FBd4707f3"
+  },
+
+  "router": {
+    "KaskadRouter": "0xdA23732c1Ac6Ea18EE5Bc04A629b8CD1E9fEDe9C"
+  },
+
+  "integration": {
+    "AaveOracle": "0xc1198A9d400306a0406fD3E3Ad67140b3D059f48",
+    "AavePool": "0xA1D84fc43f7F2D803a2d64dbBa4A90A9A79E3F24",
+    "PoolAddressesProvider": "0x9DB9797733FE5F734724Aa05D29Fa39563563Af5",
+    "_note": "IGRA and KSKD stay on MockPriceOracle (governance/computed)"
+  },
+
+  "tokens": {
+    "WETH": "0xB4129cEBD85bDEcdD775f539Ec8387619a0f1FAC",
+    "WBTC": "0x9dAc4c79bE2C541BE3584CE5244F3942554D6355",
+    "USDC": "0x32F59763c4b7F385DFC1DBB07742DaD4eeEccdb2",
+    "WIKAS": "0xA7CEd4eFE5C3aE0e5C26735559A77b1e38950a14",
+    "IGRA": "0x04443457b050BBaa195bb71Ef6CCDb519CcB1f0f",
+    "KSKD": "0x2d17780a59044D49FeEf0AA9cEaB1B6e3161aFf7"
+  }
+}

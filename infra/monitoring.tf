@@ -26,6 +26,7 @@ resource "aws_cloudwatch_metric_alarm" "no_instances" {
   statistic           = "Minimum"
   threshold           = 1
   alarm_description   = "No oracle instances running in ASG"
+  treat_missing_data  = "breaching"
 
   dimensions = {
     AutoScalingGroupName = aws_autoscaling_group.prod.name

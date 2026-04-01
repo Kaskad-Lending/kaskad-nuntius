@@ -44,6 +44,9 @@ impl PriceSource for Binance {
             symbol
         );
         let resp: BinanceTicker = self.client.get_json(&url).await?;
+        if resp.symbol != symbol {
+            return Err(eyre::eyre!("binance symbol mismatch: expected {}, got {}", symbol, resp.symbol));
+        }
         let price: f64 = resp.price.parse()?;
 
         Ok(Some(PricePoint {
