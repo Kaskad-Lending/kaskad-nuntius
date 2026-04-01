@@ -4,28 +4,35 @@
   "rpc": "https://galleon-testnet.igralabs.com:8545",
   "deployedAt": "2026-04-01",
 
+  "attestation": {
+    "CertManager": "0xAb46cBe48ABB2595E55B4E115BE18D7ad9981ea7",
+    "NitroProver": "0x0Ec1Ebef87F632890c735ca0809f213b1F1972b8",
+    "NitroAttestationVerifier": "0x0F43e623eEaeC60a6E835b8B9151d2A0ceD2511e"
+  },
+
   "teeOracle": {
-    "KaskadPriceOracle": "0x876a9d20eC033AA3b3DA43b742079eC16fB0C989",
-    "MockAttestationVerifier": "0x70324a49CB0F5e6a5b0d1Ce41fDF926b03DD709B",
-    "enclaveSigner": "0x0edb8e42a8acdc79e5c4b4249b89e13e9a2c7d6e"
+    "KaskadPriceOracle": "0x2DcD49ca5E7f7dfA69aBeDE85DB325dB3bA88fCe",
+    "expectedPCR0": "0xdcd349ff59b6be8cc5d62174c38127acc219ee5fcdc26335b4b2277b23836ec9",
+    "enclaveSigner": "0x6acD5d140C40e96538Ce23965fa7a420d5f851fe",
+    "_note": "Real AWS Nitro attestation — no mocks"
   },
 
   "aggregators": {
-    "ETH/USD": "0xee25D927c926BcA73912f0B3b88B7274Df42ffd8",
-    "BTC/USD": "0x3A0d0e305f5cE7FE541A56f88c433DBABD2E8aB0",
-    "USDC/USD": "0xB7836b00Cb8a452b47315D720f16fEf4f6D25Ae8",
-    "KAS/USD": "0xc578C1E1CE67D5782e0D27C8b268bD1FBd4707f3"
+    "ETH/USD": "0x0E29EfF21205c57FCD5659A027F9A703f73d3c9a",
+    "BTC/USD": "0x60dF73092839CCF1aFFa3e7C1cf5ba6c6183bbe0",
+    "USDC/USD": "0xdC5eEafbE03BAa8A17A0f511Af12fab2aC8D95dA",
+    "KAS/USD": "0x0107cb5C751c01888D224BAbcCE9A945Cd378BD3"
   },
 
   "router": {
-    "KaskadRouter": "0xdA23732c1Ac6Ea18EE5Bc04A629b8CD1E9fEDe9C"
+    "KaskadRouter": "0x371445Eb4cD1bA80D0B4076cDaD45172DE4b3E39"
   },
 
   "integration": {
     "AaveOracle": "0xc1198A9d400306a0406fD3E3Ad67140b3D059f48",
     "AavePool": "0xA1D84fc43f7F2D803a2d64dbBa4A90A9A79E3F24",
     "PoolAddressesProvider": "0x9DB9797733FE5F734724Aa05D29Fa39563563Af5",
-    "_note": "IGRA and KSKD stay on MockPriceOracle (governance/computed)"
+    "_note": "IGRA and KSKD stay on MockPriceOracle"
   },
 
   "tokens": {
