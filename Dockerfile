@@ -13,7 +13,7 @@ RUN cargo build --release --target x86_64-unknown-linux-musl
 # ── Stage 2: Minimal runtime image ───────────────────────────────────
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates iproute2
 
 COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/kaskad-oracle /usr/local/bin/kaskad-oracle
 
@@ -21,7 +21,16 @@ COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/kaskad-oracl
 # VSOCK→TCP bridge that tunnels reqwest HTTP CONNECT requests to the Host OS.
 # TLS termination happens natively inside the enclave boundary.
 
-ENV RUST_LOG=debug
+ENV RUST_LOG=info
 ENV ENCLAVE_MODE=1
 
-ENTRYPOINT ["/usr/local/bin/kaskad-oracle"]
+# Nitro Enclave boots with lo interface down. Must bring it up
+# before the oracle can bind to 127.0.0.1 (VSOCK→TCP bridge).
+COPY <<'EOF' /entrypoint.sh
+#!/bin/sh
+ip link set lo up
+exec /usr/local/bin/kaskad-oracle
+EOF
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
