@@ -37,6 +37,8 @@ struct OkxTicker {
     inst_id: String,
     last: String,
     vol24h: String,
+    /// Server timestamp in milliseconds
+    ts: String,
 }
 
 #[async_trait]
@@ -63,11 +65,14 @@ impl PriceSource for Okx {
         let price: f64 = ticker.last.parse()?;
         let volume: f64 = ticker.vol24h.parse().unwrap_or(0.0);
 
+        let server_time = ticker.ts.parse::<u64>().ok().map(|ms| ms / 1000);
+
         Ok(Some(PricePoint {
             price,
             volume,
             timestamp: now_secs(),
             source: "okx".into(),
+            server_time,
         }))
     }
 

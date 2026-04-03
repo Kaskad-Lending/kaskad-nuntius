@@ -51,9 +51,10 @@ impl PriceSource for Binance {
 
         Ok(Some(PricePoint {
             price,
-            volume: 0.0, // ticker endpoint doesn't include volume
+            volume: 0.0,
             timestamp: now_secs(),
             source: "binance".into(),
+            server_time: None, // ticker/price endpoint has no server timestamp
         }))
     }
 

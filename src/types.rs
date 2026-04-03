@@ -10,6 +10,9 @@ pub struct PricePoint {
     pub volume: f64,
     pub timestamp: u64,
     pub source: String,
+    /// Server-reported unix timestamp (seconds). Used as trusted clock source
+    /// inside the enclave since the host controls the system clock.
+    pub server_time: Option<u64>,
 }
 
 /// A signed price update ready for external consumption (pull API).

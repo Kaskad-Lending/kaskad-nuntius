@@ -27,6 +27,9 @@ impl Bybit {
 #[derive(Deserialize)]
 struct BybitResponse {
     result: BybitResult,
+    /// Server timestamp in milliseconds
+    #[serde(default)]
+    time: u64,
 }
 
 #[derive(Deserialize)]
@@ -67,11 +70,14 @@ impl PriceSource for Bybit {
         let price: f64 = ticker.last_price.parse()?;
         let volume: f64 = ticker.volume24h.parse().unwrap_or(0.0);
 
+        let server_time = if resp.time > 0 { Some(resp.time / 1000) } else { None };
+
         Ok(Some(PricePoint {
             price,
             volume,
             timestamp: now_secs(),
             source: "bybit".into(),
+            server_time,
         }))
     }
 

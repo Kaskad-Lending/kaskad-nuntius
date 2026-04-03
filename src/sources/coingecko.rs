@@ -54,6 +54,7 @@ impl PriceSource for CoinGecko {
             volume: 0.0,
             timestamp: now_secs(),
             source: "coingecko".into(),
+            server_time: None,
         }))
     }
 

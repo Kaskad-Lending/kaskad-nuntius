@@ -27,6 +27,9 @@ impl Kucoin {
 #[derive(Deserialize)]
 struct KucoinResponse {
     data: KucoinTickerData,
+    /// Server timestamp in milliseconds
+    #[serde(default)]
+    time: u64,
 }
 
 #[derive(Deserialize)]
@@ -57,11 +60,14 @@ impl PriceSource for Kucoin {
         let price: f64 = resp.data.price.parse()?;
         let volume: f64 = resp.data.vol.parse().unwrap_or(0.0);
 
+        let server_time = if resp.time > 0 { Some(resp.time / 1000) } else { None };
+
         Ok(Some(PricePoint {
             price,
             volume,
             timestamp: now_secs(),
             source: "kucoin".into(),
+            server_time,
         }))
     }
 

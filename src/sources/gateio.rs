@@ -62,6 +62,7 @@ impl PriceSource for GateIo {
             volume,
             timestamp: now_secs(),
             source: "gateio".into(),
+            server_time: None,
         }))
     }
 

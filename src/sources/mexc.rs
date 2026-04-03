@@ -50,6 +50,7 @@ impl PriceSource for Mexc {
             volume: 0.0,
             timestamp: now_secs(),
             source: "mexc".into(),
+            server_time: None,
         }))
     }
 

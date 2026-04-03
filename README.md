@@ -225,7 +225,7 @@ Environment variables (`.env` file supported):
 - [x] Security audit + fixes (OZ ECDSA, circuit breaker staleness, symbol validation)
 - [x] Galleon testnet deployment
 - [x] Aave V3 integration (KaskadRouter — atomic price+action)
-- [ ] Nitro Enclave attestation on-chain (NitroAttestationVerifier deployed, needs real attestation)
+- [x] Nitro Enclave attestation on-chain (real AWS Nitro COSE_Sign1 verification)
 - [ ] ZKP aggregation proofs (Phase 3)
 
 ## License

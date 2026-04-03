@@ -56,6 +56,7 @@ impl PriceSource for Coinbase {
             volume: 0.0,
             timestamp: now_secs(),
             source: "coinbase".into(),
+            server_time: None,
         }))
     }
 

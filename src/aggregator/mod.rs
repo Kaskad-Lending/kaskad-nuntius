@@ -108,6 +108,7 @@ mod tests {
                 volume: 0.0,
                 timestamp: 1000 + i as u64,
                 source: format!("source_{}", i),
+                server_time: None,
             })
             .collect()
     }

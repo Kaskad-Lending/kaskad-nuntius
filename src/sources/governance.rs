@@ -38,6 +38,7 @@ impl PriceSource for GovernancePrice {
                 volume: 0.0,
                 timestamp: now_secs(),
                 source: "governance".into(),
+                server_time: None,
             })),
             _ => Ok(None),
         }

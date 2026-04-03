@@ -249,8 +249,27 @@ async fn main() -> Result<()> {
                 continue;
             }
 
-            // 5. Convert to fixed point
-            let timestamp = now_secs();
+            // 5. Use median server time as trusted timestamp (host can't fake exchange clocks).
+            //    Falls back to system clock if fewer than 2 sources report server time.
+            let timestamp = {
+                let mut server_times: Vec<u64> = prices
+                    .iter()
+                    .filter_map(|p| p.server_time)
+                    .collect();
+                server_times.sort();
+                if server_times.len() >= 2 {
+                    let median_time = server_times[server_times.len() / 2];
+                    tracing::debug!(
+                        asset = asset.symbol(),
+                        n = server_times.len(),
+                        median = median_time,
+                        "using exchange server time"
+                    );
+                    median_time
+                } else {
+                    now_secs()
+                }
+            };
             let price_fixed = aggregator::to_fixed_point(median, ORACLE_DECIMALS);
             let sources_hash = aggregator::sources_hash(&prices);
 
