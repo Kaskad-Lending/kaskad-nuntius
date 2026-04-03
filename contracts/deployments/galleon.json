@@ -11,21 +11,21 @@
   },
 
   "teeOracle": {
-    "KaskadPriceOracle": "0x2DcD49ca5E7f7dfA69aBeDE85DB325dB3bA88fCe",
-    "expectedPCR0": "0xdcd349ff59b6be8cc5d62174c38127acc219ee5fcdc26335b4b2277b23836ec9",
-    "enclaveSigner": "0x6acD5d140C40e96538Ce23965fa7a420d5f851fe",
-    "_note": "Real AWS Nitro attestation — no mocks"
+    "KaskadPriceOracle": "0x98D46d96ef8bb09165e13597082011456d3E2c99",
+    "expectedPCR0": "0x79a9476c88a60d5d8f30df3f1ff926a17f1cdf9f8c2bda0062712eb950b87626",
+    "enclaveSigner": "0x070fC55a405Fe473f51E3d6A103Ec3d0b0dcd28B",
+    "_note": "Real AWS Nitro attestation, exchange server timestamps"
   },
 
   "aggregators": {
-    "ETH/USD": "0x0E29EfF21205c57FCD5659A027F9A703f73d3c9a",
-    "BTC/USD": "0x60dF73092839CCF1aFFa3e7C1cf5ba6c6183bbe0",
-    "USDC/USD": "0xdC5eEafbE03BAa8A17A0f511Af12fab2aC8D95dA",
-    "KAS/USD": "0x0107cb5C751c01888D224BAbcCE9A945Cd378BD3"
+    "ETH/USD": "0x61bc05192fF06B257f32a3B4dF0FF6dbDeE470Dd",
+    "BTC/USD": "0x17C2def9d9d281100fb1d65bebf3207E7697aCe5",
+    "USDC/USD": "0xeD320224a3ABC4B14c432AD28aef6a2a712374F6",
+    "KAS/USD": "0x351Dd4759bD326B0b2DBa6BFE2e0FE1fBf32e3CD"
   },
 
   "router": {
-    "KaskadRouter": "0x371445Eb4cD1bA80D0B4076cDaD45172DE4b3E39"
+    "KaskadRouter": "0x0bFfe9302872453A486E0C07167216D947FBdbEC"
   },
 
   "integration": {
