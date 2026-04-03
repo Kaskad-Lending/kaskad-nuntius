@@ -31,7 +31,8 @@ contract Deploy is Script {
         console.log("MockAttestationVerifier:", address(verifier));
 
         // Deploy oracle (permissionless, no owner)
-        KaskadPriceOracle oracle = new KaskadPriceOracle(expectedPCR0, address(verifier));
+        uint256 maxFutureTs = vm.envOr("MAX_FUTURE_TIMESTAMP", uint256(5 minutes));
+        KaskadPriceOracle oracle = new KaskadPriceOracle(expectedPCR0, address(verifier), maxFutureTs);
         console.log("KaskadPriceOracle deployed at:", address(oracle));
 
         // Register enclave via mock attestation

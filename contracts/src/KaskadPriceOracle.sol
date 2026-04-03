@@ -52,7 +52,10 @@ contract KaskadPriceOracle {
     uint256 public constant CIRCUIT_BREAKER_STALENESS = 4 hours;
 
     /// @notice Maximum allowed future timestamp offset (Chronos-DoS protection).
-    uint256 public constant MAX_FUTURE_TIMESTAMP = 5 minutes;
+    ///         Configurable at deploy: chains with synthetic timestamps (e.g. Igra/Galleon
+    ///         where block.timestamp derives from DAA scores) may lag real time by hours.
+    ///         Galleon testnet: 3 hours. Mainnet (after Igra timestamp fix): 5 minutes.
+    uint256 public immutable MAX_FUTURE_TIMESTAMP;
 
     // ─── State ───────────────────────────────────────────────────────────
 
@@ -99,11 +102,14 @@ contract KaskadPriceOracle {
 
     // ─── Constructor ─────────────────────────────────────────────────────
 
-    /// @param _expectedPCR0 The expected enclave image hash. IMMUTABLE.
-    /// @param _verifier     Address of the attestation verifier. IMMUTABLE.
-    constructor(bytes32 _expectedPCR0, address _verifier) {
+    /// @param _expectedPCR0        The expected enclave image hash. IMMUTABLE.
+    /// @param _verifier            Address of the attestation verifier. IMMUTABLE.
+    /// @param _maxFutureTimestamp   Max seconds a price timestamp may exceed block.timestamp.
+    ///                             Galleon testnet: 10800 (3h). Mainnet: 300 (5m).
+    constructor(bytes32 _expectedPCR0, address _verifier, uint256 _maxFutureTimestamp) {
         expectedPCR0 = _expectedPCR0;
         verifier = IAttestationVerifier(_verifier);
+        MAX_FUTURE_TIMESTAMP = _maxFutureTimestamp;
     }
 
     // NO owner. NO admin. NO setOracleSigner(). NO transferOwnership().

@@ -29,7 +29,7 @@ contract KaskadPriceOracleTest is Test {
         mockVerifier = new MockAttestationVerifier(EXPECTED_PCR0, signer);
 
         // Deploy oracle with expected PCR0 and mock verifier
-        oracle = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier));
+        oracle = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier), 5 minutes);
 
         // Register enclave (via mock attestation)
         oracle.registerEnclave(hex"00"); // any bytes, mock verifier accepts all
@@ -96,7 +96,7 @@ contract KaskadPriceOracleTest is Test {
 
     function test_registerEnclave_success() public {
         // Deploy fresh oracle
-        KaskadPriceOracle fresh = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier));
+        KaskadPriceOracle fresh = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier), 5 minutes);
 
         // Anyone can register
         vm.prank(address(0xCAFE)); // random caller
@@ -109,7 +109,8 @@ contract KaskadPriceOracleTest is Test {
         FailingAttestationVerifier failVerifier = new FailingAttestationVerifier();
         KaskadPriceOracle oracleWithFailVerifier = new KaskadPriceOracle(
             EXPECTED_PCR0,
-            address(failVerifier)
+            address(failVerifier),
+            5 minutes
         );
 
         vm.expectRevert(KaskadPriceOracle.InvalidAttestation.selector);
@@ -120,7 +121,8 @@ contract KaskadPriceOracleTest is Test {
         WrongPCR0Verifier wrongVerifier = new WrongPCR0Verifier(signer);
         KaskadPriceOracle oracleWithWrongPCR = new KaskadPriceOracle(
             EXPECTED_PCR0,
-            address(wrongVerifier)
+            address(wrongVerifier),
+            5 minutes
         );
 
         vm.expectRevert(
@@ -137,7 +139,7 @@ contract KaskadPriceOracleTest is Test {
         // A new valid enclave can replace the old one (e.g. after restart)
         address newSigner = address(0xBEEF);
         MockAttestationVerifier newVerifier = new MockAttestationVerifier(EXPECTED_PCR0, newSigner);
-        KaskadPriceOracle o = new KaskadPriceOracle(EXPECTED_PCR0, address(newVerifier));
+        KaskadPriceOracle o = new KaskadPriceOracle(EXPECTED_PCR0, address(newVerifier), 5 minutes);
 
         o.registerEnclave(hex"00");
         assertEq(o.oracleSigner(), newSigner);
@@ -204,7 +206,7 @@ contract KaskadPriceOracleTest is Test {
     // ─── Rejections ──────────────────────────────────────────────────
 
     function test_updatePrice_reverts_no_enclave() public {
-        KaskadPriceOracle unregistered = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier));
+        KaskadPriceOracle unregistered = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier), 5 minutes);
         // Don't register enclave
 
         uint256 ts = block.timestamp;
@@ -523,7 +525,7 @@ contract KaskadPriceOracleTest is Test {
     }
 
     function test_gas_registerEnclave() public {
-        KaskadPriceOracle fresh = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier));
+        KaskadPriceOracle fresh = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier), 5 minutes);
 
         uint256 gasBefore = gasleft();
         fresh.registerEnclave(hex"00");
@@ -571,7 +573,7 @@ contract RelayerE2ETest is Test {
         signerAddr = vm.addr(signerPk);
 
         mockVerifier = new MockAttestationVerifier(PCR0, signerAddr);
-        oracle = new KaskadPriceOracle(PCR0, address(mockVerifier));
+        oracle = new KaskadPriceOracle(PCR0, address(mockVerifier), 5 minutes);
         oracle.registerEnclave(hex"00");
 
         ethAgg  = new KaskadAggregatorV3(address(oracle), ETH_USD,  "ETH / USD");
@@ -779,7 +781,7 @@ contract RelayerE2ETest is Test {
         MockAttestationVerifier newVerifier = new MockAttestationVerifier(PCR0, newAddr);
 
         // Re-deploy oracle and re-register
-        KaskadPriceOracle fresh = new KaskadPriceOracle(PCR0, address(newVerifier));
+        KaskadPriceOracle fresh = new KaskadPriceOracle(PCR0, address(newVerifier), 5 minutes);
         fresh.registerEnclave(hex"00");
         assertEq(fresh.oracleSigner(), newAddr);
 
