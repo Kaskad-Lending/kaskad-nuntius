@@ -2,7 +2,7 @@
   "chainId": 38836,
   "network": "Galleon Testnet",
   "rpc": "https://galleon-testnet.igralabs.com:8545",
-  "deployedAt": "2026-04-01",
+  "deployedAt": "2026-04-03",
 
   "attestation": {
     "CertManager": "0xAb46cBe48ABB2595E55B4E115BE18D7ad9981ea7",
@@ -11,21 +11,22 @@
   },
 
   "teeOracle": {
-    "KaskadPriceOracle": "0x98D46d96ef8bb09165e13597082011456d3E2c99",
+    "KaskadPriceOracle": "0x2f70d16533e1C87ae2AD9d5c1ceb9e95D2AE4774",
     "expectedPCR0": "0x79a9476c88a60d5d8f30df3f1ff926a17f1cdf9f8c2bda0062712eb950b87626",
     "enclaveSigner": "0x070fC55a405Fe473f51E3d6A103Ec3d0b0dcd28B",
+    "MAX_FUTURE_TIMESTAMP": "3 hours (10800s) — Galleon DAA timestamp lag",
     "_note": "Real AWS Nitro attestation, exchange server timestamps"
   },
 
   "aggregators": {
-    "ETH/USD": "0x61bc05192fF06B257f32a3B4dF0FF6dbDeE470Dd",
-    "BTC/USD": "0x17C2def9d9d281100fb1d65bebf3207E7697aCe5",
-    "USDC/USD": "0xeD320224a3ABC4B14c432AD28aef6a2a712374F6",
-    "KAS/USD": "0x351Dd4759bD326B0b2DBa6BFE2e0FE1fBf32e3CD"
+    "ETH/USD": "0x0c0b4c656D49707Cc9476b817a7Eb29e503Dd467",
+    "BTC/USD": "0x0CAD342FE739BB7C39c9fC8F7cC26d4339EBaB80",
+    "USDC/USD": "0x625b5e54BBd8353FD29b7d6aDe7731bd6a7bb375",
+    "KAS/USD": "0x261a8D3a47D6EAb515300aB4Ce05FaB597D46843"
   },
 
   "router": {
-    "KaskadRouter": "0x0bFfe9302872453A486E0C07167216D947FBdbEC"
+    "KaskadRouter": "0x301472504985216E23d6120790b2b59E7d366d00"
   },
 
   "integration": {
