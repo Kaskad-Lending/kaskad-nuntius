@@ -81,6 +81,10 @@ fn handle_connection(
 ) -> Result<()> {
     use std::io::{Read, Write};
 
+    // Guard against stalled clients holding connections open (DoS vector).
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
+
     // Read request
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;

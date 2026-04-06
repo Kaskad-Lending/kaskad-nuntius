@@ -26,28 +26,32 @@ contract NitroAttestationVerifier is IAttestationVerifier {
     error InvalidPCR0Length(uint256 length);
     error PCR0NotFound();
     error InvalidPublicKeyLength(uint256 length);
+    error PCR1Mismatch();
+    error PCR2Mismatch();
+
     /// @notice Marlin NitroProver instance (handles CBOR/COSE/P384 verification).
     NitroProver public immutable nitroProver;
 
     /// @notice Maximum age of attestation document in seconds.
-    ///         Prevents replay of old attestations.
     uint256 public immutable maxAttestationAge;
 
-    /// @notice PCR indices to verify (bitmask). We check PCR0 only by default.
-    ///         PCR0 = enclave image measurement.
+    /// @notice Expected PCR-1 (kernel hash) and PCR-2 (application hash).
+    ///         PCR-0 is checked by KaskadPriceOracle. PCR-1 and PCR-2 are checked here.
+    ///         Set to bytes32(0) to skip validation (e.g. during development).
+    bytes32 public immutable expectedPCR1;
+    bytes32 public immutable expectedPCR2;
+
     bytes public pcrFlags;
 
     /// @param _nitroProver Address of deployed NitroProver contract
-    /// @param _maxAge Maximum acceptable attestation age in seconds (e.g. 300 = 5 min)
-    constructor(address _nitroProver, uint256 _maxAge) {
+    /// @param _maxAge Maximum acceptable attestation age in seconds
+    /// @param _expectedPCR1 Expected PCR-1 hash (bytes32(0) to skip)
+    /// @param _expectedPCR2 Expected PCR-2 hash (bytes32(0) to skip)
+    constructor(address _nitroProver, uint256 _maxAge, bytes32 _expectedPCR1, bytes32 _expectedPCR2) {
         nitroProver = NitroProver(_nitroProver);
         maxAttestationAge = _maxAge;
-
-        // We only validate PCR0 (bit 0 set = 0x00000001).
-        // PCR0 is 48 bytes (SHA-384).
-        // The pcrFlags format: 4 bytes bitmask + 48 bytes per enabled PCR
-        // We'll populate the expected PCR0 at verification time from the attestation itself
-        // (the oracle contract checks pcr0 == expectedPCR0 separately)
+        expectedPCR1 = _expectedPCR1;
+        expectedPCR2 = _expectedPCR2;
         pcrFlags = hex"00000001";
     }
 
@@ -67,8 +71,14 @@ contract NitroAttestationVerifier is IAttestationVerifier {
             bytes memory /* userData */,
             bytes memory rawPcrs
         ) {
-            // Extract PCR0 from the PCR map
-            pcr0 = _extractPCR0(rawPcrs);
+            // Extract and validate all PCRs
+            bytes32 pcr1;
+            bytes32 pcr2;
+            (pcr0, pcr1, pcr2) = _extractPCRs(rawPcrs);
+
+            // PCR-1 and PCR-2 validated here (PCR-0 validated by KaskadPriceOracle)
+            if (expectedPCR1 != bytes32(0) && pcr1 != expectedPCR1) revert PCR1Mismatch();
+            if (expectedPCR2 != bytes32(0) && pcr2 != expectedPCR2) revert PCR2Mismatch();
 
             // Derive Ethereum address from enclave public key
             enclaveAddress = _deriveAddress(enclaveKey);
@@ -88,26 +98,28 @@ contract NitroAttestationVerifier is IAttestationVerifier {
         nitroProver.verifyCerts(attestationDoc);
     }
 
-    /// @dev Extract PCR0 from CBOR-encoded PCR map.
-    ///      PCR map format: { 0: <48 bytes>, 1: <48 bytes>, ... }
-    function _extractPCR0(bytes memory rawPcrs) internal view returns (bytes32) {
+    /// @dev Extract PCR-0, PCR-1, PCR-2 from CBOR-encoded PCR map.
+    ///      PCR map format: { 0: <48 bytes>, 1: <48 bytes>, 2: <48 bytes>, ... }
+    ///      Each 48-byte SHA-384 hash is truncated to bytes32 (first 32 bytes).
+    function _extractPCRs(bytes memory rawPcrs) internal view returns (bytes32 pcr0, bytes32 pcr1, bytes32 pcr2) {
         bytes[2][] memory pcrs = CBORDecoding.decodeMapping(rawPcrs);
+        bool found0;
 
         for (uint i = 0; i < pcrs.length; i++) {
-            // Find PCR index 0
-            if (ByteParser.bytesToUint64(pcrs[i][0]) == 0) {
-                bytes memory pcr0Bytes = pcrs[i][1];
-                // PCR0 is 48 bytes (SHA-384). Pack first 32 bytes into bytes32.
-                // The oracle contract will compare this with expectedPCR0.
-                if (pcr0Bytes.length != 48) revert InvalidPCR0Length(pcr0Bytes.length);
-                bytes32 result;
+            uint64 idx = ByteParser.bytesToUint64(pcrs[i][0]);
+            if (idx <= 2) {
+                bytes memory pcrBytes = pcrs[i][1];
+                if (pcrBytes.length != 48) revert InvalidPCR0Length(pcrBytes.length);
+                bytes32 packed;
                 assembly {
-                    result := mload(add(pcr0Bytes, 32))
+                    packed := mload(add(pcrBytes, 32))
                 }
-                return result;
+                if (idx == 0) { pcr0 = packed; found0 = true; }
+                else if (idx == 1) { pcr1 = packed; }
+                else if (idx == 2) { pcr2 = packed; }
             }
         }
-        revert PCR0NotFound();
+        if (!found0) revert PCR0NotFound();
     }
 
     /// @dev Derive Ethereum address from enclave public key.

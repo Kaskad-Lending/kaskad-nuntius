@@ -28,7 +28,20 @@ ENV ENCLAVE_MODE=1
 # before the oracle can bind to 127.0.0.1 (VSOCK→TCP bridge).
 COPY <<'EOF' /entrypoint.sh
 #!/bin/sh
+set -e
+
+# Bring up loopback (required for VSOCK→TCP bridge on 127.0.0.1)
 ip link set lo up
+
+# Verify hardware RNG is active (NSM provides true entropy).
+# Fallback to RDRAND/RDSEED is insecure — abort if nsm-hwrng missing.
+RNG_CURRENT=$(cat /sys/devices/virtual/misc/hw_random/rng_current 2>/dev/null || echo "none")
+if [ "$RNG_CURRENT" != "nsm-hwrng" ]; then
+  echo "FATAL: Hardware RNG is '$RNG_CURRENT', expected 'nsm-hwrng'"
+  echo "Enclave key generation would be insecure. Aborting."
+  exit 1
+fi
+
 exec /usr/local/bin/kaskad-oracle
 EOF
 RUN chmod +x /entrypoint.sh
