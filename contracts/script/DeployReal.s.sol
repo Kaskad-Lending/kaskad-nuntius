@@ -26,7 +26,9 @@ contract DeployReal is Script {
 
         // Deploy NitroAttestationVerifier
         uint256 maxAge = 365 days; // 1 year for tests
-        NitroAttestationVerifier verifier = new NitroAttestationVerifier(address(prover), maxAge);
+        bytes32 expectedPCR1 = vm.envOr("EXPECTED_PCR1", bytes32(0));
+        bytes32 expectedPCR2 = vm.envOr("EXPECTED_PCR2", bytes32(0));
+        NitroAttestationVerifier verifier = new NitroAttestationVerifier(address(prover), maxAge, expectedPCR1, expectedPCR2);
         console.log("NitroAttestationVerifier deployed at:", address(verifier));
 
         // Extract real pcr0 and signer from the doc by doing a view call
