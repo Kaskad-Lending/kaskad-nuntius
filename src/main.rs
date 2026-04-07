@@ -14,13 +14,16 @@ use tracing::{error, info, warn};
 
 use signer::{MockSigner, OracleSigner};
 use sources::PriceSource;
-use types::{now_secs, Asset, PricePoint, SignedPriceUpdate};
+use types::{now_secs, Asset, CachedPrice, PricePoint};
 
 const ORACLE_DECIMALS: u8 = 8;
 const FETCH_INTERVAL_SECS: u64 = 30;
 
-/// Shared state: latest signed prices, accessible by the VSOCK server.
-pub type PriceStore = Arc<RwLock<HashMap<String, SignedPriceUpdate>>>;
+/// Shared state: latest aggregated prices (unsigned). Signature is created on-demand.
+pub type PriceStore = Arc<RwLock<HashMap<String, CachedPrice>>>;
+
+/// Shared signer, accessible by the price server for on-demand signing.
+pub type SharedSigner = Arc<dyn signer::OracleSigner>;
 
 /// Tracks the last pushed price and timestamp per asset (for deviation/heartbeat logic).
 struct OracleState {
@@ -95,24 +98,27 @@ async fn main() -> Result<()> {
     };
 
     let signer_address = format!("0x{}", hex::encode(signer.address()));
+    let attestation_doc = signer.attestation_doc();
+    let signer: SharedSigner = Arc::from(signer);
     info!(address = %signer_address, "Oracle signer initialized");
 
     // Shared price store
     let price_store: PriceStore = Arc::new(RwLock::new(HashMap::new()));
 
-    // Start VSOCK price server (pull API)
+    // Start VSOCK price server (pull API) — signs on-demand per request
     let vsock_port: u32 = std::env::var("VSOCK_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(5001);
 
     let server_store = price_store.clone();
+    let server_signer = signer.clone();
     let server_signer_address = signer_address.clone();
-    let attestation_doc = signer.attestation_doc();
     tokio::spawn(async move {
         if let Err(e) = price_server::run_price_server(
             vsock_port,
             server_store,
+            server_signer,
             server_signer_address,
             attestation_doc,
         )
@@ -249,71 +255,32 @@ async fn main() -> Result<()> {
                 continue;
             }
 
-            // 5. Use median server time as trusted timestamp (host can't fake exchange clocks).
-            //    Falls back to system clock if fewer than 2 sources report server time.
-            let timestamp = {
-                let mut server_times: Vec<u64> = prices
-                    .iter()
-                    .filter_map(|p| p.server_time)
-                    .collect();
-                server_times.sort();
-                if server_times.len() >= 2 {
-                    let median_time = server_times[server_times.len() / 2];
-                    tracing::debug!(
-                        asset = asset.symbol(),
-                        n = server_times.len(),
-                        median = median_time,
-                        "using exchange server time"
-                    );
-                    median_time
-                } else {
-                    now_secs()
-                }
-            };
+            // 5. Cache aggregated price — signature will be created on-demand by price_server
             let price_fixed = aggregator::to_fixed_point(median, ORACLE_DECIMALS);
             let sources_hash = aggregator::sources_hash(&prices);
 
-            // 6. Sign
-            let (signature, _signer_addr) = signer.sign_price_update(
-                asset.id(),
+            let cached = CachedPrice {
+                asset,
                 price_fixed,
-                timestamp,
-                prices.len() as u8,
+                price_human: median,
+                num_sources: prices.len() as u8,
                 sources_hash,
-            )?;
+            };
+
+            {
+                let mut store = price_store.write().await;
+                store.insert(asset.symbol().to_string(), cached);
+            }
 
             info!(
                 asset = asset.symbol(),
                 price = format!("{:.6}", median),
                 price_fixed = %price_fixed,
                 num_sources = prices.len(),
-                "✅ signed price update"
+                "📦 cached price (signature on-demand)"
             );
 
-            // 7. Store signed update (instead of pushing on-chain)
-            let update = SignedPriceUpdate {
-                asset_id: format!("0x{}", hex::encode(asset.id().as_slice())),
-                asset_symbol: asset.symbol().to_string(),
-                price: format!("{}", price_fixed),
-                price_human: format!("{:.8}", median),
-                timestamp,
-                num_sources: prices.len() as u8,
-                sources_hash: format!("0x{}", hex::encode(sources_hash.as_slice())),
-                signature: format!("0x{}", hex::encode(&signature)),
-                signer: signer_address.clone(),
-            };
-
-            {
-                let mut store = price_store.write().await;
-                store.insert(asset.symbol().to_string(), update);
-            }
-
-            info!(
-                asset = asset.symbol(),
-                "📦 stored signed update for pull API"
-            );
-
-            // 8. Record update locally
+            // 6. Record update locally
             state.record_update(asset, median);
         }
 

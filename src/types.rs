@@ -15,6 +15,17 @@ pub struct PricePoint {
     pub server_time: Option<u64>,
 }
 
+/// Cached aggregated price — unsigned, stored in PriceStore.
+/// Signature is created on-demand when a client requests it.
+#[derive(Debug, Clone)]
+pub struct CachedPrice {
+    pub asset: Asset,
+    pub price_fixed: alloy_primitives::U256,
+    pub price_human: f64,
+    pub num_sources: u8,
+    pub sources_hash: alloy_primitives::B256,
+}
+
 /// A signed price update ready for external consumption (pull API).
 #[derive(Debug, Clone, Serialize)]
 pub struct SignedPriceUpdate {
