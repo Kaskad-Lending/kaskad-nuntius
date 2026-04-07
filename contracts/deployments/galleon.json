@@ -2,31 +2,32 @@
   "chainId": 38836,
   "network": "Galleon Testnet",
   "rpc": "https://galleon-testnet.igralabs.com:8545",
-  "deployedAt": "2026-04-03",
+  "deployedAt": "2026-04-06",
 
   "attestation": {
     "CertManager": "0xAb46cBe48ABB2595E55B4E115BE18D7ad9981ea7",
     "NitroProver": "0x0Ec1Ebef87F632890c735ca0809f213b1F1972b8",
-    "NitroAttestationVerifier": "0x0F43e623eEaeC60a6E835b8B9151d2A0ceD2511e"
+    "NitroAttestationVerifier": "0x4B657Ce44D35C5a62D99f9D816B30fDecb0eFf98",
+    "_note": "Verifier supports PCR-1/PCR-2 validation (set to 0x0 = skip for now)"
   },
 
   "teeOracle": {
-    "KaskadPriceOracle": "0x2f70d16533e1C87ae2AD9d5c1ceb9e95D2AE4774",
-    "expectedPCR0": "0x79a9476c88a60d5d8f30df3f1ff926a17f1cdf9f8c2bda0062712eb950b87626",
-    "enclaveSigner": "0x070fC55a405Fe473f51E3d6A103Ec3d0b0dcd28B",
-    "MAX_FUTURE_TIMESTAMP": "3 hours (10800s) — Galleon DAA timestamp lag",
-    "_note": "Real AWS Nitro attestation, exchange server timestamps"
+    "KaskadPriceOracle": "0x0959EBF93b2499afa005e1bd89A54eB11bB0cB92",
+    "expectedPCR0": "0x3c556dff9ba988d550ddb93dc1871fc457ae1c8b8677207008782edb63a37ad3",
+    "enclaveSigner": "0x17059ee78a3974df50043157bdB1AE97e137E65B",
+    "MAX_FUTURE_TIMESTAMP": "3 hours (10800s)",
+    "_note": "Real Nitro attestation, exchange server timestamps, nsm-hwrng verified"
   },
 
   "aggregators": {
-    "ETH/USD": "0x0c0b4c656D49707Cc9476b817a7Eb29e503Dd467",
-    "BTC/USD": "0x0CAD342FE739BB7C39c9fC8F7cC26d4339EBaB80",
-    "USDC/USD": "0x625b5e54BBd8353FD29b7d6aDe7731bd6a7bb375",
-    "KAS/USD": "0x261a8D3a47D6EAb515300aB4Ce05FaB597D46843"
+    "ETH/USD": "0x9879F37ce02b7b97734eF3D404930457830ac4a5",
+    "BTC/USD": "0x26981395e28Dc64E39a6F618f925200773F27174",
+    "USDC/USD": "0xdb1A97053944Aa47fb2d090572b25195737FBb1F",
+    "KAS/USD": "0x68f141a9A3a29c7f720756523743f52779526688"
   },
 
   "router": {
-    "KaskadRouter": "0x301472504985216E23d6120790b2b59E7d366d00"
+    "KaskadRouter": "0x54b4f02fa5286C3735d6914318f7077f618e07D8"
   },
 
   "integration": {
