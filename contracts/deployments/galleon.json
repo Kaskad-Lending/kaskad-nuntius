@@ -2,32 +2,30 @@
   "chainId": 38836,
   "network": "Galleon Testnet",
   "rpc": "https://galleon-testnet.igralabs.com:8545",
-  "deployedAt": "2026-04-06",
+  "deployedAt": "2026-04-07",
 
   "attestation": {
     "CertManager": "0xAb46cBe48ABB2595E55B4E115BE18D7ad9981ea7",
     "NitroProver": "0x0Ec1Ebef87F632890c735ca0809f213b1F1972b8",
-    "NitroAttestationVerifier": "0x4B657Ce44D35C5a62D99f9D816B30fDecb0eFf98",
-    "_note": "Verifier supports PCR-1/PCR-2 validation (set to 0x0 = skip for now)"
+    "NitroAttestationVerifier": "0x4B657Ce44D35C5a62D99f9D816B30fDecb0eFf98"
   },
 
   "teeOracle": {
-    "KaskadPriceOracle": "0x0959EBF93b2499afa005e1bd89A54eB11bB0cB92",
-    "expectedPCR0": "0x3c556dff9ba988d550ddb93dc1871fc457ae1c8b8677207008782edb63a37ad3",
-    "enclaveSigner": "0x17059ee78a3974df50043157bdB1AE97e137E65B",
-    "MAX_FUTURE_TIMESTAMP": "3 hours (10800s)",
-    "_note": "Real Nitro attestation, exchange server timestamps, nsm-hwrng verified"
+    "KaskadPriceOracle": "0x94Acb56cC964a59714AC22C566994C2be928c002",
+    "expectedPCR0": "0x2f0e112d3c1aacbe4ca8dcde951940fbfd51c23f052ce1f9597443424196a8d5",
+    "enclaveSigner": "0xa75784540b3ffE439C2EdE8264E7EF4c632A6978",
+    "MAX_FUTURE_TIMESTAMP": "3 hours (10800s)"
   },
 
   "aggregators": {
-    "ETH/USD": "0x9879F37ce02b7b97734eF3D404930457830ac4a5",
-    "BTC/USD": "0x26981395e28Dc64E39a6F618f925200773F27174",
-    "USDC/USD": "0xdb1A97053944Aa47fb2d090572b25195737FBb1F",
-    "KAS/USD": "0x68f141a9A3a29c7f720756523743f52779526688"
+    "ETH/USD": "0xca67f150ff0ea043AD3f859d31A6dCbB3d5Ed5F4",
+    "BTC/USD": "0x6EEA3DA7aFdA59d835C7dA793612DFa0CB716a31",
+    "USDC/USD": "0x4E2d77806E88B9B8237f3E960831F3C4b7B0371d",
+    "KAS/USD": "0x6F7dbF011923e0FB8889FC2194521A8011E4eB1D"
   },
 
   "router": {
-    "KaskadRouter": "0x54b4f02fa5286C3735d6914318f7077f618e07D8"
+    "KaskadRouter": "0x8C491010967280906Ba47bfF2728fea875A9b145"
   },
 
   "integration": {
