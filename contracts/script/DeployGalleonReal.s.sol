@@ -22,6 +22,7 @@ contract DeployGalleonReal is Script {
 
         // ─── 1. Nitro attestation infrastructure ─────────────────
         CertManager certManager = new CertManager();
+        certManager.initialize();
         console.log("CertManager:", address(certManager));
 
         NitroProver prover = new NitroProver(certManager);
