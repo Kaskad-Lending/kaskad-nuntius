@@ -84,8 +84,8 @@ impl Asset {
         match self {
             Asset::EthUsd | Asset::BtcUsd => 3,
             Asset::KasUsd => 3,
-            Asset::UsdcUsd => 2,  // only 3 exchanges carry USDC/USDT
-            Asset::IgraUsd => 1,  // governance-set, single source
+            Asset::UsdcUsd => 2, // only 3 exchanges carry USDC/USDT
+            Asset::IgraUsd => 1, // governance-set, single source
         }
     }
 

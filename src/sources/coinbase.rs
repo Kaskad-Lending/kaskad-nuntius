@@ -47,7 +47,11 @@ impl PriceSource for Coinbase {
         let resp: CoinbaseResponse = self.client.get_json(&url).await?;
         let expected_base = pair.split('-').next().unwrap_or("");
         if resp.data.base != expected_base {
-            return Err(eyre::eyre!("coinbase base mismatch: expected {}, got {}", expected_base, resp.data.base));
+            return Err(eyre::eyre!(
+                "coinbase base mismatch: expected {}, got {}",
+                expected_base,
+                resp.data.base
+            ));
         }
         let price: f64 = resp.data.amount.parse()?;
 

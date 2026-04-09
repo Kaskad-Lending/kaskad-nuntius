@@ -55,12 +55,20 @@ impl PriceSource for Kucoin {
         );
         let resp: KucoinResponse = self.client.get_json(&url).await?;
         if !resp.data.symbol.is_empty() && resp.data.symbol != symbol {
-            return Err(eyre::eyre!("kucoin symbol mismatch: expected {}, got {}", symbol, resp.data.symbol));
+            return Err(eyre::eyre!(
+                "kucoin symbol mismatch: expected {}, got {}",
+                symbol,
+                resp.data.symbol
+            ));
         }
         let price: f64 = resp.data.price.parse()?;
         let volume: f64 = resp.data.vol.parse().unwrap_or(0.0);
 
-        let server_time = if resp.time > 0 { Some(resp.time / 1000) } else { None };
+        let server_time = if resp.time > 0 {
+            Some(resp.time / 1000)
+        } else {
+            None
+        };
 
         Ok(Some(PricePoint {
             price,
