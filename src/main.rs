@@ -182,6 +182,12 @@ async fn main() -> Result<()> {
         Box::new(sources::mexc::Mexc::new(client.clone())),
         Box::new(sources::kucoin::Kucoin::new(client.clone())),
         Box::new(sources::gateio::GateIo::new(client.clone())),
+        Box::new(sources::kraken::Kraken::new(client.clone())),
+        Box::new(sources::bitget::Bitget::new(client.clone())),
+        Box::new(sources::bitfinex::Bitfinex::new(client.clone())),
+        Box::new(sources::bitstamp::Bitstamp::new(client.clone())),
+        Box::new(sources::crypto_com::CryptoCom::new(client.clone())),
+        Box::new(sources::htx::Htx::new(client.clone())),
         Box::new(sources::governance::GovernancePrice::new(igra_price)),
     ];
 
