@@ -520,7 +520,7 @@ contract KaskadPriceOracleTest is Test {
         oracle.updatePrice(ETH_USD, 212926000000, 1710000000, 4, sourcesHash, sig);
         uint256 gasUsed = gasBefore - gasleft();
 
-        assertLt(gasUsed, 300_000);
+        assertLt(gasUsed, 320_000);
         emit log_named_uint("updatePrice gas (cold)", gasUsed);
     }
 

@@ -11,11 +11,12 @@ contract KaskadPriceOracle {
     // ─── Types ───────────────────────────────────────────────────────────
 
     struct PriceData {
-        uint256 price;        // fixed-point, 8 decimals
-        uint256 timestamp;    // unix seconds
-        uint8   numSources;   // number of sources used
-        bytes32 sourcesHash;  // keccak256 commitment of source data
-        uint80  roundId;      // incrementing round counter
+        uint256 price;           // fixed-point, 8 decimals
+        uint256 timestamp;       // block.timestamp at update (for consumers/Aave staleness checks)
+        uint256 signedTimestamp;  // enclave exchange-server timestamp (for replay/ordering checks)
+        uint8   numSources;      // number of sources used
+        bytes32 sourcesHash;     // keccak256 commitment of source data
+        uint80  roundId;         // incrementing round counter
     }
 
     struct EnclaveInfo {
@@ -169,9 +170,9 @@ contract KaskadPriceOracle {
 
         PriceData storage current = latestPrices[assetId];
 
-        // Prevent stale/replay updates
-        if (current.timestamp > 0 && timestamp <= current.timestamp) {
-            revert StalePrice(timestamp, current.timestamp);
+        // Prevent stale/replay updates (compare enclave-signed timestamps for ordering)
+        if (current.signedTimestamp > 0 && timestamp <= current.signedTimestamp) {
+            revert StalePrice(timestamp, current.signedTimestamp);
         }
 
         // Prevent Chronos-DoS (future timestamp lockout via host OS clock manipulation)
@@ -179,13 +180,14 @@ contract KaskadPriceOracle {
             revert FutureTimestamp(timestamp, block.timestamp + MAX_FUTURE_TIMESTAMP);
         }
 
-        // Rate limiter: prevent spam updates
-        if (current.timestamp > 0 && timestamp - current.timestamp < MIN_UPDATE_DELAY) {
-            revert UpdateTooFrequent(timestamp - current.timestamp, MIN_UPDATE_DELAY);
+        // Rate limiter: prevent spam updates (use signed timestamps for consistent ordering)
+        if (current.signedTimestamp > 0 && timestamp - current.signedTimestamp < MIN_UPDATE_DELAY) {
+            revert UpdateTooFrequent(timestamp - current.signedTimestamp, MIN_UPDATE_DELAY);
         }
 
         // Circuit breaker: reject extreme price changes.
         // Bypassed if the last update is stale (prevents permanent asset lockout after downtime).
+        // Uses block.timestamp for staleness (consistent with on-chain time).
         if (current.price > 0 && block.timestamp - current.timestamp < CIRCUIT_BREAKER_STALENESS) {
             uint256 changeBps;
             if (price > current.price) {
@@ -209,11 +211,13 @@ contract KaskadPriceOracle {
         address recovered = ECDSA.recover(ethSignedHash, signature);
         if (recovered != enclave.signer) revert InvalidSignature();
 
-        // Store
+        // Store — timestamp = block.timestamp for consumers (Aave staleness),
+        // signedTimestamp = enclave exchange-server time for replay/ordering.
         uint80 newRound = currentRound[assetId] + 1;
         PriceData memory newData = PriceData({
             price: price,
-            timestamp: timestamp,
+            timestamp: block.timestamp,
+            signedTimestamp: timestamp,
             numSources: numSources,
             sourcesHash: sourcesHash,
             roundId: newRound
