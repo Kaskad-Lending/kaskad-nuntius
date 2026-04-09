@@ -66,29 +66,22 @@ contract NitroAttestationVerifier is IAttestationVerifier {
         override
         returns (bool valid, bytes32 pcr0, address enclaveAddress)
     {
-        try nitroProver.verifyAttestation(attestationDoc, maxAttestationAge) returns (
-            bytes memory enclaveKey,
-            bytes memory /* userData */,
-            bytes memory rawPcrs
-        ) {
-            // Extract and validate all PCRs
-            bytes32 pcr1;
-            bytes32 pcr2;
-            (pcr0, pcr1, pcr2) = _extractPCRs(rawPcrs);
+        (bytes memory enclaveKey, , bytes memory rawPcrs) =
+            nitroProver.verifyAttestation(attestationDoc, maxAttestationAge);
 
-            // PCR-1 and PCR-2 validated here (PCR-0 validated by KaskadPriceOracle)
-            if (expectedPCR1 != bytes32(0) && pcr1 != expectedPCR1) revert PCR1Mismatch();
-            if (expectedPCR2 != bytes32(0) && pcr2 != expectedPCR2) revert PCR2Mismatch();
+        // Extract and validate all PCRs
+        bytes32 pcr1;
+        bytes32 pcr2;
+        (pcr0, pcr1, pcr2) = _extractPCRs(rawPcrs);
 
-            // Derive Ethereum address from enclave public key
-            enclaveAddress = _deriveAddress(enclaveKey);
+        // PCR-1 and PCR-2 validated here (PCR-0 validated by KaskadPriceOracle)
+        if (expectedPCR1 != bytes32(0) && pcr1 != expectedPCR1) revert PCR1Mismatch();
+        if (expectedPCR2 != bytes32(0) && pcr2 != expectedPCR2) revert PCR2Mismatch();
 
-            valid = true;
-        } catch {
-            valid = false;
-            pcr0 = bytes32(0);
-            enclaveAddress = address(0);
-        }
+        // Derive Ethereum address from enclave public key
+        enclaveAddress = _deriveAddress(enclaveKey);
+
+        valid = true;
     }
 
     /// @notice Verify certificates in the attestation (must be called before verifyAttestation on first use).

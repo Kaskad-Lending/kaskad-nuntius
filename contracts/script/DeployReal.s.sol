@@ -18,7 +18,6 @@ contract DeployReal is Script {
 
         // Deploy CertManager
         CertManager certManager = new CertManager();
-        certManager.initialize();
         console.log("CertManager deployed at:", address(certManager));
 
         NitroProver prover = new NitroProver(certManager);
