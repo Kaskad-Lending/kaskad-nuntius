@@ -2,7 +2,7 @@
   "chainId": 38836,
   "network": "Galleon Testnet",
   "rpc": "https://galleon-testnet.igralabs.com:8545",
-  "deployedAt": "2026-04-07",
+  "deployedAt": "2026-04-09",
 
   "attestation": {
     "CertManager": "0xAb46cBe48ABB2595E55B4E115BE18D7ad9981ea7",
@@ -11,21 +11,21 @@
   },
 
   "teeOracle": {
-    "KaskadPriceOracle": "0x94Acb56cC964a59714AC22C566994C2be928c002",
-    "expectedPCR0": "0x2f0e112d3c1aacbe4ca8dcde951940fbfd51c23f052ce1f9597443424196a8d5",
-    "enclaveSigner": "0xa75784540b3ffE439C2EdE8264E7EF4c632A6978",
+    "KaskadPriceOracle": "0xF9549E8F570FD55560D5Bb50aB824C2919fa1af0",
+    "expectedPCR0": "0x0f2ab20ae5f5fc28b610c5adcbc178e078769200e7287c2b21b57a55448360ea",
+    "enclaveSigner": "0xf8EB0D3AD8D427E39DF9Cc5600439AbD3B796F1A",
     "MAX_FUTURE_TIMESTAMP": "3 hours (10800s)"
   },
 
   "aggregators": {
-    "ETH/USD": "0xca67f150ff0ea043AD3f859d31A6dCbB3d5Ed5F4",
-    "BTC/USD": "0x6EEA3DA7aFdA59d835C7dA793612DFa0CB716a31",
-    "USDC/USD": "0x4E2d77806E88B9B8237f3E960831F3C4b7B0371d",
-    "KAS/USD": "0x6F7dbF011923e0FB8889FC2194521A8011E4eB1D"
+    "ETH/USD": "0x34ECdb9472a9100c8cAABA2044a1dae99566C74C",
+    "BTC/USD": "0x2bBAE35e7D7b2b1944265d293c46c11dc52e0851",
+    "USDC/USD": "0xEEBb5199ccD7505CfA400cf89aBC05790011841b",
+    "KAS/USD": "0x6Fb0D7929f7aBc4f6A68E7c1354862bF3F9c1863"
   },
 
   "router": {
-    "KaskadRouter": "0x8C491010967280906Ba47bfF2728fea875A9b145"
+    "KaskadRouter": "0x1e9A986D25B1e0C735d4680fAb726716Ac4212b9"
   },
 
   "integration": {
