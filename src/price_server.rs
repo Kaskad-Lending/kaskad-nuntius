@@ -266,7 +266,10 @@ fn create_listener(port: u32) -> Result<std::net::TcpListener> {
     if std::env::var("ENCLAVE_MODE").is_ok() {
         create_vsock_listener(port)
     } else {
-        info!(port = port, "Using TCP fallback for development (no ENCLAVE_MODE)");
+        info!(
+            port = port,
+            "Using TCP fallback for development (no ENCLAVE_MODE)"
+        );
         let listener = std::net::TcpListener::bind(format!("127.0.0.1:{}", port))?;
         Ok(listener)
     }
@@ -284,24 +287,49 @@ fn create_vsock_listener(port: u32) -> Result<std::net::TcpListener> {
 
     let optval: libc::c_int = 1;
     unsafe {
-        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR,
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_REUSEADDR,
             &optval as *const _ as *const libc::c_void,
-            mem::size_of::<libc::c_int>() as u32);
+            mem::size_of::<libc::c_int>() as u32,
+        );
     }
 
     #[repr(C)]
-    struct SockaddrVm { svm_family: u16, svm_reserved1: u16, svm_port: u32, svm_cid: u32, svm_zero: [u8; 4] }
+    struct SockaddrVm {
+        svm_family: u16,
+        svm_reserved1: u16,
+        svm_port: u32,
+        svm_cid: u32,
+        svm_zero: [u8; 4],
+    }
 
     let addr = SockaddrVm {
-        svm_family: AF_VSOCK as u16, svm_reserved1: 0,
-        svm_port: port, svm_cid: VMADDR_CID_ANY, svm_zero: [0; 4],
+        svm_family: AF_VSOCK as u16,
+        svm_reserved1: 0,
+        svm_port: port,
+        svm_cid: VMADDR_CID_ANY,
+        svm_zero: [0; 4],
     };
 
-    let ret = unsafe { libc::bind(fd, &addr as *const SockaddrVm as *const libc::sockaddr, mem::size_of::<SockaddrVm>() as u32) };
-    if ret < 0 { unsafe { libc::close(fd) }; return Err(eyre::eyre!("failed to bind VSOCK on port {}", port)); }
+    let ret = unsafe {
+        libc::bind(
+            fd,
+            &addr as *const SockaddrVm as *const libc::sockaddr,
+            mem::size_of::<SockaddrVm>() as u32,
+        )
+    };
+    if ret < 0 {
+        unsafe { libc::close(fd) };
+        return Err(eyre::eyre!("failed to bind VSOCK on port {}", port));
+    }
 
     let ret = unsafe { libc::listen(fd, 5) };
-    if ret < 0 { unsafe { libc::close(fd) }; return Err(eyre::eyre!("failed to listen on VSOCK port {}", port)); }
+    if ret < 0 {
+        unsafe { libc::close(fd) };
+        return Err(eyre::eyre!("failed to listen on VSOCK port {}", port));
+    }
 
     Ok(unsafe { std::net::TcpListener::from_raw_fd(fd) })
 }
@@ -321,7 +349,9 @@ fn accept_connection(listener: &std::net::TcpListener) -> Result<(std::net::TcpS
         let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
         let mut len: libc::socklen_t = std::mem::size_of::<libc::sockaddr>() as libc::socklen_t;
         let client_fd = unsafe { libc::accept(fd, &mut addr as *mut _, &mut len) };
-        if client_fd < 0 { return Err(eyre::eyre!("libc::accept failed on VSOCK")); }
+        if client_fd < 0 {
+            return Err(eyre::eyre!("libc::accept failed on VSOCK"));
+        }
         Ok((unsafe { std::net::TcpStream::from_raw_fd(client_fd) }, ()))
     } else {
         let (stream, _) = listener.accept()?;

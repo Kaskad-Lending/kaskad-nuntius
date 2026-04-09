@@ -41,7 +41,11 @@ impl PriceSource for Mexc {
         let url = format!("https://api.mexc.com/api/v3/ticker/price?symbol={}", symbol);
         let resp: MexcTicker = self.client.get_json(&url).await?;
         if resp.symbol != symbol {
-            return Err(eyre::eyre!("mexc symbol mismatch: expected {}, got {}", symbol, resp.symbol));
+            return Err(eyre::eyre!(
+                "mexc symbol mismatch: expected {}, got {}",
+                symbol,
+                resp.symbol
+            ));
         }
         let price: f64 = resp.price.parse()?;
 
