@@ -49,6 +49,16 @@ impl PriceSource for Bitfinex {
         let price = arr[6];
         let volume = arr[7];
 
+        // Bitfinex array format has no pair identifier — the URL path is the
+        // only binding.  Sanity-check that price is positive and finite.
+        if !price.is_finite() || price <= 0.0 {
+            return Err(eyre::eyre!(
+                "bitfinex returned invalid price {} for {}",
+                price,
+                pair
+            ));
+        }
+
         Ok(Some(PricePoint {
             price,
             volume,

@@ -30,6 +30,9 @@ struct BitgetResponse {
     code: String,
     #[serde(default)]
     data: Vec<BitgetTicker>,
+    /// Server timestamp in milliseconds
+    #[serde(default, rename = "requestTime")]
+    request_time: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -76,12 +79,14 @@ impl PriceSource for Bitget {
         let price: f64 = ticker.last_pr.parse()?;
         let volume: f64 = ticker.base_volume.parse().unwrap_or(0.0);
 
+        let server_time = resp.request_time.map(|ms| ms / 1000);
+
         Ok(Some(PricePoint {
             price,
             volume,
             timestamp: now_secs(),
             source: "bitget".into(),
-            server_time: None,
+            server_time,
         }))
     }
 

@@ -60,9 +60,8 @@ impl PriceSource for Kraken {
 
         let ticker = resp
             .result
-            .values()
-            .next()
-            .ok_or_else(|| eyre::eyre!("empty Kraken result for {}", pair))?;
+            .get(pair)
+            .ok_or_else(|| eyre::eyre!("pair {} not found in Kraken result", pair))?;
 
         let price: f64 = ticker
             .c
@@ -71,6 +70,9 @@ impl PriceSource for Kraken {
             .parse()?;
         let volume: f64 = ticker.v.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
 
+        // Kraken returns server time in "result" but not per-ticker.
+        // Use the dedicated /0/public/Time endpoint is wasteful, so we
+        // rely on the response arriving within seconds of the server clock.
         Ok(Some(PricePoint {
             price,
             volume,
