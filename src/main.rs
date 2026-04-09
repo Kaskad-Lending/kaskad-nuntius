@@ -210,11 +210,12 @@ async fn main() -> Result<()> {
             // 1. Fetch from all sources
             let mut prices = sources::fetch_all(&price_sources, asset).await;
 
-            if prices.len() < 3 {
+            if prices.len() < asset.min_sources() {
                 warn!(
                     asset = asset.symbol(),
                     num_sources = prices.len(),
-                    "Data Quorum (3) not met. Skipping update to prevent Liquidity Eclipse."
+                    min_required = asset.min_sources(),
+                    "Data Quorum not met. Skipping update to prevent Liquidity Eclipse."
                 );
                 continue;
             }
@@ -234,6 +235,17 @@ async fn main() -> Result<()> {
                     removed = before - prices.len(),
                     "rejected outliers"
                 );
+            }
+
+            // Re-check quorum after outlier rejection
+            if prices.len() < asset.min_sources() {
+                warn!(
+                    asset = asset.symbol(),
+                    remaining = prices.len(),
+                    min_required = asset.min_sources(),
+                    "Data Quorum lost after outlier rejection. Skipping."
+                );
+                continue;
             }
 
             // 3. Compute weighted median
