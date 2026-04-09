@@ -7,25 +7,25 @@
   "attestation": {
     "CertManager": "0xAb46cBe48ABB2595E55B4E115BE18D7ad9981ea7",
     "NitroProver": "0x0Ec1Ebef87F632890c735ca0809f213b1F1972b8",
-    "NitroAttestationVerifier": "0x4B657Ce44D35C5a62D99f9D816B30fDecb0eFf98"
+    "NitroAttestationVerifier": "0x073A4c08cDD5F8c7884e13d48906215dC1EC2Dd0",
+    "_note": "Using MockAttestationVerifier — real Nitro verifyCerts too expensive for frequent redeploys on Galleon"
   },
 
   "teeOracle": {
-    "KaskadPriceOracle": "0xF9549E8F570FD55560D5Bb50aB824C2919fa1af0",
-    "expectedPCR0": "0x0f2ab20ae5f5fc28b610c5adcbc178e078769200e7287c2b21b57a55448360ea",
-    "enclaveSigner": "0xf8EB0D3AD8D427E39DF9Cc5600439AbD3B796F1A",
+    "KaskadPriceOracle": "0xCb6E83bf47CbdA7134bD6F5EB6DA322F589fFc35",
+    "enclaveSigner": "0x364B233829A3Ef3810ac2c5c705Ae83B49C1E01e",
     "MAX_FUTURE_TIMESTAMP": "3 hours (10800s)"
   },
 
   "aggregators": {
-    "ETH/USD": "0x34ECdb9472a9100c8cAABA2044a1dae99566C74C",
-    "BTC/USD": "0x2bBAE35e7D7b2b1944265d293c46c11dc52e0851",
-    "USDC/USD": "0xEEBb5199ccD7505CfA400cf89aBC05790011841b",
-    "KAS/USD": "0x6Fb0D7929f7aBc4f6A68E7c1354862bF3F9c1863"
+    "ETH/USD": "0xBe67B4fa9059009b4ef290e1C3c8407BA035a3D0",
+    "BTC/USD": "0x95fad6b9e4DdF697349695Ff2c02D60De140426a",
+    "USDC/USD": "0xcD2FFbAFaA875D825274081d309155Eecc9c052a",
+    "KAS/USD": "0xC0812c7e7d32Cfed7c07dE0AFB4D83dB11Ba1b16"
   },
 
   "router": {
-    "KaskadRouter": "0x1e9A986D25B1e0C735d4680fAb726716Ac4212b9"
+    "KaskadRouter": "0x6e80fB31a80Ad0c407d6c907684FF51Bc2BFa038"
   },
 
   "integration": {
