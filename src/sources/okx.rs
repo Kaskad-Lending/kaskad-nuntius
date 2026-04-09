@@ -60,7 +60,11 @@ impl PriceSource for Okx {
             .ok_or_else(|| eyre::eyre!("no ticker data from OKX"))?;
 
         if ticker.inst_id != inst_id {
-            return Err(eyre::eyre!("okx instId mismatch: expected {}, got {}", inst_id, ticker.inst_id));
+            return Err(eyre::eyre!(
+                "okx instId mismatch: expected {}, got {}",
+                inst_id,
+                ticker.inst_id
+            ));
         }
         let price: f64 = ticker.last.parse()?;
         let volume: f64 = ticker.vol24h.parse().unwrap_or(0.0);

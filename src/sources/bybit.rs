@@ -65,12 +65,20 @@ impl PriceSource for Bybit {
             .ok_or_else(|| eyre::eyre!("no ticker data from Bybit"))?;
 
         if ticker.symbol != symbol {
-            return Err(eyre::eyre!("bybit symbol mismatch: expected {}, got {}", symbol, ticker.symbol));
+            return Err(eyre::eyre!(
+                "bybit symbol mismatch: expected {}, got {}",
+                symbol,
+                ticker.symbol
+            ));
         }
         let price: f64 = ticker.last_price.parse()?;
         let volume: f64 = ticker.volume24h.parse().unwrap_or(0.0);
 
-        let server_time = if resp.time > 0 { Some(resp.time / 1000) } else { None };
+        let server_time = if resp.time > 0 {
+            Some(resp.time / 1000)
+        } else {
+            None
+        };
 
         Ok(Some(PricePoint {
             price,
