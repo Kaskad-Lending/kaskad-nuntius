@@ -2,7 +2,7 @@
   "chainId": 38836,
   "network": "Galleon Testnet",
   "rpc": "https://galleon-testnet.igralabs.com:8545",
-  "deployedAt": "2026-04-09",
+  "deployedAt": "2026-04-10",
 
   "attestation": {
     "CertManager": "0x6E802C12Ebd69f541e7a204e041b22AF5e028624",
