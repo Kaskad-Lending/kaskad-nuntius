@@ -2,11 +2,10 @@
 # Full-flow integration test:
 #   1. Start Anvil
 #   2. Deploy contracts (MockVerifier for local)
-#   3. Build & run Rust oracle binary (SINGLE_RUN mode)
-#   4. Oracle fetches REAL prices from exchanges
-#   5. Signs with MockSigner
-#   6. Publishes to Anvil via Publisher
-#   7. Verify prices on-chain
+#   3. Build Rust oracle binary
+#   4. Run oracle (background), wait for pull API prices
+#   5. Push signed prices on-chain via cast
+#   6. Verify prices on-chain
 set -euo pipefail
 
 echo "═══════════════════════════════════════════════════"
@@ -67,27 +66,90 @@ cd ${PROJECT_DIR}
 cargo build --release 2>&1 | tail -3
 echo "  ✓ Built"
 
-# ─── 4. Run oracle in SINGLE_RUN mode ────────────────
+# ─── 4. Run oracle (background) and pull prices ──────
 echo ""
-echo "▸ Running oracle (fetching REAL prices, signing, publishing)..."
-echo "  This will take ~10-15 seconds (API calls to 8 exchanges)..."
+echo "▸ Running oracle (fetching REAL prices, signing)..."
+echo "  This will take ~10-15 seconds (API calls to exchanges)..."
 echo ""
 
-SINGLE_RUN=1 \
+PULL_API_PORT=5001
 ORACLE_PRIVATE_KEY=${ORACLE_PRIVATE_KEY} \
-RPC_URL=${RPC_URL} \
-ORACLE_CONTRACT=${ORACLE_ADDR} \
-TX_SIGNER_KEY=${TX_SIGNER_KEY} \
-CHAIN_ID=31337 \
+VSOCK_PORT=${PULL_API_PORT} \
 RUST_LOG=info \
-timeout 60 ${PROJECT_DIR}/target/release/kaskad-oracle 2>&1 || true
+${PROJECT_DIR}/target/release/kaskad-oracle &
+ORACLE_PID=$!
+trap "kill $ANVIL_PID $ORACLE_PID 2>/dev/null || true" EXIT
 
+# Wait for pull API to have prices
+echo "  Waiting for signed prices in pull API..."
+for i in $(seq 1 30); do
+  sleep 2
+  NUM=$(python3 -c "
+import socket, struct, json, sys
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(3)
+    s.connect(('127.0.0.1', ${PULL_API_PORT}))
+    req = json.dumps({'method': 'get_prices'}).encode()
+    s.sendall(struct.pack('>I', len(req)))
+    s.sendall(req)
+    rl = struct.unpack('>I', s.recv(4))[0]
+    d = b''
+    while len(d) < rl: d += s.recv(rl - len(d))
+    s.close()
+    print(len(json.loads(d).get('prices', [])))
+except: print(0)
+" 2>/dev/null)
+  if [ "${NUM:-0}" -ge 2 ]; then
+    echo "  ✓ Pull API has ${NUM} prices"
+    break
+  fi
+done
+
+# ─── 5. Push prices on-chain via cast ────────────────
 echo ""
+echo "▸ Pushing prices on-chain..."
+
+PRICES_JSON=$(python3 -c "
+import socket, struct, json
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(5)
+s.connect(('127.0.0.1', ${PULL_API_PORT}))
+req = json.dumps({'method': 'get_prices'}).encode()
+s.sendall(struct.pack('>I', len(req)))
+s.sendall(req)
+rl = struct.unpack('>I', s.recv(4))[0]
+d = b''
+while len(d) < rl: d += s.recv(rl - len(d))
+s.close()
+print(d.decode())
+")
+
+echo "$PRICES_JSON" | python3 -c "
+import sys, json, subprocess
+data = json.loads(sys.stdin.read())
+for p in data.get('prices', []):
+    cmd = [
+        'cast', 'send', '--rpc-url', '${RPC_URL}',
+        '--private-key', '${TX_SIGNER_KEY}',
+        '${ORACLE_ADDR}',
+        'updatePrice(bytes32,uint256,uint256,uint8,bytes32,bytes)',
+        p['asset_id'], str(p['price']), str(p['timestamp']),
+        str(p['num_sources']), p['sources_hash'], p['signature']
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    sym = p['asset_symbol']
+    if r.returncode == 0:
+        print(f'  ✓ {sym} pushed')
+    else:
+        print(f'  ⚠ {sym} failed: {r.stderr.strip()[:80]}')
+"
+
 echo "  ✓ Oracle run complete"
 
-# ─── 5. Verify prices on-chain ───────────────────────
+# ─── 6. Verify prices on-chain ───────────────────────
 echo ""
-echo "▸ Verifying prices on-chain..."
+echo "▸ [6/6] Verifying prices on-chain..."
 
 ASSETS=("ETH/USD" "BTC/USD" "KAS/USD" "USDC/USD" "IGRA/USD")
 FOUND=0
