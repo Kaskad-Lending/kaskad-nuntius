@@ -79,6 +79,16 @@ impl Asset {
         }
     }
 
+    /// Minimum number of sources required to sign a price (Data Quorum).
+    pub fn min_sources(&self) -> usize {
+        match self {
+            Asset::EthUsd | Asset::BtcUsd => 3,
+            Asset::KasUsd => 3,
+            Asset::UsdcUsd => 2,  // only 3 exchanges carry USDC/USDT
+            Asset::IgraUsd => 1,  // governance-set, single source
+        }
+    }
+
     /// Heartbeat interval in seconds (max time between updates).
     pub fn heartbeat_seconds(&self) -> u64 {
         match self {
