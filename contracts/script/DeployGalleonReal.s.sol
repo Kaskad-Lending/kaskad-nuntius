@@ -47,7 +47,7 @@ contract DeployGalleonReal is Script {
 
         // ─── 3. Oracle with real PCR0 ────────────────────────────
         // Galleon testnet: block.timestamp derives from DAA scores, lags up to 2h
-        KaskadPriceOracle oracle = new KaskadPriceOracle(pcr0, address(verifier), 3 hours);
+        KaskadPriceOracle oracle = new KaskadPriceOracle(pcr0, address(verifier));
         console.log("KaskadPriceOracle:", address(oracle));
 
         oracle.registerEnclave(attestationDoc);

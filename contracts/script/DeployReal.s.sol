@@ -41,8 +41,7 @@ contract DeployReal is Script {
         verifier.verifyCerts(attestationDoc);
 
         // 3. Deploy Oracle with REAL PCR0
-        uint256 maxFutureTs = vm.envOr("MAX_FUTURE_TIMESTAMP", uint256(5 minutes));
-        KaskadPriceOracle oracle = new KaskadPriceOracle(pcr0, address(verifier), maxFutureTs);
+        KaskadPriceOracle oracle = new KaskadPriceOracle(pcr0, address(verifier));
         console.log("KaskadPriceOracle deployed at:", address(oracle));
 
         // 4. Register the real AWS Enclave on-chain
