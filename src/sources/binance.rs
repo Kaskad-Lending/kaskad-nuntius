@@ -18,7 +18,7 @@ impl Binance {
         match asset {
             Asset::EthUsd => Some("ETHUSDT"),
             Asset::BtcUsd => Some("BTCUSDT"),
-            Asset::KasUsd => Some("KASUSDT"),
+            // Binance does not list KASUSDT (as of 2026-04)
             Asset::UsdcUsd => Some("USDCUSDT"),
             _ => None,
         }

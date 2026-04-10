@@ -27,7 +27,6 @@ impl Bitstamp {
 
 #[derive(Deserialize)]
 struct BitstampTicker {
-    pair: String,
     last: String,
     volume: String,
     #[serde(default)]
@@ -43,18 +42,9 @@ impl PriceSource for Bitstamp {
         };
 
         let url = format!("https://www.bitstamp.net/api/v2/ticker/{}/", pair);
+        // Bitstamp response has no pair identifier — binding is URL-only.
+        // TLS ensures we hit the correct endpoint for the requested pair.
         let resp: BitstampTicker = self.client.get_json(&url).await?;
-
-        // Bitstamp returns pair as "ETH/USD"; our key is "ethusd".
-        // Normalize both to lowercase without separators for comparison.
-        let resp_normalized: String = resp.pair.to_lowercase().replace('/', "");
-        if resp_normalized != pair {
-            return Err(eyre::eyre!(
-                "bitstamp pair mismatch: expected {}, got {}",
-                pair,
-                resp.pair
-            ));
-        }
 
         let price: f64 = resp.last.parse()?;
         let volume: f64 = resp.volume.parse().unwrap_or(0.0);
