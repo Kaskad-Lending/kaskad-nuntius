@@ -1,3 +1,5 @@
+pub mod robust;
+
 use crate::types::PricePoint;
 use alloy_primitives::U256;
 
