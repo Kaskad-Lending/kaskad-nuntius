@@ -18,7 +18,7 @@ impl Okx {
         match asset {
             Asset::EthUsd => Some("ETH-USDT"),
             Asset::BtcUsd => Some("BTC-USDT"),
-            Asset::KasUsd => Some("KAS-USDT"),
+            // OKX does not list KAS-USDT (as of 2026-04)
             Asset::UsdcUsd => Some("USDC-USDT"),
             _ => None,
         }
