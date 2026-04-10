@@ -45,9 +45,6 @@ contract KaskadPriceOracle {
     ///         Protects against flash crashes and oracle manipulation.
     uint16 public constant MAX_PRICE_CHANGE_BPS = 1500; // 15%
 
-    /// @notice Minimum time between updates in seconds (rate limiter).
-    uint256 public constant MIN_UPDATE_DELAY = 5;
-
     /// @notice If the last update is older than this, skip the circuit breaker.
     ///         Prevents permanent asset lockout after extended downtime.
     uint256 public constant CIRCUIT_BREAKER_STALENESS = 4 hours;
@@ -97,7 +94,6 @@ contract KaskadPriceOracle {
     error NoEnclaveRegistered();
     error InsufficientSources();
     error PriceChangeExceedsLimit(uint256 changeBps, uint256 maxBps);
-    error UpdateTooFrequent(uint256 elapsed, uint256 minDelay);
     error FutureTimestamp(uint256 timestamp, uint256 maxAllowed);
     error NoPriceData(bytes32 assetId);
 
@@ -178,11 +174,6 @@ contract KaskadPriceOracle {
         // Prevent Chronos-DoS (future timestamp lockout via host OS clock manipulation)
         if (timestamp > block.timestamp + MAX_FUTURE_TIMESTAMP) {
             revert FutureTimestamp(timestamp, block.timestamp + MAX_FUTURE_TIMESTAMP);
-        }
-
-        // Rate limiter: prevent spam updates (use signed timestamps for consistent ordering)
-        if (current.signedTimestamp > 0 && timestamp - current.signedTimestamp < MIN_UPDATE_DELAY) {
-            revert UpdateTooFrequent(timestamp - current.signedTimestamp, MIN_UPDATE_DELAY);
         }
 
         // Circuit breaker: reject extreme price changes.

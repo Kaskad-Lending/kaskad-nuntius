@@ -58,7 +58,7 @@ contract KaskadRouter is ReentrancyGuard {
     // ─── Internal: push prices ──────────────────────────────────────
 
     /// @dev Validates freshness, then pushes each price to the oracle.
-    ///      Only skips StalePrice and UpdateTooFrequent (price already fresh on-chain).
+    ///      Only skips StalePrice (price already fresh on-chain).
     ///      Reverts on all other errors (circuit breaker, invalid sig, etc).
     function _pushPrices(PriceUpdate[] calldata prices) internal {
         for (uint256 i = 0; i < prices.length; i++) {
@@ -75,11 +75,8 @@ contract KaskadRouter is ReentrancyGuard {
             ) {} catch (bytes memory reason) {
                 // Only skip errors that mean "price is already fresh on-chain"
                 bytes4 selector = bytes4(reason);
-                if (
-                    selector == KaskadPriceOracle.StalePrice.selector ||
-                    selector == KaskadPriceOracle.UpdateTooFrequent.selector
-                ) {
-                    // Safe: on-chain price is already at or ahead of this update.
+                if (selector == KaskadPriceOracle.StalePrice.selector) {
+                    // Safe: on-chain price is already ahead of this update.
                     continue;
                 }
                 // Everything else is unsafe to skip (circuit breaker, bad sig, etc)

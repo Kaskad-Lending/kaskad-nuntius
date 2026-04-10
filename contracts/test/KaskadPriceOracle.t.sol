@@ -297,25 +297,7 @@ contract KaskadPriceOracleTest is Test {
 
     // ─── Rate Limiter ────────────────────────────────────────────────
 
-    function test_rate_limiter_rejects_too_fast() public {
-        _submitPrice(ETH_USD, 100000000000, 1710000000, 4);
-
-        vm.warp(1710000002);
-        // Try to update 2 seconds later (< 5s minimum)
-        bytes32 sourcesHash = keccak256("test_sources");
-        bytes memory sig = _signUpdate(ETH_USD, 100010000000, 1710000002, 4, sourcesHash);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                KaskadPriceOracle.UpdateTooFrequent.selector,
-                uint256(2), // elapsed
-                uint256(5)  // min delay
-            )
-        );
-        oracle.updatePrice(ETH_USD, 100010000000, 1710000002, 4, sourcesHash, sig);
-    }
-
-    function test_rate_limiter_allows_after_delay() public {
+    function test_rapid_updates_allowed() public {
         _submitPrice(ETH_USD, 100000000000, 1710000000, 4);
 
         vm.warp(1710000010);
