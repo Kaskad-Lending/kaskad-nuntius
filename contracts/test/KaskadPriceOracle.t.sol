@@ -29,7 +29,7 @@ contract KaskadPriceOracleTest is Test {
         mockVerifier = new MockAttestationVerifier(EXPECTED_PCR0, signer);
 
         // Deploy oracle with expected PCR0 and mock verifier
-        oracle = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier), 5 minutes);
+        oracle = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier));
 
         // Register enclave (via mock attestation)
         oracle.registerEnclave(hex"00"); // any bytes, mock verifier accepts all
@@ -96,7 +96,7 @@ contract KaskadPriceOracleTest is Test {
 
     function test_registerEnclave_success() public {
         // Deploy fresh oracle
-        KaskadPriceOracle fresh = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier), 5 minutes);
+        KaskadPriceOracle fresh = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier));
 
         // Anyone can register
         vm.prank(address(0xCAFE)); // random caller
@@ -109,8 +109,7 @@ contract KaskadPriceOracleTest is Test {
         FailingAttestationVerifier failVerifier = new FailingAttestationVerifier();
         KaskadPriceOracle oracleWithFailVerifier = new KaskadPriceOracle(
             EXPECTED_PCR0,
-            address(failVerifier),
-            5 minutes
+            address(failVerifier)
         );
 
         vm.expectRevert(KaskadPriceOracle.InvalidAttestation.selector);
@@ -121,8 +120,7 @@ contract KaskadPriceOracleTest is Test {
         WrongPCR0Verifier wrongVerifier = new WrongPCR0Verifier(signer);
         KaskadPriceOracle oracleWithWrongPCR = new KaskadPriceOracle(
             EXPECTED_PCR0,
-            address(wrongVerifier),
-            5 minutes
+            address(wrongVerifier)
         );
 
         vm.expectRevert(
@@ -139,7 +137,7 @@ contract KaskadPriceOracleTest is Test {
         // A new valid enclave can replace the old one (e.g. after restart)
         address newSigner = address(0xBEEF);
         MockAttestationVerifier newVerifier = new MockAttestationVerifier(EXPECTED_PCR0, newSigner);
-        KaskadPriceOracle o = new KaskadPriceOracle(EXPECTED_PCR0, address(newVerifier), 5 minutes);
+        KaskadPriceOracle o = new KaskadPriceOracle(EXPECTED_PCR0, address(newVerifier));
 
         o.registerEnclave(hex"00");
         assertEq(o.oracleSigner(), newSigner);
@@ -206,7 +204,7 @@ contract KaskadPriceOracleTest is Test {
     // ─── Rejections ──────────────────────────────────────────────────
 
     function test_updatePrice_reverts_no_enclave() public {
-        KaskadPriceOracle unregistered = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier), 5 minutes);
+        KaskadPriceOracle unregistered = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier));
         // Don't register enclave
 
         uint256 ts = block.timestamp;
@@ -383,21 +381,14 @@ contract KaskadPriceOracleTest is Test {
         assertEq(price, 212926000000);
     }
 
-    function test_future_timestamp_over_boundary_reverts() public {
-        // 5 minutes + 1 second — should revert
-        uint256 ts = block.timestamp + 5 minutes + 1;
+    function test_future_timestamp_allowed() public {
+        // Future timestamps are allowed — enclave uses exchange server time,
+        // host cannot manipulate. No Chronos-DoS risk.
+        uint256 ts = block.timestamp + 1 hours;
+        _submitPrice(ETH_USD, 212926000000, ts, 4);
 
-        bytes32 sourcesHash = keccak256("test_sources");
-        bytes memory sig = _signUpdate(ETH_USD, 100, ts, 3, sourcesHash);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                KaskadPriceOracle.FutureTimestamp.selector,
-                ts,
-                block.timestamp + 5 minutes
-            )
-        );
-        oracle.updatePrice(ETH_USD, 100, ts, 3, sourcesHash, sig);
+        (uint256 price, , , ) = oracle.getLatestPrice(ETH_USD);
+        assertEq(price, 212926000000);
     }
 
     // ─── Uninitialized Asset ────────────────────────────────────────
@@ -507,7 +498,7 @@ contract KaskadPriceOracleTest is Test {
     }
 
     function test_gas_registerEnclave() public {
-        KaskadPriceOracle fresh = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier), 5 minutes);
+        KaskadPriceOracle fresh = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier));
 
         uint256 gasBefore = gasleft();
         fresh.registerEnclave(hex"00");
@@ -555,7 +546,7 @@ contract RelayerE2ETest is Test {
         signerAddr = vm.addr(signerPk);
 
         mockVerifier = new MockAttestationVerifier(PCR0, signerAddr);
-        oracle = new KaskadPriceOracle(PCR0, address(mockVerifier), 5 minutes);
+        oracle = new KaskadPriceOracle(PCR0, address(mockVerifier));
         oracle.registerEnclave(hex"00");
 
         ethAgg  = new KaskadAggregatorV3(address(oracle), ETH_USD,  "ETH / USD");
@@ -763,7 +754,7 @@ contract RelayerE2ETest is Test {
         MockAttestationVerifier newVerifier = new MockAttestationVerifier(PCR0, newAddr);
 
         // Re-deploy oracle and re-register
-        KaskadPriceOracle fresh = new KaskadPriceOracle(PCR0, address(newVerifier), 5 minutes);
+        KaskadPriceOracle fresh = new KaskadPriceOracle(PCR0, address(newVerifier));
         fresh.registerEnclave(hex"00");
         assertEq(fresh.oracleSigner(), newAddr);
 

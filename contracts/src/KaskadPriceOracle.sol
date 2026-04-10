@@ -49,12 +49,6 @@ contract KaskadPriceOracle {
     ///         Prevents permanent asset lockout after extended downtime.
     uint256 public constant CIRCUIT_BREAKER_STALENESS = 4 hours;
 
-    /// @notice Maximum allowed future timestamp offset (Chronos-DoS protection).
-    ///         Configurable at deploy: chains with synthetic timestamps (e.g. Igra/Galleon
-    ///         where block.timestamp derives from DAA scores) may lag real time by hours.
-    ///         Galleon testnet: 3 hours. Mainnet (after Igra timestamp fix): 5 minutes.
-    uint256 public immutable MAX_FUTURE_TIMESTAMP;
-
     // ─── State ───────────────────────────────────────────────────────────
 
     /// @notice Currently registered enclave.
@@ -94,19 +88,15 @@ contract KaskadPriceOracle {
     error NoEnclaveRegistered();
     error InsufficientSources();
     error PriceChangeExceedsLimit(uint256 changeBps, uint256 maxBps);
-    error FutureTimestamp(uint256 timestamp, uint256 maxAllowed);
     error NoPriceData(bytes32 assetId);
 
     // ─── Constructor ─────────────────────────────────────────────────────
 
-    /// @param _expectedPCR0        The expected enclave image hash. IMMUTABLE.
-    /// @param _verifier            Address of the attestation verifier. IMMUTABLE.
-    /// @param _maxFutureTimestamp   Max seconds a price timestamp may exceed block.timestamp.
-    ///                             Galleon testnet: 10800 (3h). Mainnet: 300 (5m).
-    constructor(bytes32 _expectedPCR0, address _verifier, uint256 _maxFutureTimestamp) {
+    /// @param _expectedPCR0  The expected enclave image hash. IMMUTABLE.
+    /// @param _verifier      Address of the attestation verifier. IMMUTABLE.
+    constructor(bytes32 _expectedPCR0, address _verifier) {
         expectedPCR0 = _expectedPCR0;
         verifier = IAttestationVerifier(_verifier);
-        MAX_FUTURE_TIMESTAMP = _maxFutureTimestamp;
     }
 
     // NO owner. NO admin. NO setOracleSigner(). NO transferOwnership().
@@ -169,11 +159,6 @@ contract KaskadPriceOracle {
         // Prevent stale/replay updates (compare enclave-signed timestamps for ordering)
         if (current.signedTimestamp > 0 && timestamp <= current.signedTimestamp) {
             revert StalePrice(timestamp, current.signedTimestamp);
-        }
-
-        // Prevent Chronos-DoS (future timestamp lockout via host OS clock manipulation)
-        if (timestamp > block.timestamp + MAX_FUTURE_TIMESTAMP) {
-            revert FutureTimestamp(timestamp, block.timestamp + MAX_FUTURE_TIMESTAMP);
         }
 
         // Circuit breaker: reject extreme price changes.

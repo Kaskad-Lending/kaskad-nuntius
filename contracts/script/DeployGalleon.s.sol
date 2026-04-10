@@ -36,7 +36,7 @@ contract DeployGalleon is Script {
         console.log("MockAttestationVerifier:", address(verifier));
 
         // Galleon testnet: block.timestamp derives from DAA scores, lags up to 2h
-        KaskadPriceOracle oracle = new KaskadPriceOracle(expectedPCR0, address(verifier), 3 hours);
+        KaskadPriceOracle oracle = new KaskadPriceOracle(expectedPCR0, address(verifier));
         console.log("KaskadPriceOracle:", address(oracle));
 
         oracle.registerEnclave(hex"00");
