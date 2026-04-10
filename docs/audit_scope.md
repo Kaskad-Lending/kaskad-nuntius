@@ -39,8 +39,8 @@ Key security properties:
 
 | Contract | Lines | Focus |
 |----------|-------|-------|
-| `KaskadPriceOracle.sol` | 276 | Core oracle. Signature verification, replay prevention (signedTimestamp ordering), circuit breaker (15% max change / 4h staleness bypass), no rate limiter (caller pays gas, enclave signature prevents spam), future timestamp cap (configurable per chain). Dual timestamp model: `block.timestamp` for consumers, `signedTimestamp` for ordering |
-| `KaskadRouter.sol` | 161 | Aave integration wrapper. `borrowWithPrices`, `withdrawWithPrices`, `liquidateWithPrices`. Selective try/catch (only `StalePrice` + `UpdateTooFrequent`). `MAX_PRICE_AGE=60s`. Delegation model (user approves once, Router acts on behalf) |
+| `KaskadPriceOracle.sol` | ~240 | Core oracle. Signature verification, replay prevention (signedTimestamp ordering), circuit breaker (15% max change / 4h staleness bypass). No rate limiter (caller pays gas, enclave signature prevents spam). No future timestamp cap (enclave uses TLS-verified exchange server timestamps, host cannot manipulate). Dual timestamp model: `block.timestamp` for consumers, `signedTimestamp` for ordering. Constructor: `(bytes32 pcr0, address verifier)` |
+| `KaskadRouter.sol` | ~155 | Aave integration wrapper. `borrowWithPrices`, `withdrawWithPrices`, `liquidateWithPrices`. Selective try/catch (only `StalePrice`). `MAX_PRICE_AGE=60s`. Delegation model (user approves once, Router acts on behalf) |
 | `KaskadAggregatorV3.sol` | 99 | Chainlink IAggregatorV3 compatibility wrapper. Per-asset deploy, reads from KaskadPriceOracle, uint80 roundId bounds check |
 | `NitroAttestationVerifier.sol` | 137 | Wraps Marlin NitroProver. Extracts PCR0/PCR1/PCR2 from CBOR attestation, derives Ethereum address from enclave public key, validates PCR-1/PCR-2 (optional) |
 
@@ -48,8 +48,10 @@ Key security properties:
 - Can a valid signature from a previous enclave instance be replayed after key rotation?
 - Is the circuit breaker bypassable? Can an attacker lock an asset permanently?
 - Can the dual timestamp model (signedTimestamp vs block.timestamp) be exploited?
+- Without rate limiter or future timestamp cap, can an attacker grief the system via rapid updates or far-future signed timestamps?
 - Is the EIP-191 signing payload collision-resistant across assets?
 - Can Router be used to extract value via selective price staleness?
+- With only `StalePrice` caught in Router, can other revert paths (circuit breaker, invalid sig) cause user funds to be stuck?
 
 ### 2. Rust Oracle Binary (`src/`)
 
@@ -153,22 +155,21 @@ Exchange API (HTTPS)
 
 ## Deployment Configuration
 
-### Galleon Testnet (current)
+### Parameters (same for testnet and mainnet)
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| `MAX_FUTURE_TIMESTAMP` | 3 hours | Galleon block.timestamp derived from DAA scores, drifts ~100min from UTC |
-| `MAX_PRICE_CHANGE_BPS` | 1500 (15%) | Circuit breaker |
-| `CIRCUIT_BREAKER_STALENESS` | 4 hours | Bypass after extended downtime |
-| `MAX_PRICE_AGE` (Router) | 60 seconds | Uses block.timestamp (not exchange time) |
-| Data Quorum | ETH/BTC/KAS: 3, USDC: 2, IGRA: 1 | Per-asset minimum sources |
+| `MAX_PRICE_CHANGE_BPS` | 1500 (15%) | Circuit breaker — rejects single-update price swings |
+| `CIRCUIT_BREAKER_STALENESS` | 4 hours | Bypass circuit breaker after extended downtime (prevents permanent asset lockout) |
+| `MAX_PRICE_AGE` (Router) | 60 seconds | Freshness check for user-submitted prices in Router |
+| Data Quorum | ETH/BTC/KAS: 3, USDC: 2, IGRA: 1 | Per-asset minimum sources before signing |
 
-### Mainnet (planned)
+### Removed parameters (by design)
 
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| `MAX_FUTURE_TIMESTAMP` | 5 minutes | Normal chain with accurate timestamps |
-| Other parameters | Same | No change expected |
+| Parameter | Removed | Rationale |
+|-----------|---------|-----------|
+| `MAX_FUTURE_TIMESTAMP` | Yes | Enclave uses TLS-verified exchange server timestamps — host cannot set clock in future. Check conflicted with chains where block.timestamp drifts (Igra/Galleon DAA scores) |
+| `MIN_UPDATE_DELAY` (rate limiter) | Yes | Caller pays gas (self-limiting), enclave signature required (no fakes), replay prevented by signedTimestamp ordering. Blocked concurrent Router users (two borrowWithPrices in same block) |
 
 ---
 
@@ -183,6 +184,8 @@ Exchange API (HTTPS)
 4. **Host proxy trust** -- The host EC2 instance proxies all HTTP traffic for the enclave. A compromised host could selectively block or delay API responses. Mitigated by: data quorum (min 3 sources), MAD outlier rejection, TLS inside enclave (host sees ciphertext). Cannot forge prices because signing key is in enclave.
 
 5. **Dual timestamp model** -- `block.timestamp` stored for consumers (Aave staleness), `signedTimestamp` (exchange server time) for replay prevention. Designed for chains where block.timestamp diverges from real time. Tradeoff: consumers see "on-chain freshness" not "real-world freshness".
+
+6. **No rate limiter, no future timestamp cap** -- Intentionally removed. Rate limiter blocked concurrent Router users. Future timestamp cap conflicted with DAA-based chains. Security relies on: enclave signature (unforgeable), signedTimestamp ordering (replay prevention), circuit breaker (price manipulation), data quorum (multi-source). Auditors should verify these are sufficient without the removed checks.
 
 ---
 
