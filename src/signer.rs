@@ -121,19 +121,15 @@ impl OracleSigner for MockSigner {
 pub struct EnclaveSigner {
     signing_key: SigningKey,
     address: [u8; 20],
-    attestation_doc: Vec<u8>,
+    /// Uncompressed public key bytes (65 bytes: 0x04 + X + Y).
+    /// Kept so we can regenerate fresh attestation docs on demand.
+    pubkey_bytes: Vec<u8>,
 }
 
 #[cfg(target_os = "linux")]
 impl EnclaveSigner {
     pub fn new() -> Result<Self> {
-        // 1. Initialize NSM
-        let fd = aws_nitro_enclaves_nsm_api::driver::nsm_init();
-        if fd < 0 {
-            return Err(eyre::eyre!("nsm_init failed: {}", fd));
-        }
-
-        // 2. Generate random ECDSA secp256k1 keypair
+        // 1. Generate random ECDSA secp256k1 keypair
         let signing_key = SigningKey::random(&mut rand::thread_rng());
         let verifying_key = signing_key.verifying_key();
 
@@ -146,37 +142,43 @@ impl EnclaveSigner {
         let mut address = [0u8; 20];
         address.copy_from_slice(&hash[12..]);
 
-        // 3. Request attestation document tying the enclave build to our public key
+        // 2. Verify we can reach the NSM by issuing one attestation request.
+        //    The result is discarded — /attestation endpoint regenerates on demand.
+        let me = Self {
+            signing_key,
+            address,
+            pubkey_bytes: pubkey_slice.to_vec(),
+        };
+        me.fresh_attestation_doc()?;
+
+        Ok(me)
+    }
+
+    /// Generate a fresh attestation document via NSM. AWS Nitro leaf certs
+    /// in the attestation chain live ~3 hours — callers must request a fresh
+    /// doc close to when they'll use it on-chain.
+    pub fn fresh_attestation_doc(&self) -> Result<Vec<u8>> {
+        let fd = aws_nitro_enclaves_nsm_api::driver::nsm_init();
+        if fd < 0 {
+            return Err(eyre::eyre!("nsm_init failed: {}", fd));
+        }
+
         let request = aws_nitro_enclaves_nsm_api::api::Request::Attestation {
-            public_key: Some(pubkey_slice.to_vec().into()),
-            user_data: None, // No extra user data needed for now
+            public_key: Some(self.pubkey_bytes.clone().into()),
+            user_data: None,
             nonce: None,
         };
 
         let response = aws_nitro_enclaves_nsm_api::driver::nsm_process_request(fd, request);
-        let attestation_doc = match response {
-            aws_nitro_enclaves_nsm_api::api::Response::Attestation { document } => document,
-            aws_nitro_enclaves_nsm_api::api::Response::Error(err) => {
-                aws_nitro_enclaves_nsm_api::driver::nsm_exit(fd);
-                return Err(eyre::eyre!("NSM Attestation Error: {:?}", err));
-            }
-            _ => {
-                aws_nitro_enclaves_nsm_api::driver::nsm_exit(fd);
-                return Err(eyre::eyre!("Unexpected NSM response"));
-            }
-        };
-
         aws_nitro_enclaves_nsm_api::driver::nsm_exit(fd);
 
-        Ok(Self {
-            signing_key,
-            address,
-            attestation_doc,
-        })
-    }
-
-    pub fn attestation_doc(&self) -> &[u8] {
-        &self.attestation_doc
+        match response {
+            aws_nitro_enclaves_nsm_api::api::Response::Attestation { document } => Ok(document),
+            aws_nitro_enclaves_nsm_api::api::Response::Error(err) => {
+                Err(eyre::eyre!("NSM Attestation Error: {:?}", err))
+            }
+            _ => Err(eyre::eyre!("Unexpected NSM response")),
+        }
     }
 }
 
@@ -225,6 +227,14 @@ impl OracleSigner for EnclaveSigner {
     }
 
     fn attestation_doc(&self) -> Option<Vec<u8>> {
-        Some(self.attestation_doc.clone())
+        // Regenerate via NSM on every call — AWS Nitro leaf certs have ~3h TTL,
+        // caching would hand out expired docs after a short while.
+        match self.fresh_attestation_doc() {
+            Ok(doc) => Some(doc),
+            Err(e) => {
+                tracing::warn!(error = %e, "NSM attestation request failed");
+                None
+            }
+        }
     }
 }
