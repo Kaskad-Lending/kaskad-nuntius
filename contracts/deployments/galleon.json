@@ -2,29 +2,28 @@
   "chainId": 38836,
   "network": "Galleon Testnet",
   "rpc": "https://galleon-testnet.igralabs.com:8545",
-  "deployedAt": "2026-04-10",
+  "deployedAt": "2026-04-13",
 
   "attestation": {
-    "CertManager": "0x6E802C12Ebd69f541e7a204e041b22AF5e028624",
-    "NitroProver": "0x5a0C8434A922837587B662C0adca63eab77D7F17",
-    "NitroAttestationVerifier": "0x172AE0862965982dc1222ec9d836d116A60Bcc6c"
+    "MockAttestationVerifier": "0xC1a59463E4d00dc08F146adF80E18DB807266DF1",
+    "_note": "Real Nitro verification blocked by Galleon block.timestamp drift (~4h > 3h AWS cert TTL). MockVerifier used on testnet until Igra fixes timestamp. Real Nitro stack (CertManager/NitroProver) remains deployed but inaccessible until chain catches up: CertManager 0x6E802C12Ebd69f541e7a204e041b22AF5e028624, NitroProver 0x5a0C8434A922837587B662C0adca63eab77D7F17, NitroAttestationVerifier 0x172AE0862965982dc1222ec9d836d116A60Bcc6c"
   },
 
   "teeOracle": {
-    "KaskadPriceOracle": "0x703502b6ea9386fF4438Cf00647CceD4a98dF576",
-    "expectedPCR0": "0x14cbbadd29f79d540edfd41833e7d6c1fa9ac2c22d1f9736dfb7179f0e4e85fc",
-    "enclaveSigner": "0xf570ab21d301c713b51a9D99110B61CcBd5B6fC8"
+    "KaskadPriceOracle": "0xDfbB1E4323290e22Bf1c3ca3299094493F560292",
+    "expectedPCR0": "0x0000000000000000000000000000000000000000000000000000000000000001",
+    "enclaveSigner": "0x931acf64D84f743B598F1c1deDb0ABfC3f3Ea2A3"
   },
 
   "aggregators": {
-    "ETH/USD": "0xF4f66da31847f484415A526B3b706D6E1AfCE670",
-    "BTC/USD": "0xa955Ae476AF3Bb5887B6b823221c1a65ed7f3122",
-    "USDC/USD": "0x54C69F23B6e036961d74b24B0c7422B518681107",
-    "KAS/USD": "0x1a08f53BF18BFefB84e38f7696042958EA6fF4F5"
+    "ETH/USD": "0xBC1f9F17e66fD5ec52a4B2fBAc164d0Ac7691596",
+    "BTC/USD": "0x5F3474623A59e425aaFD655b04493BE28fe65f5E",
+    "USDC/USD": "0xedd8a4363BA594101442CBc0f43F50c59922445c",
+    "KAS/USD": "0xC207275A7eDCC8C523ab38CD9D2D4F915543A989"
   },
 
   "router": {
-    "KaskadRouter": "0x1d7D764DEB924735A799Af8cC02373F69B894107"
+    "KaskadRouter": "0x03cC53C082eccEF8640321268155B9f0C7923ab4"
   },
 
   "integration": {
