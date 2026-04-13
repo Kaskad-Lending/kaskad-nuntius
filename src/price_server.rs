@@ -58,7 +58,6 @@ pub async fn run_price_server(
     store: PriceStore,
     signer: SharedSigner,
     signer_address: String,
-    attestation_doc_bytes: Option<Vec<u8>>,
 ) -> Result<()> {
     info!(port = port, "Starting VSOCK price server");
 
@@ -70,10 +69,9 @@ pub async fn run_price_server(
         let store = store.clone();
         let signer = signer.clone();
         let signer_addr = signer_address.clone();
-        let attestation = attestation_doc_bytes.clone();
 
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = handle_connection(stream, &store, &signer, &signer_addr, &attestation) {
+            if let Err(e) = handle_connection(stream, &store, &signer, &signer_addr) {
                 warn!(error = %e, "price server connection error");
             }
         });
@@ -85,7 +83,6 @@ fn handle_connection(
     store: &PriceStore,
     signer: &SharedSigner,
     signer_address: &str,
-    attestation_doc: &Option<Vec<u8>>,
 ) -> Result<()> {
     use std::io::{Read, Write};
 
@@ -104,7 +101,7 @@ fn handle_connection(
     stream.read_exact(&mut req_buf)?;
 
     let request: PriceRequest = serde_json::from_slice(&req_buf)?;
-    let response = process_request(&request, store, signer, signer_address, attestation_doc);
+    let response = process_request(&request, store, signer, signer_address);
 
     let resp_bytes = serde_json::to_vec(&response)?;
     stream.write_all(&(resp_bytes.len() as u32).to_be_bytes())?;
@@ -149,7 +146,6 @@ fn process_request(
     store: &PriceStore,
     signer: &SharedSigner,
     signer_address: &str,
-    attestation_doc: &Option<Vec<u8>>,
 ) -> PriceResponse {
     match request.method.as_str() {
         "get_prices" => {
@@ -222,19 +218,24 @@ fn process_request(
                 },
             }
         }
-        "get_attestation" => PriceResponse {
-            prices: None,
-            price: None,
-            error: if attestation_doc.is_none() {
-                Some("Attestation document missing".into())
-            } else {
-                None
-            },
-            status: None,
-            signer: Some(signer_address.to_string()),
-            num_assets: None,
-            attestation_doc: attestation_doc.as_ref().map(|doc| hex::encode(doc)),
-        },
+        "get_attestation" => {
+            // Regenerate fresh on every request — AWS Nitro leaf certs live ~3h,
+            // caching would serve expired docs and break registerEnclave on-chain.
+            let fresh = signer.attestation_doc();
+            PriceResponse {
+                prices: None,
+                price: None,
+                error: if fresh.is_none() {
+                    Some("Attestation document unavailable".into())
+                } else {
+                    None
+                },
+                status: None,
+                signer: Some(signer_address.to_string()),
+                num_assets: None,
+                attestation_doc: fresh.as_ref().map(hex::encode),
+            }
+        }
         "health" => {
             let store = store.blocking_read();
             PriceResponse {

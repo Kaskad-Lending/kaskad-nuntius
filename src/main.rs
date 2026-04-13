@@ -98,7 +98,6 @@ async fn main() -> Result<()> {
     };
 
     let signer_address = format!("0x{}", hex::encode(signer.address()));
-    let attestation_doc = signer.attestation_doc();
     let signer: SharedSigner = Arc::from(signer);
     info!(address = %signer_address, "Oracle signer initialized");
 
@@ -120,7 +119,6 @@ async fn main() -> Result<()> {
             server_store,
             server_signer,
             server_signer_address,
-            attestation_doc,
         )
         .await
         {
