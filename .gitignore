@@ -4,3 +4,4 @@ reference/
 *.eif
 contracts/cache/
 contracts/out/
+docs/audit_scope.html
