@@ -15,6 +15,7 @@ use tracing::{error, info, warn};
 use signer::{MockSigner, OracleSigner};
 use sources::PriceSource;
 use types::{now_secs, Asset, CachedPrice, PricePoint};
+mod cob;
 
 const ORACLE_DECIMALS: u8 = 8;
 const FETCH_INTERVAL_SECS: u64 = 30;
@@ -189,6 +190,17 @@ async fn main() -> Result<()> {
         Box::new(sources::governance::GovernancePrice::new(igra_price)),
     ];
 
+    // COB book sources — KAS/USDT across 7 CEXs.
+    // (Binance excluded: KAS/USDT not listed on api.binance.com spot.)
+    let book_sources: Vec<Box<dyn cob::OrderBookSource>> = vec![
+        Box::new(cob::BybitBook::new(client.clone())),
+        Box::new(cob::OkxBook::new(client.clone())),
+        Box::new(cob::BitgetBook::new(client.clone())),
+        Box::new(cob::GateioBook::new(client.clone())),
+        Box::new(cob::MexcBook::new(client.clone())),
+        Box::new(cob::KucoinBook::new(client.clone())),
+        Box::new(cob::HtxBook::new(client.clone())),
+    ];
     info!(igra_price = igra_price, "IGRA governance price set");
 
     let assets = vec![
@@ -211,6 +223,79 @@ async fn main() -> Result<()> {
     // Main oracle loop: fetch → aggregate → sign → store
     loop {
         for &asset in &assets {
+            // COB fast-path: KAS/USDT via consolidated order book.
+            if asset == Asset::KasUsd {
+                let books = cob::fetch_all_books(&book_sources).await;
+
+                if books.len() < asset.min_sources() {
+                    warn!(
+                        asset = asset.symbol(),
+                        num_sources = books.len(),
+                        min_required = asset.min_sources(),
+                        "Order Book Quorum not met (KAS). Skipping."
+                    );
+                    continue;
+                }
+
+                let fair = match cob::consolidated_order_book(&books) {
+                    Some(fv) => fv,
+                    None => {
+                        warn!(asset = asset.symbol(), "COB returned no fair value");
+                        continue;
+                    }
+                };
+
+                if !state.should_update(asset, fair.price) {
+                    info!(
+                        asset = asset.symbol(),
+                        price = format!("{:.8}", fair.price),
+                        spread_bps = format!("{:.1}", fair.spread_bps),
+                        "KAS price within threshold, skipping"
+                    );
+                    continue;
+                }
+
+                // Synthetic PricePoint vec so sources_hash stays wire-compatible.
+                let hash_points: Vec<PricePoint> = books
+                    .iter()
+                    .map(|b| PricePoint {
+                        price: b.bids.first().map(|l| l.price).unwrap_or(0.0),
+                        volume: 0.0,
+                        timestamp: now_secs(),
+                        source: b.source.clone(),
+                        server_time: None,
+                    })
+                    .collect();
+
+                let price_fixed = aggregator::to_fixed_point(fair.price, ORACLE_DECIMALS);
+                let sources_hash = aggregator::sources_hash(&hash_points);
+
+                let cached = CachedPrice {
+                    asset,
+                    price_fixed,
+                    price_human: fair.price,
+                    num_sources: fair.num_sources as u8,
+                    sources_hash,
+                };
+
+                {
+                    let mut store = price_store.write().await;
+                    store.insert(asset.symbol().to_string(), cached);
+                }
+
+                info!(
+                    asset = asset.symbol(),
+                    price = format!("{:.8}", fair.price),
+                    price_fixed = %price_fixed,
+                    spread_bps = format!("{:.1}", fair.spread_bps),
+                    num_sources = fair.num_sources,
+                    "cached COB price (signature on-demand)"
+                );
+
+                state.record_update(asset, fair.price);
+                continue;
+            }
+
             // 1. Fetch from all sources
             let mut prices = sources::fetch_all(&price_sources, asset).await;
 
