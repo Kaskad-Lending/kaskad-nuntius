@@ -187,26 +187,43 @@ contract KaskadRouter is ReentrancyGuard {
     ) external nonReentrant withSender {
         _pushPrices(prices);
 
-        // Pull debt tokens from liquidator
-        IERC20(debtAsset).safeTransferFrom(msg.sender, address(this), debtToCover);
-        IERC20(debtAsset).forceApprove(address(pool), debtToCover);
-
-        // Execute liquidation
-        pool.liquidationCall(collateralAsset, debtAsset, user, debtToCover, receiveAToken);
-
-        // Forward seized collateral (or aToken) to liquidator
+        // Pre-compute which token the pool will deliver so we can snapshot
+        // its balance BEFORE the liquidation call.
         address seizedAsset = receiveAToken
             ? pool.getReserveData(collateralAsset).aTokenAddress
             : collateralAsset;
-        uint256 seizedBalance = IERC20(seizedAsset).balanceOf(address(this));
-        if (seizedBalance > 0) {
-            IERC20(seizedAsset).safeTransfer(msg.sender, seizedBalance);
+
+        // Pull debt tokens from liquidator.
+        IERC20(debtAsset).safeTransferFrom(msg.sender, address(this), debtToCover);
+        IERC20(debtAsset).forceApprove(address(pool), debtToCover);
+
+        // Snapshot balances IMMEDIATELY before the pool call. The refund
+        // we forward to the liquidator is strictly the delta caused by
+        // liquidation — never any pre-existing balance that was donated
+        // to (or stuck on) the router (audit M-1: the old implementation
+        // swept `balanceOf(this)` wholesale, so a griefer could leave
+        // tokens on the router and hand them to the next liquidator).
+        uint256 preSeized = IERC20(seizedAsset).balanceOf(address(this));
+        uint256 preDebt = IERC20(debtAsset).balanceOf(address(this));
+
+        pool.liquidationCall(collateralAsset, debtAsset, user, debtToCover, receiveAToken);
+
+        // Forward the seized collateral delta. Skip the same-asset case
+        // (seized == debt) — the combined balance delta is already
+        // captured by the debt refund branch below, so transferring it
+        // here would double-send.
+        if (seizedAsset != debtAsset) {
+            uint256 postSeized = IERC20(seizedAsset).balanceOf(address(this));
+            if (postSeized > preSeized) {
+                IERC20(seizedAsset).safeTransfer(msg.sender, postSeized - preSeized);
+            }
         }
 
-        // Refund leftover debt tokens (partial liquidation due to close factor)
-        uint256 debtLeftover = IERC20(debtAsset).balanceOf(address(this));
-        if (debtLeftover > 0) {
-            IERC20(debtAsset).safeTransfer(msg.sender, debtLeftover);
+        // Refund the debt-token delta — the partial-liquidation leftover,
+        // plus (if seized == debt) the seized amount itself.
+        uint256 postDebt = IERC20(debtAsset).balanceOf(address(this));
+        if (postDebt > preDebt) {
+            IERC20(debtAsset).safeTransfer(msg.sender, postDebt - preDebt);
         }
     }
 }

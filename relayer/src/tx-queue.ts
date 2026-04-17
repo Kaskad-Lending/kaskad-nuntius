@@ -82,6 +82,21 @@ export class TxQueue {
         throw new Error("Receipt is null — TX dropped");
       }
 
+      // ethers v6 receipts carry status: 0 on revert, 1 on success. The
+      // old code treated any non-null receipt as confirmed, so a reverted
+      // submission looked successful to the FSM and the stale on-chain
+      // price persisted silently (audit M-3).
+      if (receipt.status !== 1) {
+        console.error(
+          `[TxQueue] Reverted on-chain: ${receipt.hash} block=${receipt.blockNumber} [${intent.label}]`
+        );
+        this.onComplete?.(intent, {
+          status: "reverted",
+          reason: `on-chain revert in tx ${receipt.hash}`,
+        });
+        return;
+      }
+
       console.log(
         `[TxQueue] Confirmed: ${receipt.hash} block=${receipt.blockNumber} [${intent.label}]`
       );

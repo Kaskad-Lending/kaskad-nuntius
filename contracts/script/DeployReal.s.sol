@@ -23,11 +23,12 @@ contract DeployReal is Script {
         NitroProver prover = new NitroProver(certManager);
         console.log("NitroProver deployed at:", address(prover));
 
-        // Deploy NitroAttestationVerifier
-        uint256 maxAge = 365 days; // 1 year for tests
-        bytes32 expectedPCR1 = vm.envOr("EXPECTED_PCR1", bytes32(0));
-        bytes32 expectedPCR2 = vm.envOr("EXPECTED_PCR2", bytes32(0));
-        NitroAttestationVerifier verifier = new NitroAttestationVerifier(address(prover), maxAge, expectedPCR1, expectedPCR2);
+        // Deploy NitroAttestationVerifier. `MAX_ATTESTATION_AGE` is a
+        // constant inside the verifier (4 h, see audit H-1). PCR-1 and
+        // PCR-2 MUST be non-zero (audit H-7).
+        bytes32 expectedPCR1 = vm.envBytes32("EXPECTED_PCR1");
+        bytes32 expectedPCR2 = vm.envBytes32("EXPECTED_PCR2");
+        NitroAttestationVerifier verifier = new NitroAttestationVerifier(address(prover), expectedPCR1, expectedPCR2);
         console.log("NitroAttestationVerifier deployed at:", address(verifier));
 
         // Extract real pcr0 and signer from the doc by doing a view call
@@ -41,8 +42,10 @@ contract DeployReal is Script {
         verifier.verifyCerts(attestationDoc);
 
         // 3. Deploy Oracle with REAL PCR0
-        KaskadPriceOracle oracle = new KaskadPriceOracle(pcr0, address(verifier));
+        address admin = vm.envAddress("ORACLE_ADMIN");
+        KaskadPriceOracle oracle = new KaskadPriceOracle(pcr0, address(verifier), admin);
         console.log("KaskadPriceOracle deployed at:", address(oracle));
+        console.log("Admin (can call registerAssets):", admin);
 
         // 4. Register the real AWS Enclave on-chain
         oracle.registerEnclave(attestationDoc);

@@ -3,7 +3,7 @@ use eyre::Result;
 use serde::Deserialize;
 
 use super::PriceSource;
-use crate::types::{now_secs, Asset, PricePoint};
+use crate::types::{AssetConfig, PricePoint};
 
 pub struct Coinbase {
     client: crate::http_client::HttpClient,
@@ -12,14 +12,6 @@ pub struct Coinbase {
 impl Coinbase {
     pub fn new(client: crate::http_client::HttpClient) -> Self {
         Self { client }
-    }
-
-    fn pair_for(asset: Asset) -> Option<&'static str> {
-        match asset {
-            Asset::EthUsd => Some("ETH-USD"),
-            Asset::BtcUsd => Some("BTC-USD"),
-            _ => None,
-        }
     }
 }
 
@@ -32,19 +24,21 @@ struct CoinbaseResponse {
 struct CoinbasePrice {
     amount: String,
     base: String,
+    #[allow(dead_code)]
     currency: String,
 }
 
 #[async_trait]
 impl PriceSource for Coinbase {
-    async fn fetch_price(&self, asset: Asset) -> Result<Option<PricePoint>> {
-        let pair = match Self::pair_for(asset) {
-            Some(s) => s,
+    async fn fetch_price(&self, asset: &AssetConfig) -> Result<Option<PricePoint>> {
+        let pair = match asset.sources.get(self.name()) {
+            Some(s) => s.as_str(),
             None => return Ok(None),
         };
 
         let url = format!("https://api.coinbase.com/v2/prices/{}/spot", pair);
-        let resp: CoinbaseResponse = self.client.get_json(&url).await?;
+        let (resp, server_time): (CoinbaseResponse, u64) =
+            self.client.get_json_with_time(&url).await?;
         let expected_base = pair.split('-').next().unwrap_or("");
         if resp.data.base != expected_base {
             return Err(eyre::eyre!(
@@ -58,9 +52,8 @@ impl PriceSource for Coinbase {
         Ok(Some(PricePoint {
             price,
             volume: 0.0,
-            timestamp: now_secs(),
             source: "coinbase".into(),
-            server_time: None,
+            server_time,
         }))
     }
 

@@ -41,6 +41,9 @@ hex = "0.4"
 # Random key generation (dev)
 rand = "0.8"
 
+# Scrub private key seed material after use
+zeroize = "1"
+
 # VSOCK support (Linux only, for Nitro Enclave)
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

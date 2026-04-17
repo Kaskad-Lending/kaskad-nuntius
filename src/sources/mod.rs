@@ -7,8 +7,8 @@ pub mod coinbase;
 pub mod coingecko;
 pub mod crypto_com;
 pub mod gateio;
-pub mod governance;
 pub mod htx;
+pub mod igralabs;
 pub mod kraken;
 pub mod kucoin;
 pub mod mexc;
@@ -17,22 +17,24 @@ pub mod okx;
 use async_trait::async_trait;
 use eyre::Result;
 
-use crate::types::{Asset, PricePoint};
+use crate::types::{AssetConfig, PricePoint};
 
-/// Trait for all price data sources.
+/// Trait for all price data sources. The source looks up its specific
+/// symbol for `asset` via `asset.sources.get(self.name())` — when the
+/// key is absent, the source MUST return `Ok(None)` to be transparent
+/// about lack of coverage.
 #[async_trait]
 pub trait PriceSource: Send + Sync {
-    /// Fetch the current price for the given asset.
-    /// Returns None if this source doesn't support the asset.
-    async fn fetch_price(&self, asset: Asset) -> Result<Option<PricePoint>>;
+    async fn fetch_price(&self, asset: &AssetConfig) -> Result<Option<PricePoint>>;
 
-    /// Human-readable name of this source.
+    /// Stable identifier used as the key in `AssetConfig.sources`.
     fn name(&self) -> &'static str;
 }
 
-/// Fetch prices from all sources concurrently. Skips sources that
-/// don't support the asset or return errors (logged).
-pub async fn fetch_all(sources: &[Box<dyn PriceSource>], asset: Asset) -> Vec<PricePoint> {
+/// Fetch prices from all sources concurrently. Sources that don't support
+/// the asset return None and are skipped. Errors are logged and their
+/// source omitted from this cycle's sample.
+pub async fn fetch_all(sources: &[Box<dyn PriceSource>], asset: &AssetConfig) -> Vec<PricePoint> {
     let mut handles = Vec::new();
 
     for source in sources {
@@ -49,15 +51,15 @@ pub async fn fetch_all(sources: &[Box<dyn PriceSource>], asset: Asset) -> Vec<Pr
                     source = name,
                     price = pp.price,
                     "fetched {}",
-                    asset.symbol()
+                    asset.symbol
                 );
                 results.push(pp);
             }
             Ok(None) => {
-                tracing::debug!(source = name, "doesn't support {}", asset.symbol());
+                tracing::debug!(source = name, "doesn't support {}", asset.symbol);
             }
             Err(e) => {
-                tracing::warn!(source = name, error = %e, "failed to fetch {}", asset.symbol());
+                tracing::warn!(source = name, error = %e, "failed to fetch {}", asset.symbol);
             }
         }
     }

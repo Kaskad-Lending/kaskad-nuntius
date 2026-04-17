@@ -13,33 +13,49 @@ contract KaskadPriceOracleTest is Test {
 
     uint256 internal signerPrivateKey;
     address internal signer;
+    address internal admin = address(0xAD31);
 
     bytes32 internal constant EXPECTED_PCR0 = keccak256("kaskad-oracle:v0.1");
     bytes32 internal constant ETH_USD = keccak256("ETH/USD");
     bytes32 internal constant BTC_USD = keccak256("BTC/USD");
 
     function setUp() public {
-        // Warp block.timestamp to be in range of test timestamps (~1710000000)
         vm.warp(1710000000);
 
         signerPrivateKey = 0xA11CE;
         signer = vm.addr(signerPrivateKey);
 
-        // Deploy mock verifier that returns our expected PCR0 and signer
         mockVerifier = new MockAttestationVerifier(EXPECTED_PCR0, signer);
+        oracle = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier), admin);
 
-        // Deploy oracle with expected PCR0 and mock verifier
-        oracle = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier));
+        oracle.registerEnclave(hex"00");
 
-        // Register enclave (via mock attestation)
-        oracle.registerEnclave(hex"00"); // any bytes, mock verifier accepts all
+        bytes32[] memory ids = new bytes32[](2);
+        uint8[] memory mins = new uint8[](2);
+        ids[0] = ETH_USD; mins[0] = 3;
+        ids[1] = BTC_USD; mins[1] = 3;
+        _registerAssets(oracle, ids, mins);
 
-        // Deploy AggregatorV3 wrapper
-        ethAggregator = new KaskadAggregatorV3(
-            address(oracle),
-            ETH_USD,
-            "ETH / USD"
-        );
+        ethAggregator = new KaskadAggregatorV3(address(oracle), ETH_USD, "ETH / USD");
+    }
+
+    /// @dev Sort ids ascending and call registerAssets as admin.
+    function _registerAssets(
+        KaskadPriceOracle o,
+        bytes32[] memory ids,
+        uint8[] memory mins
+    ) internal {
+        uint256 n = ids.length;
+        for (uint256 i = 0; i < n; i++) {
+            for (uint256 j = 0; j + 1 < n - i; j++) {
+                if (uint256(ids[j]) > uint256(ids[j + 1])) {
+                    (ids[j], ids[j + 1]) = (ids[j + 1], ids[j]);
+                    (mins[j], mins[j + 1]) = (mins[j + 1], mins[j]);
+                }
+            }
+        }
+        vm.prank(admin);
+        o.registerAssets(ids, mins);
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────
@@ -96,7 +112,7 @@ contract KaskadPriceOracleTest is Test {
 
     function test_registerEnclave_success() public {
         // Deploy fresh oracle
-        KaskadPriceOracle fresh = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier));
+        KaskadPriceOracle fresh = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier), admin);
 
         // Anyone can register
         vm.prank(address(0xCAFE)); // random caller
@@ -109,7 +125,8 @@ contract KaskadPriceOracleTest is Test {
         FailingAttestationVerifier failVerifier = new FailingAttestationVerifier();
         KaskadPriceOracle oracleWithFailVerifier = new KaskadPriceOracle(
             EXPECTED_PCR0,
-            address(failVerifier)
+            address(failVerifier),
+            admin
         );
 
         vm.expectRevert(KaskadPriceOracle.InvalidAttestation.selector);
@@ -120,7 +137,8 @@ contract KaskadPriceOracleTest is Test {
         WrongPCR0Verifier wrongVerifier = new WrongPCR0Verifier(signer);
         KaskadPriceOracle oracleWithWrongPCR = new KaskadPriceOracle(
             EXPECTED_PCR0,
-            address(wrongVerifier)
+            address(wrongVerifier),
+            admin
         );
 
         vm.expectRevert(
@@ -137,7 +155,7 @@ contract KaskadPriceOracleTest is Test {
         // A new valid enclave can replace the old one (e.g. after restart)
         address newSigner = address(0xBEEF);
         MockAttestationVerifier newVerifier = new MockAttestationVerifier(EXPECTED_PCR0, newSigner);
-        KaskadPriceOracle o = new KaskadPriceOracle(EXPECTED_PCR0, address(newVerifier));
+        KaskadPriceOracle o = new KaskadPriceOracle(EXPECTED_PCR0, address(newVerifier), admin);
 
         o.registerEnclave(hex"00");
         assertEq(o.oracleSigner(), newSigner);
@@ -204,7 +222,7 @@ contract KaskadPriceOracleTest is Test {
     // ─── Rejections ──────────────────────────────────────────────────
 
     function test_updatePrice_reverts_no_enclave() public {
-        KaskadPriceOracle unregistered = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier));
+        KaskadPriceOracle unregistered = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier), admin);
         // Don't register enclave
 
         uint256 ts = block.timestamp;
@@ -336,18 +354,55 @@ contract KaskadPriceOracleTest is Test {
 
     // ─── Circuit Breaker: Staleness Bypass ─────────────────────────
 
-    function test_circuit_breaker_bypassed_after_staleness() public {
-        _submitPrice(ETH_USD, 100000000000, 1710000000, 4); // $1000
+    function test_circuit_breaker_resume_allows_25pct_with_doubled_quorum() public {
+        // After >4 h silence the circuit breaker loosens from 15 % to 30 %,
+        // but ONLY if the caller doubles the registered quorum. ETH/USD
+        // minSources = 3 → resume requires 6.
+        _submitPrice(ETH_USD, 100000000000, 1710000000, 6); // $1000
 
-        // Jump 5 hours — beyond CIRCUIT_BREAKER_STALENESS (4h)
+        vm.warp(1710000000 + 5 hours);
+        uint256 ts = block.timestamp;
+        _submitPrice(ETH_USD, 125000000000, ts, 6); // +25 % at quorum 6 → accepted.
+
+        (uint256 price, , , ) = oracle.getLatestPrice(ETH_USD);
+        assertEq(price, 125000000000);
+    }
+
+    function test_circuit_breaker_resume_rejects_40pct_even_with_quorum() public {
+        // Even with the doubled quorum, > 30 % change reverts on the cap.
+        _submitPrice(ETH_USD, 100000000000, 1710000000, 6);
+
         vm.warp(1710000000 + 5 hours);
         uint256 ts = block.timestamp;
 
-        // +50% would normally be rejected, but staleness bypass allows it
-        _submitPrice(ETH_USD, 150000000000, ts, 4); // $1500
+        bytes32 sourcesHash = keccak256("test_sources");
+        bytes memory sig = _signUpdate(ETH_USD, 140000000000, ts, 6, sourcesHash); // +40 %
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                KaskadPriceOracle.PriceChangeExceedsLimit.selector,
+                uint256(4000),
+                uint256(3000)
+            )
+        );
+        oracle.updatePrice(ETH_USD, 140000000000, ts, 6, sourcesHash, sig);
+    }
 
-        (uint256 price, , , ) = oracle.getLatestPrice(ETH_USD);
-        assertEq(price, 150000000000);
+    function test_circuit_breaker_resume_rejects_low_quorum() public {
+        // Under-quorum resume reverts even for a sane price step.
+        _submitPrice(ETH_USD, 100000000000, 1710000000, 6);
+
+        vm.warp(1710000000 + 5 hours);
+        uint256 ts = block.timestamp;
+        bytes32 sourcesHash = keccak256("test_sources");
+        bytes memory sig = _signUpdate(ETH_USD, 125000000000, ts, 5, sourcesHash);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                KaskadPriceOracle.ResumeRequiresHigherQuorum.selector,
+                uint8(5),
+                uint8(6)
+            )
+        );
+        oracle.updatePrice(ETH_USD, 125000000000, ts, 5, sourcesHash, sig);
     }
 
     function test_circuit_breaker_NOT_bypassed_within_staleness() public {
@@ -498,7 +553,7 @@ contract KaskadPriceOracleTest is Test {
     }
 
     function test_gas_registerEnclave() public {
-        KaskadPriceOracle fresh = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier));
+        KaskadPriceOracle fresh = new KaskadPriceOracle(EXPECTED_PCR0, address(mockVerifier), admin);
 
         uint256 gasBefore = gasleft();
         fresh.registerEnclave(hex"00");
@@ -528,6 +583,7 @@ contract RelayerE2ETest is Test {
     address internal signerAddr;
 
     address internal relayer = address(0xBE1A);  // permissionless gas-payer
+    address internal admin = address(0xAD31);
 
     bytes32 internal constant PCR0 = keccak256("kaskad-oracle:v0.1");
 
@@ -546,14 +602,41 @@ contract RelayerE2ETest is Test {
         signerAddr = vm.addr(signerPk);
 
         mockVerifier = new MockAttestationVerifier(PCR0, signerAddr);
-        oracle = new KaskadPriceOracle(PCR0, address(mockVerifier));
+        oracle = new KaskadPriceOracle(PCR0, address(mockVerifier), admin);
         oracle.registerEnclave(hex"00");
+
+        bytes32[] memory ids = new bytes32[](5);
+        uint8[] memory mins = new uint8[](5);
+        ids[0] = ETH_USD;  mins[0] = 3;
+        ids[1] = BTC_USD;  mins[1] = 3;
+        ids[2] = KAS_USD;  mins[2] = 3;
+        ids[3] = USDC_USD; mins[3] = 2;
+        ids[4] = IGRA_USD; mins[4] = 1;
+        _registerAssetsOnto(oracle, ids, mins);
 
         ethAgg  = new KaskadAggregatorV3(address(oracle), ETH_USD,  "ETH / USD");
         btcAgg  = new KaskadAggregatorV3(address(oracle), BTC_USD,  "BTC / USD");
         kasAgg  = new KaskadAggregatorV3(address(oracle), KAS_USD,  "KAS / USD");
         usdcAgg = new KaskadAggregatorV3(address(oracle), USDC_USD, "USDC / USD");
         igraAgg = new KaskadAggregatorV3(address(oracle), IGRA_USD, "IGRA / USD");
+    }
+
+    function _registerAssetsOnto(
+        KaskadPriceOracle o,
+        bytes32[] memory ids,
+        uint8[] memory mins
+    ) internal {
+        uint256 n = ids.length;
+        for (uint256 i = 0; i < n; i++) {
+            for (uint256 j = 0; j + 1 < n - i; j++) {
+                if (uint256(ids[j]) > uint256(ids[j + 1])) {
+                    (ids[j], ids[j + 1]) = (ids[j + 1], ids[j]);
+                    (mins[j], mins[j + 1]) = (mins[j + 1], mins[j]);
+                }
+            }
+        }
+        vm.prank(admin);
+        o.registerAssets(ids, mins);
     }
 
     function _sign(
@@ -664,24 +747,28 @@ contract RelayerE2ETest is Test {
 
     // ─── E2E: Circuit breaker protects, then staleness bypass ──────
 
-    function test_e2e_circuit_breaker_then_staleness_bypass() public {
+    function test_e2e_circuit_breaker_then_ramped_resume() public {
         _relayPrice(ETH_USD, 100000000000, T0, 5); // $1000
 
-        // 30s later: flash crash to $700 (-30%) → REJECTED
+        // 30s later: flash crash to $700 (-30 %) would exceed the 15 %
+        // regular cap and is rejected.
         vm.warp(T0 + 30);
-        bytes32 srcHash = keccak256(abi.encodePacked("sources_", ETH_USD, T0+30));
-        bytes memory sig = _sign(ETH_USD, 70000000000, T0+30, 5, srcHash);
+        bytes32 srcHash = keccak256(abi.encodePacked("sources_", ETH_USD, T0 + 30));
+        bytes memory sig = _sign(ETH_USD, 70000000000, T0 + 30, 5, srcHash);
         vm.prank(relayer);
         vm.expectRevert();
-        oracle.updatePrice(ETH_USD, 70000000000, T0+30, 5, srcHash, sig);
+        oracle.updatePrice(ETH_USD, 70000000000, T0 + 30, 5, srcHash, sig);
 
-        // Price stuck at $1000. 5 hours pass — staleness bypass kicks in.
+        // Price stuck at $1000. 5 hours pass — the resume path opens but
+        // requires the registered quorum (3) × RESUME_QUORUM_MULTIPLIER (2)
+        // = 6 sources AND a step ≤ 30 %. The first ramp step clamps to
+        // $750 (-25 %).
         vm.warp(T0 + 5 hours);
         uint256 ts = block.timestamp;
-        _relayPrice(ETH_USD, 70000000000, ts, 5); // $700 — now accepted
+        _relayPrice(ETH_USD, 75000000000, ts, 6); // -25 %, qu=6
 
         (uint256 price, , , ) = oracle.getLatestPrice(ETH_USD);
-        assertEq(price, 70000000000);
+        assertEq(price, 75000000000);
     }
 
     // ─── E2E: Multiple relayers submit — second one reverts ────────
@@ -753,10 +840,18 @@ contract RelayerE2ETest is Test {
         address newAddr = vm.addr(newPk);
         MockAttestationVerifier newVerifier = new MockAttestationVerifier(PCR0, newAddr);
 
-        // Re-deploy oracle and re-register
-        KaskadPriceOracle fresh = new KaskadPriceOracle(PCR0, address(newVerifier));
+        // Re-deploy oracle and re-register.
+        KaskadPriceOracle fresh = new KaskadPriceOracle(PCR0, address(newVerifier), admin);
         fresh.registerEnclave(hex"00");
         assertEq(fresh.oracleSigner(), newAddr);
+
+        // Admin must (re-)bless the asset quorum — otherwise the
+        // subsequent updatePrice would hit AssetsNotRegistered before the
+        // signature check fires.
+        bytes32[] memory ids = new bytes32[](1);
+        uint8[] memory mins = new uint8[](1);
+        ids[0] = ETH_USD; mins[0] = 3;
+        _registerAssetsOnto(fresh, ids, mins);
 
         // Old signer's signature is rejected on fresh oracle
         bytes32 srcHash = keccak256("test");
@@ -765,4 +860,7 @@ contract RelayerE2ETest is Test {
         vm.expectRevert(KaskadPriceOracle.InvalidSignature.selector);
         fresh.updatePrice(ETH_USD, 100, T0, 3, srcHash, oldSig);
     }
+
+    // (the `_registerAssetsOnto` helper above is shared between setUp and
+    // this rotation test; no second admin-sig variant is needed now.)
 }

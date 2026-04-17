@@ -12,9 +12,8 @@
 ///   {"method": "get_price", "asset": "ETH/USD"}  → single asset (freshly signed)
 ///   {"method": "get_attestation"}                → attestation doc
 ///   {"method": "health"}                         → server status
-use crate::aggregator;
 use crate::signer::OracleSigner;
-use crate::types::{now_secs, SignedPriceUpdate};
+use crate::types::SignedPriceUpdate;
 use crate::{PriceStore, SharedSigner};
 use eyre::Result;
 use serde::{Deserialize, Serialize};
@@ -25,8 +24,6 @@ use std::os::unix::io::FromRawFd;
 
 #[cfg(target_os = "linux")]
 const VMADDR_CID_ANY: u32 = 0xFFFFFFFF;
-
-const ORACLE_DECIMALS: u8 = 8;
 
 #[derive(Deserialize)]
 struct PriceRequest {
@@ -111,17 +108,19 @@ fn handle_connection(
     Ok(())
 }
 
-/// Sign a cached price with the current timestamp.
+/// Sign a cached price with the enclave-authoritative timestamp computed
+/// at aggregation (median of per-source server_time). The host clock is
+/// NEVER read here (audit C-3/H-9): if we signed with SystemTime::now()
+/// the host could replay-walk the timestamp forward or manipulate the
+/// kernel clock.
 fn sign_cached(
     cached: &crate::types::CachedPrice,
     signer: &dyn OracleSigner,
 ) -> Result<SignedPriceUpdate> {
-    // Use median exchange server time if we had it during aggregation.
-    // For on-demand signing, use system clock (best we can do at request time).
-    let timestamp = now_secs();
+    let timestamp = cached.signed_timestamp;
 
     let (signature, _) = signer.sign_price_update(
-        cached.asset.id(),
+        cached.asset_id,
         cached.price_fixed,
         timestamp,
         cached.num_sources,
@@ -129,8 +128,8 @@ fn sign_cached(
     )?;
 
     Ok(SignedPriceUpdate {
-        asset_id: format!("0x{}", hex::encode(cached.asset.id().as_slice())),
-        asset_symbol: cached.asset.symbol().to_string(),
+        asset_id: format!("0x{}", hex::encode(cached.asset_id.as_slice())),
+        asset_symbol: cached.asset_symbol.clone(),
         price: format!("{}", cached.price_fixed),
         price_human: format!("{:.8}", cached.price_human),
         timestamp,
@@ -155,7 +154,7 @@ fn process_request(
                 match sign_cached(cached, signer.as_ref()) {
                     Ok(update) => signed.push(update),
                     Err(e) => {
-                        warn!(error = %e, asset = cached.asset.symbol(), "failed to sign on-demand");
+                        warn!(error = %e, asset = %cached.asset_symbol, "failed to sign on-demand");
                     }
                 }
             }

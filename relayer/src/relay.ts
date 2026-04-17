@@ -27,6 +27,11 @@ export class Relayer {
   private txQueue: TxQueue;
   private poller: PricePoller;
   private enclaveSigner: string | null = null;
+  /** Subscribed to the EnclaveRegistered event so a rotation invalidates
+   *  our cached signer immediately; the next tick will re-read it via
+   *  `oracleSigner()`. See audit M-4 — the old code cached once and stuck
+   *  with a stale signer after any re-registration. */
+  private signerSubscribed = false;
 
   constructor(
     oracle: KaskadPriceOracle,
@@ -37,13 +42,13 @@ export class Relayer {
     this.txQueue = txQueue;
     this.poller = poller;
 
-    // Listen for TX completion to transition FSM states
     this.txQueue.setCallback(this.onTxComplete.bind(this));
   }
 
   /** Run one poll + relay cycle. Called from the main loop. */
   async tick() {
-    // Refresh enclave signer (could change after re-registration)
+    await this.ensureSignerSubscription();
+
     if (!this.enclaveSigner) {
       try {
         this.enclaveSigner = await this.oracle.oracleSigner();
@@ -193,6 +198,33 @@ export class Relayer {
     } catch (err: any) {
       console.error(`[Relay] Signature verification error: ${err.message}`);
       return false;
+    }
+  }
+
+  /** Subscribe once to the `EnclaveRegistered` event so cache invalidation
+   *  is driven by on-chain state rather than arbitrary timers. On any
+   *  re-registration (key rotation, operator redeploy) we drop the cached
+   *  signer; the next `tick()` fetches the new value via RPC. */
+  private async ensureSignerSubscription() {
+    if (this.signerSubscribed) return;
+    try {
+      const filter = this.oracle.filters.EnclaveRegistered();
+      await this.oracle.on(filter, (signer: string) => {
+        console.log(
+          `[Relay] EnclaveRegistered fired: new signer=${signer}; invalidating cache`
+        );
+        this.enclaveSigner = null;
+      });
+      this.signerSubscribed = true;
+    } catch (err: any) {
+      // Some RPCs (or ethers providers without log-subscription support)
+      // will throw here. Fall through — we'll still run, just without
+      // push-based invalidation. `tick()` always re-reads the cache miss.
+      console.warn(
+        `[Relay] EnclaveRegistered subscribe failed (${err?.message ?? err}); rotation cache-invalidation disabled`
+      );
+      // Mark subscribed=true anyway so we don't retry every tick.
+      this.signerSubscribed = true;
     }
   }
 

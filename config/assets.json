@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "_note": "This file is baked into the enclave EIF via include_str! and is therefore measured in PCR0. Any change to its content produces a different PCR0 and requires on-chain re-registration of the oracle. Keys under `sources` MUST match a registered PriceSource::name() — otherwise the mapping is silently ignored for that source.",
+  "assets": [
+    {
+      "symbol": "ETH/USD",
+      "min_sources": 3,
+      "deviation_threshold_bps": 50,
+      "heartbeat_seconds": 3600,
+      "sources": {
+        "binance":    "ETHUSDT",
+        "okx":        "ETH-USDT",
+        "bybit":      "ETHUSDT",
+        "coinbase":   "ETH-USD",
+        "coingecko":  "ethereum",
+        "mexc":       "ETHUSDT",
+        "kucoin":     "ETH-USDT",
+        "gateio":     "ETH_USDT",
+        "kraken":     "XETHZUSD",
+        "bitget":     "ETHUSDT",
+        "bitfinex":   "tETHUSD",
+        "bitstamp":   "ethusd",
+        "crypto_com": "ETH_USDT",
+        "htx":        "ethusdt"
+      }
+    },
+    {
+      "symbol": "BTC/USD",
+      "min_sources": 3,
+      "deviation_threshold_bps": 50,
+      "heartbeat_seconds": 3600,
+      "sources": {
+        "binance":    "BTCUSDT",
+        "okx":        "BTC-USDT",
+        "bybit":      "BTCUSDT",
+        "coinbase":   "BTC-USD",
+        "coingecko":  "bitcoin",
+        "mexc":       "BTCUSDT",
+        "kucoin":     "BTC-USDT",
+        "gateio":     "BTC_USDT",
+        "kraken":     "XXBTZUSD",
+        "bitget":     "BTCUSDT",
+        "bitfinex":   "tBTCUSD",
+        "bitstamp":   "btcusd",
+        "crypto_com": "BTC_USDT",
+        "htx":        "btcusdt"
+      }
+    },
+    {
+      "symbol": "KAS/USD",
+      "min_sources": 3,
+      "deviation_threshold_bps": 200,
+      "heartbeat_seconds": 1800,
+      "sources": {
+        "bybit":     "KASUSDT",
+        "coingecko": "kaspa",
+        "mexc":      "KASUSDT",
+        "kucoin":    "KAS-USDT",
+        "gateio":    "KAS_USDT",
+        "bitget":    "KASUSDT",
+        "htx":       "kasusdt"
+      }
+    },
+    {
+      "symbol": "USDC/USD",
+      "min_sources": 2,
+      "deviation_threshold_bps": 10,
+      "heartbeat_seconds": 86400,
+      "sources": {
+        "binance":   "USDCUSDT",
+        "okx":       "USDC-USDT",
+        "coingecko": "usd-coin",
+        "kraken":    "USDCUSD",
+        "bitget":    "USDCUSDT",
+        "bitfinex":  "tUDCUSD",
+        "bitstamp":  "usdcusd",
+        "htx":       "usdcusdt"
+      }
+    },
+    {
+      "symbol": "IGRA/USD",
+      "min_sources": 1,
+      "deviation_threshold_bps": 300,
+      "heartbeat_seconds": 3600,
+      "sources": {
+        "igralabs":  "IGRA",
+        "coingecko": "igra"
+      }
+    }
+  ]
+}

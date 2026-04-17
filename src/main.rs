@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 
 use signer::{MockSigner, OracleSigner};
 use sources::PriceSource;
-use types::{now_secs, Asset, CachedPrice, PricePoint};
+use types::{load_assets, AssetConfig, CachedPrice};
 
 const ORACLE_DECIMALS: u8 = 8;
 const FETCH_INTERVAL_SECS: u64 = 30;
@@ -25,9 +25,14 @@ pub type PriceStore = Arc<RwLock<HashMap<String, CachedPrice>>>;
 /// Shared signer, accessible by the price server for on-demand signing.
 pub type SharedSigner = Arc<dyn signer::OracleSigner>;
 
-/// Tracks the last pushed price and timestamp per asset (for deviation/heartbeat logic).
+/// Tracks the last pushed price and enclave-signed timestamp per asset.
+/// The timestamp used here is ALWAYS the median(server_time) from the last
+/// successful cycle — never `SystemTime::now()` (audit C-3/H-9). Subtraction
+/// is saturating so a median rewind cannot wrap to a huge diff and force a
+/// spurious heartbeat.
 struct OracleState {
-    last_prices: HashMap<Asset, (f64, u64)>,
+    // key = asset symbol (stable across config reloads).
+    last_prices: HashMap<String, (f64, u64)>,
 }
 
 impl OracleState {
@@ -37,16 +42,18 @@ impl OracleState {
         }
     }
 
-    fn should_update(&self, asset: Asset, new_price: f64) -> bool {
-        match self.last_prices.get(&asset) {
+    /// `current_ts` must be the median(server_time) computed for the
+    /// current cycle's surviving sources. Never a host-clock read.
+    fn should_update(&self, asset: &AssetConfig, new_price: f64, current_ts: u64) -> bool {
+        match self.last_prices.get(&asset.symbol) {
             None => true,
             Some((last_price, last_ts)) => {
-                let now = now_secs();
-                if now - last_ts >= asset.heartbeat_seconds() {
+                let elapsed = current_ts.saturating_sub(*last_ts);
+                if elapsed >= asset.heartbeat_seconds {
                     return true;
                 }
                 let deviation_bps = ((new_price - last_price) / last_price * 10000.0).abs() as u16;
-                if deviation_bps >= asset.deviation_threshold_bps() {
+                if deviation_bps >= asset.deviation_threshold_bps {
                     return true;
                 }
                 false
@@ -54,8 +61,8 @@ impl OracleState {
         }
     }
 
-    fn record_update(&mut self, asset: Asset, price: f64) {
-        self.last_prices.insert(asset, (price, now_secs()));
+    fn record_update(&mut self, symbol: &str, price: f64, signed_ts: u64) {
+        self.last_prices.insert(symbol.to_string(), (price, signed_ts));
     }
 }
 
@@ -71,7 +78,12 @@ async fn main() -> Result<()> {
 
     info!("🚀 Kaskad TEE Oracle starting...");
 
-    // Init signer
+    // Load the bundled asset config (compiled into the enclave EIF → PCR0).
+    let config = load_assets().expect("failed to load bundled config/assets.json");
+
+    // Init signer. The enclave key only signs price updates; the per-asset
+    // quorum is committed separately by the admin via
+    // KaskadPriceOracle.registerAssets (no enclave-side bundle signature).
     let enclave_mode = std::env::var("ENCLAVE_MODE").is_ok();
 
     let signer: Box<dyn OracleSigner> = if enclave_mode {
@@ -165,12 +177,7 @@ async fn main() -> Result<()> {
     }
     let client = http_client::HttpClient::new(enclave_mode);
 
-    // Init sources
-    let igra_price = std::env::var("IGRA_PRICE")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.10);
-
+    // (config loaded above — used here for source registration.)
     let price_sources: Vec<Box<dyn PriceSource>> = vec![
         Box::new(sources::binance::Binance::new(client.clone())),
         Box::new(sources::okx::Okx::new(client.clone())),
@@ -186,85 +193,125 @@ async fn main() -> Result<()> {
         Box::new(sources::bitstamp::Bitstamp::new(client.clone())),
         Box::new(sources::crypto_com::CryptoCom::new(client.clone())),
         Box::new(sources::htx::Htx::new(client.clone())),
-        Box::new(sources::governance::GovernancePrice::new(igra_price)),
+        Box::new(sources::igralabs::IgraLabs::new(client.clone())),
     ];
 
-    info!(igra_price = igra_price, "IGRA governance price set");
+    let known_sources: std::collections::HashSet<&str> =
+        price_sources.iter().map(|s| s.name()).collect();
 
-    let assets = vec![
-        Asset::EthUsd,
-        Asset::BtcUsd,
-        Asset::KasUsd,
-        Asset::UsdcUsd,
-        Asset::IgraUsd,
-    ];
+    for a in &config.assets {
+        for src_name in a.sources.keys() {
+            if !known_sources.contains(src_name.as_str()) {
+                warn!(
+                    asset = %a.symbol,
+                    source = %src_name,
+                    "asset config references unknown source — mapping will be ignored"
+                );
+            }
+        }
+    }
 
     let single_run = std::env::var("SINGLE_RUN").is_ok();
     let mut state = OracleState::new();
 
     info!(
-        assets = ?assets.iter().map(|a| a.symbol()).collect::<Vec<_>>(),
+        assets = ?config.assets.iter().map(|a| a.symbol.as_str()).collect::<Vec<_>>(),
         single_run = single_run,
         "Starting oracle loop"
     );
 
     // Main oracle loop: fetch → aggregate → sign → store
     loop {
-        for &asset in &assets {
+        for asset in &config.assets {
             // 1. Fetch from all sources
-            let mut prices = sources::fetch_all(&price_sources, asset).await;
+            let raw_prices = sources::fetch_all(&price_sources, asset).await;
 
-            if prices.len() < asset.min_sources() {
+            // 1a. Sanitise: drop NaN / ±Infinity / non-positive prices and
+            //     normalise broken volumes (audit C-4, M-5).
+            let raw_count = raw_prices.len();
+            let mut prices = aggregator::sanitize(raw_prices);
+            if prices.len() < raw_count {
                 warn!(
-                    asset = asset.symbol(),
+                    asset = %asset.symbol,
+                    dropped = raw_count - prices.len(),
+                    "dropped non-finite / non-positive samples"
+                );
+            }
+
+            if prices.len() < asset.min_sources {
+                warn!(
+                    asset = %asset.symbol,
                     num_sources = prices.len(),
-                    min_required = asset.min_sources(),
+                    min_required = asset.min_sources,
                     "Data Quorum not met. Skipping update to prevent Liquidity Eclipse."
                 );
                 continue;
             }
 
             info!(
-                asset = asset.symbol(),
+                asset = %asset.symbol,
                 num_sources = prices.len(),
                 "fetched prices"
             );
 
-            // 2. Outlier rejection
+            // 2. Outlier rejection (by price)
             let before = prices.len();
             aggregator::reject_outliers(&mut prices, 3.0);
             if prices.len() < before {
                 info!(
-                    asset = asset.symbol(),
+                    asset = %asset.symbol,
                     removed = before - prices.len(),
-                    "rejected outliers"
+                    "rejected price outliers"
                 );
             }
 
-            // Re-check quorum after outlier rejection
-            if prices.len() < asset.min_sources() {
+            // 2a. Reject server_time outliers (>5 min drift). This is the
+            //     enclave's only defence against a single compromised CEX
+            //     trying to drag the authoritative clock (audit C-3/H-9).
+            let before_t = prices.len();
+            let signed_ts = match aggregator::reject_time_outliers(&mut prices) {
+                Some(ts) => ts,
+                None => {
+                    warn!(
+                        asset = %asset.symbol,
+                        "no samples with valid server_time; skipping cycle"
+                    );
+                    continue;
+                }
+            };
+            if prices.len() < before_t {
+                info!(
+                    asset = %asset.symbol,
+                    removed = before_t - prices.len(),
+                    "rejected time-drift outliers"
+                );
+            }
+
+            // Re-check quorum after outlier rejection (price + time).
+            if prices.len() < asset.min_sources {
                 warn!(
-                    asset = asset.symbol(),
+                    asset = %asset.symbol,
                     remaining = prices.len(),
-                    min_required = asset.min_sources(),
+                    min_required = asset.min_sources,
                     "Data Quorum lost after outlier rejection. Skipping."
                 );
                 continue;
             }
 
-            // 3. Compute weighted median
+            // 3. Compute weighted median price.
             let median = match aggregator::weighted_median(&prices) {
                 Some(m) => m,
                 None => {
-                    warn!(asset = asset.symbol(), "no prices after filtering");
+                    warn!(asset = %asset.symbol, "no prices after filtering");
                     continue;
                 }
             };
 
-            // 4. Check if we should update
-            if !state.should_update(asset, median) {
+            // 4. Deviation / heartbeat — both keyed on enclave-authoritative
+            //    `signed_ts`, never the host clock (audit C-3/H-9).
+            if !state.should_update(asset, median, signed_ts) {
                 info!(
-                    asset = asset.symbol(),
+                    asset = %asset.symbol,
                     price = format!("{:.6}", median),
                     "price within threshold, skipping"
                 );
@@ -272,32 +319,45 @@ async fn main() -> Result<()> {
             }
 
             // 5. Cache aggregated price — signature will be created on-demand by price_server
-            let price_fixed = aggregator::to_fixed_point(median, ORACLE_DECIMALS);
+            let price_fixed = match aggregator::to_fixed_point(median, ORACLE_DECIMALS) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(
+                        asset = %asset.symbol,
+                        median = median,
+                        error = %e,
+                        "refusing to cache aggregated price — failed sanity check"
+                    );
+                    continue;
+                }
+            };
             let sources_hash = aggregator::sources_hash(&prices);
 
             let cached = CachedPrice {
-                asset,
+                asset_symbol: asset.symbol.clone(),
+                asset_id: asset.id(),
                 price_fixed,
                 price_human: median,
                 num_sources: prices.len() as u8,
                 sources_hash,
+                signed_timestamp: signed_ts,
             };
 
             {
                 let mut store = price_store.write().await;
-                store.insert(asset.symbol().to_string(), cached);
+                store.insert(asset.symbol.clone(), cached);
             }
 
             info!(
-                asset = asset.symbol(),
+                asset = %asset.symbol,
                 price = format!("{:.6}", median),
                 price_fixed = %price_fixed,
                 num_sources = prices.len(),
                 "📦 cached price (signature on-demand)"
             );
 
-            // 6. Record update locally
-            state.record_update(asset, median);
+            // 6. Record update locally (keyed on enclave-authoritative ts).
+            state.record_update(&asset.symbol, median, signed_ts);
         }
 
         if single_run {
@@ -312,32 +372,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// VSOCK→TCP bridge: listens on 127.0.0.1:{local_port} inside the enclave,
-/// and forwards each TCP connection to the Host OS via AF_VSOCK (CID {remote_cid}, port {remote_port}).
-/// This allows `reqwest` to use a local HTTP proxy that transparently tunnels through VSOCK.
-#[cfg(target_os = "linux")]
-async fn run_vsock_tcp_bridge(
-    local_port: u16,
-    remote_cid: u32,
-    remote_port: u32,
-) -> eyre::Result<()> {
-    use std::os::unix::io::FromRawFd;
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", local_port)).await?;
-    info!(port = local_port, "VSOCK→TCP bridge listening");
-
-    loop {
-        let (tcp_stream, _) = listener.accept().await?;
-        let cid = remote_cid;
-        let port = remote_port;
-
-        tokio::spawn(async move {
-            if let Err(e) = bridge_connection(tcp_stream, cid, port).await {
-                warn!(error = %e, "VSOCK bridge connection failed");
-            }
-        });
-    }
-}
+// The live VSOCK↔TCP bridge is inlined in `main` after the price server
+// spawns (see the `tokio::spawn` block around `bridge_listener.accept()`).
+// Each accepted TCP connection is forwarded via `bridge_connection` below.
+// An earlier `run_vsock_tcp_bridge` helper duplicated the same logic and
+// was never called — removed per audit L-1 to eliminate dead surface area.
 
 #[cfg(target_os = "linux")]
 async fn bridge_connection(

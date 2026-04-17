@@ -3,7 +3,7 @@ use eyre::Result;
 use serde::Deserialize;
 
 use super::PriceSource;
-use crate::types::{now_secs, Asset, PricePoint};
+use crate::types::{AssetConfig, PricePoint};
 
 pub struct Bybit {
     client: crate::http_client::HttpClient,
@@ -13,23 +13,11 @@ impl Bybit {
     pub fn new(client: crate::http_client::HttpClient) -> Self {
         Self { client }
     }
-
-    fn symbol_for(asset: Asset) -> Option<&'static str> {
-        match asset {
-            Asset::EthUsd => Some("ETHUSDT"),
-            Asset::BtcUsd => Some("BTCUSDT"),
-            Asset::KasUsd => Some("KASUSDT"),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Deserialize)]
 struct BybitResponse {
     result: BybitResult,
-    /// Server timestamp in milliseconds
-    #[serde(default)]
-    time: u64,
 }
 
 #[derive(Deserialize)]
@@ -47,9 +35,9 @@ struct BybitTicker {
 
 #[async_trait]
 impl PriceSource for Bybit {
-    async fn fetch_price(&self, asset: Asset) -> Result<Option<PricePoint>> {
-        let symbol = match Self::symbol_for(asset) {
-            Some(s) => s,
+    async fn fetch_price(&self, asset: &AssetConfig) -> Result<Option<PricePoint>> {
+        let symbol = match asset.sources.get(self.name()) {
+            Some(s) => s.as_str(),
             None => return Ok(None),
         };
 
@@ -57,7 +45,8 @@ impl PriceSource for Bybit {
             "https://api.bybit.com/v5/market/tickers?category=spot&symbol={}",
             symbol
         );
-        let resp: BybitResponse = self.client.get_json(&url).await?;
+        let (resp, server_time): (BybitResponse, u64) =
+            self.client.get_json_with_time(&url).await?;
         let ticker = resp
             .result
             .list
@@ -74,16 +63,9 @@ impl PriceSource for Bybit {
         let price: f64 = ticker.last_price.parse()?;
         let volume: f64 = ticker.volume24h.parse().unwrap_or(0.0);
 
-        let server_time = if resp.time > 0 {
-            Some(resp.time / 1000)
-        } else {
-            None
-        };
-
         Ok(Some(PricePoint {
             price,
             volume,
-            timestamp: now_secs(),
             source: "bybit".into(),
             server_time,
         }))

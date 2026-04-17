@@ -3,7 +3,7 @@ use eyre::Result;
 use serde::Deserialize;
 
 use super::PriceSource;
-use crate::types::{now_secs, Asset, PricePoint};
+use crate::types::{AssetConfig, PricePoint};
 
 pub struct Binance {
     client: crate::http_client::HttpClient,
@@ -12,16 +12,6 @@ pub struct Binance {
 impl Binance {
     pub fn new(client: crate::http_client::HttpClient) -> Self {
         Self { client }
-    }
-
-    fn symbol_for(asset: Asset) -> Option<&'static str> {
-        match asset {
-            Asset::EthUsd => Some("ETHUSDT"),
-            Asset::BtcUsd => Some("BTCUSDT"),
-            // Binance does not list KASUSDT (as of 2026-04)
-            Asset::UsdcUsd => Some("USDCUSDT"),
-            _ => None,
-        }
     }
 }
 
@@ -33,9 +23,9 @@ struct BinanceTicker {
 
 #[async_trait]
 impl PriceSource for Binance {
-    async fn fetch_price(&self, asset: Asset) -> Result<Option<PricePoint>> {
-        let symbol = match Self::symbol_for(asset) {
-            Some(s) => s,
+    async fn fetch_price(&self, asset: &AssetConfig) -> Result<Option<PricePoint>> {
+        let symbol = match asset.sources.get(self.name()) {
+            Some(s) => s.as_str(),
             None => return Ok(None),
         };
 
@@ -43,7 +33,8 @@ impl PriceSource for Binance {
             "https://api.binance.com/api/v3/ticker/price?symbol={}",
             symbol
         );
-        let resp: BinanceTicker = self.client.get_json(&url).await?;
+        let (resp, server_time): (BinanceTicker, u64) =
+            self.client.get_json_with_time(&url).await?;
         if resp.symbol != symbol {
             return Err(eyre::eyre!(
                 "binance symbol mismatch: expected {}, got {}",
@@ -56,9 +47,8 @@ impl PriceSource for Binance {
         Ok(Some(PricePoint {
             price,
             volume: 0.0,
-            timestamp: now_secs(),
             source: "binance".into(),
-            server_time: None, // ticker/price endpoint has no server timestamp
+            server_time,
         }))
     }
 

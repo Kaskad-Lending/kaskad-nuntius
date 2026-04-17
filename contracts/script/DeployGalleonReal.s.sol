@@ -27,12 +27,13 @@ contract DeployGalleonReal is Script {
         NitroProver prover = new NitroProver(certManager);
         console.log("NitroProver:", address(prover));
 
-        uint256 maxAge = 365 days;
-        // PCR-1/PCR-2: pass bytes32(0) to skip validation initially.
-        // Populate from `nitro-cli describe-enclaves` after first deploy.
-        bytes32 expectedPCR1 = vm.envOr("EXPECTED_PCR1", bytes32(0));
-        bytes32 expectedPCR2 = vm.envOr("EXPECTED_PCR2", bytes32(0));
-        NitroAttestationVerifier verifier = new NitroAttestationVerifier(address(prover), maxAge, expectedPCR1, expectedPCR2);
+        // `MAX_ATTESTATION_AGE` is a constant inside the verifier (4 h, see
+        // audit H-1). PCR-1 and PCR-2 are IMMUTABLE and MUST be supplied
+        // non-zero — a deploy that omits them reverts on the verifier
+        // constructor (audit H-7).
+        bytes32 expectedPCR1 = vm.envBytes32("EXPECTED_PCR1");
+        bytes32 expectedPCR2 = vm.envBytes32("EXPECTED_PCR2");
+        NitroAttestationVerifier verifier = new NitroAttestationVerifier(address(prover), expectedPCR1, expectedPCR2);
         console.log("NitroAttestationVerifier:", address(verifier));
 
         // ─── 2. Verify attestation, extract PCR0 + signer ───────
@@ -47,8 +48,10 @@ contract DeployGalleonReal is Script {
 
         // ─── 3. Oracle with real PCR0 ────────────────────────────
         // Galleon testnet: block.timestamp derives from DAA scores, lags up to 2h
-        KaskadPriceOracle oracle = new KaskadPriceOracle(pcr0, address(verifier));
+        address admin = vm.envAddress("ORACLE_ADMIN");
+        KaskadPriceOracle oracle = new KaskadPriceOracle(pcr0, address(verifier), admin);
         console.log("KaskadPriceOracle:", address(oracle));
+        console.log("Admin (can call registerAssets):", admin);
 
         oracle.registerEnclave(attestationDoc);
         console.log("Enclave registered on-chain (real Nitro attestation)");

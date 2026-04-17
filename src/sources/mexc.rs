@@ -3,7 +3,7 @@ use eyre::Result;
 use serde::Deserialize;
 
 use super::PriceSource;
-use crate::types::{now_secs, Asset, PricePoint};
+use crate::types::{AssetConfig, PricePoint};
 
 pub struct Mexc {
     client: crate::http_client::HttpClient,
@@ -12,15 +12,6 @@ pub struct Mexc {
 impl Mexc {
     pub fn new(client: crate::http_client::HttpClient) -> Self {
         Self { client }
-    }
-
-    fn symbol_for(asset: Asset) -> Option<&'static str> {
-        match asset {
-            Asset::EthUsd => Some("ETHUSDT"),
-            Asset::BtcUsd => Some("BTCUSDT"),
-            Asset::KasUsd => Some("KASUSDT"),
-            _ => None,
-        }
     }
 }
 
@@ -32,14 +23,15 @@ struct MexcTicker {
 
 #[async_trait]
 impl PriceSource for Mexc {
-    async fn fetch_price(&self, asset: Asset) -> Result<Option<PricePoint>> {
-        let symbol = match Self::symbol_for(asset) {
-            Some(s) => s,
+    async fn fetch_price(&self, asset: &AssetConfig) -> Result<Option<PricePoint>> {
+        let symbol = match asset.sources.get(self.name()) {
+            Some(s) => s.as_str(),
             None => return Ok(None),
         };
 
         let url = format!("https://api.mexc.com/api/v3/ticker/price?symbol={}", symbol);
-        let resp: MexcTicker = self.client.get_json(&url).await?;
+        let (resp, server_time): (MexcTicker, u64) =
+            self.client.get_json_with_time(&url).await?;
         if resp.symbol != symbol {
             return Err(eyre::eyre!(
                 "mexc symbol mismatch: expected {}, got {}",
@@ -52,9 +44,8 @@ impl PriceSource for Mexc {
         Ok(Some(PricePoint {
             price,
             volume: 0.0,
-            timestamp: now_secs(),
             source: "mexc".into(),
-            server_time: None,
+            server_time,
         }))
     }
 

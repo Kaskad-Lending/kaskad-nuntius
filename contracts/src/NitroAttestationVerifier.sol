@@ -28,28 +28,35 @@ contract NitroAttestationVerifier is IAttestationVerifier {
     error InvalidPublicKeyLength(uint256 length);
     error PCR1Mismatch();
     error PCR2Mismatch();
+    error PCRsMustBeSet();
 
     /// @notice Marlin NitroProver instance (handles CBOR/COSE/P384 verification).
     NitroProver public immutable nitroProver;
 
-    /// @notice Maximum age of attestation document in seconds.
-    uint256 public immutable maxAttestationAge;
+    /// @notice Maximum age of attestation document. Hardcoded at 4 hours —
+    ///         AWS Nitro leaf certs live ~3 hours so anything older than
+    ///         that is guaranteed to be replayed. The extra 1 h buffer
+    ///         tolerates block.timestamp drift on slow chains (audit H-1).
+    uint256 public constant MAX_ATTESTATION_AGE = 4 hours;
 
     /// @notice Expected PCR-1 (kernel hash) and PCR-2 (application hash).
-    ///         PCR-0 is checked by KaskadPriceOracle. PCR-1 and PCR-2 are checked here.
-    ///         Set to bytes32(0) to skip validation (e.g. during development).
+    ///         BOTH are enforced — a deployer cannot opt out by passing
+    ///         bytes32(0). An attacker swapping the kernel or the app
+    ///         binary of an otherwise-matching EIF must be rejected
+    ///         (audit H-7).
     bytes32 public immutable expectedPCR1;
     bytes32 public immutable expectedPCR2;
 
     bytes public pcrFlags;
 
     /// @param _nitroProver Address of deployed NitroProver contract
-    /// @param _maxAge Maximum acceptable attestation age in seconds
-    /// @param _expectedPCR1 Expected PCR-1 hash (bytes32(0) to skip)
-    /// @param _expectedPCR2 Expected PCR-2 hash (bytes32(0) to skip)
-    constructor(address _nitroProver, uint256 _maxAge, bytes32 _expectedPCR1, bytes32 _expectedPCR2) {
+    /// @param _expectedPCR1 Expected PCR-1 hash — MUST be non-zero
+    /// @param _expectedPCR2 Expected PCR-2 hash — MUST be non-zero
+    constructor(address _nitroProver, bytes32 _expectedPCR1, bytes32 _expectedPCR2) {
+        if (_expectedPCR1 == bytes32(0) || _expectedPCR2 == bytes32(0)) {
+            revert PCRsMustBeSet();
+        }
         nitroProver = NitroProver(_nitroProver);
-        maxAttestationAge = _maxAge;
         expectedPCR1 = _expectedPCR1;
         expectedPCR2 = _expectedPCR2;
         pcrFlags = hex"00000001";
@@ -67,16 +74,18 @@ contract NitroAttestationVerifier is IAttestationVerifier {
         returns (bool valid, bytes32 pcr0, address enclaveAddress)
     {
         (bytes memory enclaveKey, , bytes memory rawPcrs) =
-            nitroProver.verifyAttestation(attestationDoc, maxAttestationAge);
+            nitroProver.verifyAttestation(attestationDoc, MAX_ATTESTATION_AGE);
 
-        // Extract and validate all PCRs
+        // Extract and validate all PCRs. PCR-0 is validated by
+        // KaskadPriceOracle against its own immutable expectation; PCR-1
+        // and PCR-2 are enforced here against the values baked into this
+        // verifier (both always non-zero, see constructor).
         bytes32 pcr1;
         bytes32 pcr2;
         (pcr0, pcr1, pcr2) = _extractPCRs(rawPcrs);
 
-        // PCR-1 and PCR-2 validated here (PCR-0 validated by KaskadPriceOracle)
-        if (expectedPCR1 != bytes32(0) && pcr1 != expectedPCR1) revert PCR1Mismatch();
-        if (expectedPCR2 != bytes32(0) && pcr2 != expectedPCR2) revert PCR2Mismatch();
+        if (pcr1 != expectedPCR1) revert PCR1Mismatch();
+        if (pcr2 != expectedPCR2) revert PCR2Mismatch();
 
         // Derive Ethereum address from enclave public key
         enclaveAddress = _deriveAddress(enclaveKey);

@@ -6,6 +6,9 @@ RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconf
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
+# `include_str!("../config/assets.json")` means the file must be present at
+# compile time. Baking it into the EIF puts its bytes into PCR0.
+COPY config/ ./config/
 
 # Build static binary (musl target)
 RUN cargo build --release --target x86_64-unknown-linux-musl
