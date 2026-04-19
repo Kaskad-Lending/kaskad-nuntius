@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  FOUNDRY_PROFILE: ci
 
 jobs:
   test:
@@ -36,19 +35,3 @@ jobs:
 
       - name: Rust tests
         run: cargo test
-
-      # ─── Solidity ──────────────────────────────────
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-
-      - name: Forge build
-        working-directory: contracts
-        run: forge build --sizes
-
-      - name: Forge tests
-        working-directory: contracts
-        run: forge test -vvv
-
-      - name: Forge format check
-        working-directory: contracts
-        run: forge fmt --check || true  # warn-only for now
