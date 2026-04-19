@@ -118,7 +118,8 @@ contract SecurityAuditTest is Test {
         _registerAssets(oracle2, ids2, mins2);
 
         assertTrue(address(oracle) != address(oracle2));
-        assertEq(oracle.oracleSigner(), oracle2.oracleSigner());
+        assertTrue(oracle.validSigner(signerAddr));
+        assertTrue(oracle2.validSigner(signerAddr));
 
         // Enclave signs ONCE for oracle #1 (or thinks it does — the payload
         // doesn't bind to either contract).

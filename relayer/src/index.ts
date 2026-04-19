@@ -45,14 +45,17 @@ async function main() {
     provider
   );
 
-  // Verify contract is reachable
+  // Verify contract is reachable and log bootstrap state.
   try {
-    const signer = await oracle.oracleSigner();
-    console.log(`[Relayer] Enclave signer: ${signer}`);
+    const count = await oracle.signerCount();
+    console.log(`[Relayer] Registered enclave signer count: ${count}`);
+    if (count === 0n) {
+      console.warn(
+        "[Relayer] WARNING: no enclave signer registered yet — updatePrice will revert until registerEnclave() is called."
+      );
+    }
   } catch (err: any) {
-    console.error(
-      `[Relayer] Cannot reach oracle contract: ${err.message}`
-    );
+    console.error(`[Relayer] Cannot reach oracle contract: ${err.message}`);
     process.exit(1);
   }
 

@@ -22,8 +22,26 @@ const _abi = [
         type: "address",
         internalType: "address",
       },
+      {
+        name: "_admin",
+        type: "address",
+        internalType: "address",
+      },
     ],
     stateMutability: "nonpayable",
+  },
+  {
+    type: "function",
+    name: "CIRCUIT_BREAKER_STALENESS",
+    inputs: [],
+    outputs: [
+      {
+        name: "",
+        type: "uint256",
+        internalType: "uint256",
+      },
+    ],
+    stateMutability: "view",
   },
   {
     type: "function",
@@ -53,13 +71,58 @@ const _abi = [
   },
   {
     type: "function",
-    name: "MIN_UPDATE_DELAY",
+    name: "MAX_RESUME_CHANGE_BPS",
     inputs: [],
     outputs: [
       {
         name: "",
-        type: "uint256",
-        internalType: "uint256",
+        type: "uint16",
+        internalType: "uint16",
+      },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "RESUME_QUORUM_MULTIPLIER",
+    inputs: [],
+    outputs: [
+      {
+        name: "",
+        type: "uint8",
+        internalType: "uint8",
+      },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "admin",
+    inputs: [],
+    outputs: [
+      {
+        name: "",
+        type: "address",
+        internalType: "address",
+      },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "assetParams",
+    inputs: [
+      {
+        name: "",
+        type: "bytes32",
+        internalType: "bytes32",
+      },
+    ],
+    outputs: [
+      {
+        name: "minSources",
+        type: "uint8",
+        internalType: "uint8",
       },
     ],
     stateMutability: "view",
@@ -79,34 +142,6 @@ const _abi = [
         name: "",
         type: "uint80",
         internalType: "uint80",
-      },
-    ],
-    stateMutability: "view",
-  },
-  {
-    type: "function",
-    name: "enclave",
-    inputs: [],
-    outputs: [
-      {
-        name: "signer",
-        type: "address",
-        internalType: "address",
-      },
-      {
-        name: "registeredAt",
-        type: "uint256",
-        internalType: "uint256",
-      },
-      {
-        name: "pcr0",
-        type: "bytes32",
-        internalType: "bytes32",
-      },
-      {
-        name: "active",
-        type: "bool",
-        internalType: "bool",
       },
     ],
     stateMutability: "view",
@@ -194,6 +229,25 @@ const _abi = [
   },
   {
     type: "function",
+    name: "isValidSigner",
+    inputs: [
+      {
+        name: "who",
+        type: "address",
+        internalType: "address",
+      },
+    ],
+    outputs: [
+      {
+        name: "",
+        type: "bool",
+        internalType: "bool",
+      },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
     name: "latestPrices",
     inputs: [
       {
@@ -214,6 +268,11 @@ const _abi = [
         internalType: "uint256",
       },
       {
+        name: "signedTimestamp",
+        type: "uint256",
+        internalType: "uint256",
+      },
+      {
         name: "numSources",
         type: "uint8",
         internalType: "uint8",
@@ -227,19 +286,6 @@ const _abi = [
         name: "roundId",
         type: "uint80",
         internalType: "uint80",
-      },
-    ],
-    stateMutability: "view",
-  },
-  {
-    type: "function",
-    name: "oracleSigner",
-    inputs: [],
-    outputs: [
-      {
-        name: "",
-        type: "address",
-        internalType: "address",
       },
     ],
     stateMutability: "view",
@@ -271,6 +317,11 @@ const _abi = [
         internalType: "uint256",
       },
       {
+        name: "signedTimestamp",
+        type: "uint256",
+        internalType: "uint256",
+      },
+      {
         name: "numSources",
         type: "uint8",
         internalType: "uint8",
@@ -290,6 +341,24 @@ const _abi = [
   },
   {
     type: "function",
+    name: "registerAssets",
+    inputs: [
+      {
+        name: "ids",
+        type: "bytes32[]",
+        internalType: "bytes32[]",
+      },
+      {
+        name: "minSources",
+        type: "uint8[]",
+        internalType: "uint8[]",
+      },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    type: "function",
     name: "registerEnclave",
     inputs: [
       {
@@ -300,6 +369,32 @@ const _abi = [
     ],
     outputs: [],
     stateMutability: "nonpayable",
+  },
+  {
+    type: "function",
+    name: "registeredAssetIds",
+    inputs: [],
+    outputs: [
+      {
+        name: "",
+        type: "bytes32[]",
+        internalType: "bytes32[]",
+      },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "signerCount",
+    inputs: [],
+    outputs: [
+      {
+        name: "",
+        type: "uint256",
+        internalType: "uint256",
+      },
+    ],
+    stateMutability: "view",
   },
   {
     type: "function",
@@ -341,6 +436,25 @@ const _abi = [
   },
   {
     type: "function",
+    name: "validSigner",
+    inputs: [
+      {
+        name: "",
+        type: "address",
+        internalType: "address",
+      },
+    ],
+    outputs: [
+      {
+        name: "",
+        type: "bool",
+        internalType: "bool",
+      },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
     name: "verifier",
     inputs: [],
     outputs: [
@@ -351,6 +465,25 @@ const _abi = [
       },
     ],
     stateMutability: "view",
+  },
+  {
+    type: "event",
+    name: "AssetsRegistered",
+    inputs: [
+      {
+        name: "admin",
+        type: "address",
+        indexed: true,
+        internalType: "address",
+      },
+      {
+        name: "numAssets",
+        type: "uint256",
+        indexed: false,
+        internalType: "uint256",
+      },
+    ],
+    anonymous: false,
   },
   {
     type: "event",
@@ -416,6 +549,54 @@ const _abi = [
   },
   {
     type: "error",
+    name: "AssetNotRegistered",
+    inputs: [
+      {
+        name: "assetId",
+        type: "bytes32",
+        internalType: "bytes32",
+      },
+    ],
+  },
+  {
+    type: "error",
+    name: "AssetsEmpty",
+    inputs: [],
+  },
+  {
+    type: "error",
+    name: "AssetsUnsorted",
+    inputs: [],
+  },
+  {
+    type: "error",
+    name: "ECDSAInvalidSignature",
+    inputs: [],
+  },
+  {
+    type: "error",
+    name: "ECDSAInvalidSignatureLength",
+    inputs: [
+      {
+        name: "length",
+        type: "uint256",
+        internalType: "uint256",
+      },
+    ],
+  },
+  {
+    type: "error",
+    name: "ECDSAInvalidSignatureS",
+    inputs: [
+      {
+        name: "s",
+        type: "bytes32",
+        internalType: "bytes32",
+      },
+    ],
+  },
+  {
+    type: "error",
     name: "InsufficientSources",
     inputs: [],
   },
@@ -426,12 +607,38 @@ const _abi = [
   },
   {
     type: "error",
+    name: "InvalidMinSources",
+    inputs: [],
+  },
+  {
+    type: "error",
     name: "InvalidSignature",
     inputs: [],
   },
   {
     type: "error",
+    name: "MismatchedLengths",
+    inputs: [],
+  },
+  {
+    type: "error",
     name: "NoEnclaveRegistered",
+    inputs: [],
+  },
+  {
+    type: "error",
+    name: "NoPriceData",
+    inputs: [
+      {
+        name: "assetId",
+        type: "bytes32",
+        internalType: "bytes32",
+      },
+    ],
+  },
+  {
+    type: "error",
+    name: "NotAdmin",
     inputs: [],
   },
   {
@@ -468,6 +675,22 @@ const _abi = [
   },
   {
     type: "error",
+    name: "ResumeRequiresHigherQuorum",
+    inputs: [
+      {
+        name: "provided",
+        type: "uint8",
+        internalType: "uint8",
+      },
+      {
+        name: "required",
+        type: "uint8",
+        internalType: "uint8",
+      },
+    ],
+  },
+  {
+    type: "error",
     name: "StalePrice",
     inputs: [
       {
@@ -484,19 +707,8 @@ const _abi = [
   },
   {
     type: "error",
-    name: "UpdateTooFrequent",
-    inputs: [
-      {
-        name: "elapsed",
-        type: "uint256",
-        internalType: "uint256",
-      },
-      {
-        name: "minDelay",
-        type: "uint256",
-        internalType: "uint256",
-      },
-    ],
+    name: "ZeroAddress",
+    inputs: [],
   },
 ] as const;
 

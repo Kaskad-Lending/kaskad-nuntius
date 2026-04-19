@@ -39,8 +39,11 @@ echo "  ✓ Anvil running (PID: ${ANVIL_PID})"
 # ─── 2. Deploy contracts ─────────────────────────────
 echo ""
 echo "▸ Deploying contracts..."
-DEPLOY_OUTPUT=$(cd ${CONTRACTS_DIR} && ORACLE_SIGNER=${ORACLE_SIGNER_ADDR} \
-  forge script script/Deploy.s.sol \
+DEPLOYER_ADDR=$(cast wallet address ${DEPLOYER_KEY})
+DEPLOY_OUTPUT=$(cd ${CONTRACTS_DIR} && \
+  ORACLE_SIGNER=${ORACLE_SIGNER_ADDR} \
+  ORACLE_ADMIN=${DEPLOYER_ADDR} \
+  forge script script/DeployLocal.s.sol \
     --rpc-url ${RPC_URL} \
     --broadcast \
     --private-key ${DEPLOYER_KEY} \
@@ -61,13 +64,13 @@ echo "  ✓ Oracle deployed at: ${ORACLE_ADDR}"
 # ─── 3. Verify oracle signer is set ──────────────────
 echo ""
 echo "▸ Verifying oracle signer..."
-SIGNER=$(cast call ${ORACLE_ADDR} "oracleSigner()(address)" --rpc-url ${RPC_URL})
-echo "  Registered signer: ${SIGNER}"
-if [ "${SIGNER,,}" != "${ORACLE_SIGNER_ADDR,,}" ]; then
-  echo "✗ Signer mismatch!"
+IS_VALID=$(cast call ${ORACLE_ADDR} "validSigner(address)(bool)" ${ORACLE_SIGNER_ADDR} --rpc-url ${RPC_URL})
+echo "  validSigner(${ORACLE_SIGNER_ADDR}) = ${IS_VALID}"
+if [ "${IS_VALID}" != "true" ]; then
+  echo "✗ Expected signer not in valid-signer set!"
   exit 1
 fi
-echo "  ✓ Signer matches"
+echo "  ✓ Signer in valid set"
 
 # ─── 4. Sign and submit a price update ───────────────
 echo ""

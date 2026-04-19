@@ -26,13 +26,6 @@ contract KaskadPriceOracle {
         uint80  roundId;         // incrementing round counter
     }
 
-    struct EnclaveInfo {
-        address signer;
-        uint256 registeredAt;
-        bytes32 pcr0;
-        bool    active;
-    }
-
     /// @notice Per-asset quorum parameter. Kept as a struct for future
     ///         extensions (deviation / heartbeat) without a storage layout
     ///         migration.
@@ -64,7 +57,23 @@ contract KaskadPriceOracle {
 
     // ─── State ───────────────────────────────────────────────────────────
 
-    EnclaveInfo public enclave;
+    /// @notice Grow-only set of enclave-attested signing addresses. A signer
+    ///         is added on the first `registerEnclave` call that recovers
+    ///         it from a valid PCR0-matching attestation. The set NEVER
+    ///         shrinks — there is no revoke function. Rationale: an
+    ///         attacker with a same-PCR attestation can add their own
+    ///         signer (they could do that anyway — the image is
+    ///         measured, not the builder), but cannot evict the legit
+    ///         signer. Both signers produce identical prices because
+    ///         they run identical measured code. A compromised key (off
+    ///         the stated threat model — requires breaking AWS Nitro
+    ///         isolation) requires redeploy with a new `expectedPCR0`.
+    mapping(address => bool) public validSigner;
+
+    /// @notice Count of addresses in `validSigner`. Used by
+    ///         `registerAssets` to refuse a pre-bootstrap admin call and
+    ///         to expose oracle-ready state to off-chain observers.
+    uint256 public signerCount;
 
     mapping(bytes32 => PriceData) public latestPrices;
     mapping(bytes32 => mapping(uint80 => PriceData)) public priceHistory;
@@ -125,15 +134,21 @@ contract KaskadPriceOracle {
         _;
     }
 
-    // ─── Enclave Registration (permissionless) ───────────────────────────
+    // ─── Enclave Registration (permissionless, grow-only) ────────────────
 
-    /// @notice Register an enclave as the oracle signer. Anyone can call;
-    ///         only a valid attestation with the expected PCR0 succeeds.
-    ///         The per-asset quorum mapping is PRESERVED across rotations
-    ///         — an attacker (or a legit operator) re-registering with a
-    ///         same-PCR attestation does NOT knock the oracle offline,
-    ///         and does not give them any primitive to downgrade params
-    ///         (that's admin-only).
+    /// @notice Register an enclave signer. Anyone can call — only a valid
+    ///         attestation with the expected PCR0 succeeds. Each first-
+    ///         time successful call ADDS the recovered address to the
+    ///         valid-signer set; re-registering the same address is a
+    ///         no-op.
+    ///
+    ///         Grow-only semantics close the grief-loop where an attacker
+    ///         with a valid same-PCR attestation would otherwise ping-
+    ///         pong `enclave.signer` and break legit relayer submissions.
+    ///         With a set, both signers are valid concurrently, and
+    ///         because they sign identical measured code they produce
+    ///         identical prices — the set membership is a permission
+    ///         token, not a price source.
     function registerEnclave(bytes calldata attestationDoc) external {
         (bool valid, bytes32 pcr0, address enclaveAddress) =
             verifier.verifyAttestation(attestationDoc);
@@ -141,14 +156,14 @@ contract KaskadPriceOracle {
         if (!valid) revert InvalidAttestation();
         if (pcr0 != expectedPCR0) revert PCR0Mismatch(pcr0, expectedPCR0);
 
-        enclave = EnclaveInfo({
-            signer: enclaveAddress,
-            registeredAt: block.timestamp,
-            pcr0: pcr0,
-            active: true
-        });
-
-        emit EnclaveRegistered(enclaveAddress, pcr0, block.timestamp);
+        // Idempotent add. Without this guard a spam caller could inflate
+        // `signerCount` and emit duplicate events for a no-op state
+        // change.
+        if (!validSigner[enclaveAddress]) {
+            validSigner[enclaveAddress] = true;
+            signerCount += 1;
+            emit EnclaveRegistered(enclaveAddress, pcr0, block.timestamp);
+        }
     }
 
     // ─── Asset-quorum registration (admin) ───────────────────────────────
@@ -162,7 +177,7 @@ contract KaskadPriceOracle {
         bytes32[] calldata ids,
         uint8[] calldata minSources
     ) external onlyAdmin {
-        if (!enclave.active) revert NoEnclaveRegistered();
+        if (signerCount == 0) revert NoEnclaveRegistered();
         if (ids.length == 0) revert AssetsEmpty();
         if (ids.length != minSources.length) revert MismatchedLengths();
 
@@ -197,7 +212,7 @@ contract KaskadPriceOracle {
         bytes32 sourcesHash,
         bytes calldata signature
     ) external {
-        if (!enclave.active) revert NoEnclaveRegistered();
+        if (signerCount == 0) revert NoEnclaveRegistered();
 
         uint8 minReq = assetParams[assetId].minSources;
         if (minReq == 0) revert AssetNotRegistered(assetId);
@@ -245,7 +260,8 @@ contract KaskadPriceOracle {
 
     /// @dev Rebuilds the enclave's abi.encodePacked payload, applies
     ///      EIP-191 via `MessageHashUtils.toEthSignedMessageHash`, recovers
-    ///      the signer, and reverts on mismatch.
+    ///      the signer, and reverts if it isn't a member of the valid-
+    ///      signer set.
     function _verifyPriceSignature(
         bytes32 assetId,
         uint256 price,
@@ -257,9 +273,8 @@ contract KaskadPriceOracle {
         bytes32 messageHash = keccak256(
             abi.encodePacked(assetId, price, timestamp, numSources, sourcesHash)
         );
-        if (ECDSA.recover(messageHash.toEthSignedMessageHash(), signature) != enclave.signer) {
-            revert InvalidSignature();
-        }
+        address recovered = ECDSA.recover(messageHash.toEthSignedMessageHash(), signature);
+        if (!validSigner[recovered]) revert InvalidSignature();
     }
 
     function _storePriceUpdate(
@@ -306,8 +321,13 @@ contract KaskadPriceOracle {
         return (data.price, data.timestamp, data.numSources);
     }
 
-    function oracleSigner() external view returns (address) {
-        return enclave.signer;
+    /// @notice Convenience alias for the public `validSigner` mapping.
+    ///         Off-chain clients verifying a signature should recover the
+    ///         ECDSA address locally and call this to check membership —
+    ///         there is no single "oracleSigner" anymore, the set may
+    ///         contain multiple addresses.
+    function isValidSigner(address who) external view returns (bool) {
+        return validSigner[who];
     }
 }
 

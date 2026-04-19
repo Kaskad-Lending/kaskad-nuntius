@@ -26,11 +26,12 @@ export class Relayer {
   private oracle: KaskadPriceOracle;
   private txQueue: TxQueue;
   private poller: PricePoller;
-  private enclaveSigner: string | null = null;
-  /** Subscribed to the EnclaveRegistered event so a rotation invalidates
-   *  our cached signer immediately; the next tick will re-read it via
-   *  `oracleSigner()`. See audit M-4 — the old code cached once and stuck
-   *  with a stale signer after any re-registration. */
+  /** Grow-only cache of valid signer addresses (lowercase). Bootstrapped
+   *  from past `EnclaveRegistered` events and kept current via a live
+   *  subscription. The on-chain set is also grow-only so we only ever
+   *  `add` — never remove. A cache miss falls back to a direct
+   *  `validSigner(addr)` RPC call. */
+  private validSigners: Set<string> = new Set();
   private signerSubscribed = false;
 
   constructor(
@@ -48,15 +49,6 @@ export class Relayer {
   /** Run one poll + relay cycle. Called from the main loop. */
   async tick() {
     await this.ensureSignerSubscription();
-
-    if (!this.enclaveSigner) {
-      try {
-        this.enclaveSigner = await this.oracle.oracleSigner();
-      } catch {
-        console.warn("[Relay] Cannot read oracleSigner, skipping cycle");
-        return;
-      }
-    }
 
     // 1. Poll fresh prices
     const prices = await this.poller.fetchPrices();
@@ -130,7 +122,7 @@ export class Relayer {
     }
 
     // H-2: Verify EIP-191 signature locally before paying gas
-    if (!this.verifySignature(asset.latest)) {
+    if (!(await this.verifySignature(asset.latest))) {
       console.error(
         `[Relay] ${asset.symbol}: local signature verification failed, skipping`
       );
@@ -165,8 +157,10 @@ export class Relayer {
     );
   }
 
-  /** H-2: Verify EIP-191 signature matches the registered enclave signer. */
-  private verifySignature(update: SignedPriceUpdate): boolean {
+  /** H-2: Verify EIP-191 signature against the valid-signer set. Checks
+   *  the local cache first; on miss, falls back to `validSigner(addr)`
+   *  on-chain and admits the result into the cache. */
+  private async verifySignature(update: SignedPriceUpdate): Promise<boolean> {
     try {
       // Reconstruct payload: abi.encodePacked(assetId, price, timestamp, numSources, sourcesHash)
       const payload = ethers.solidityPacked(
@@ -185,46 +179,64 @@ export class Relayer {
       // EIP-191: "\x19Ethereum Signed Message:\n32" + hash
       const ethHash = ethers.hashMessage(ethers.getBytes(messageHash));
 
-      const recovered = ethers.recoverAddress(ethHash, update.signature);
+      const recovered = ethers.recoverAddress(ethHash, update.signature).toLowerCase();
 
-      if (recovered.toLowerCase() !== this.enclaveSigner?.toLowerCase()) {
-        console.warn(
-          `[Relay] Signer mismatch: recovered=${recovered} expected=${this.enclaveSigner}`
-        );
-        return false;
+      if (this.validSigners.has(recovered)) return true;
+
+      // Cache miss — confirm against chain. Either our event feed missed
+      // a registration, or this is a forged signature.
+      const ok = await this.oracle.validSigner(recovered);
+      if (ok) {
+        this.validSigners.add(recovered);
+        console.log(`[Relay] Admitted signer ${recovered} via RPC fallback`);
+        return true;
       }
 
-      return true;
+      console.warn(`[Relay] Unknown signer recovered: ${recovered}`);
+      return false;
     } catch (err: any) {
       console.error(`[Relay] Signature verification error: ${err.message}`);
       return false;
     }
   }
 
-  /** Subscribe once to the `EnclaveRegistered` event so cache invalidation
-   *  is driven by on-chain state rather than arbitrary timers. On any
-   *  re-registration (key rotation, operator redeploy) we drop the cached
-   *  signer; the next `tick()` fetches the new value via RPC. */
+  /** Bootstrap the signer cache from past `EnclaveRegistered` events and
+   *  subscribe to live ones. The on-chain signer set is grow-only, so we
+   *  only ever add — an RPC outage that drops a future event is covered
+   *  by the cache-miss fallback in `verifySignature`. */
   private async ensureSignerSubscription() {
     if (this.signerSubscribed) return;
     try {
       const filter = this.oracle.filters.EnclaveRegistered();
+
+      // Replay all past events so we don't start with an empty cache.
+      const past = await this.oracle.queryFilter(filter);
+      for (const ev of past) {
+        // ethers v6: typed event log; first arg is the `signer` address.
+        const who = String(ev.args[0]).toLowerCase();
+        this.validSigners.add(who);
+      }
+      console.log(
+        `[Relay] Bootstrapped signer cache: ${this.validSigners.size} entry(ies)`
+      );
+
+      // Subscribe to future events.
       await this.oracle.on(filter, (signer: string) => {
-        console.log(
-          `[Relay] EnclaveRegistered fired: new signer=${signer}; invalidating cache`
-        );
-        this.enclaveSigner = null;
+        const lc = signer.toLowerCase();
+        if (!this.validSigners.has(lc)) {
+          this.validSigners.add(lc);
+          console.log(`[Relay] EnclaveRegistered: added signer ${lc}`);
+        }
       });
       this.signerSubscribed = true;
     } catch (err: any) {
       // Some RPCs (or ethers providers without log-subscription support)
-      // will throw here. Fall through — we'll still run, just without
-      // push-based invalidation. `tick()` always re-reads the cache miss.
+      // throw here. The per-verify RPC fallback in `verifySignature`
+      // keeps us correct, just less efficient.
       console.warn(
-        `[Relay] EnclaveRegistered subscribe failed (${err?.message ?? err}); rotation cache-invalidation disabled`
+        `[Relay] EnclaveRegistered subscribe failed (${err?.message ?? err}); falling back to per-verify RPC check`
       );
-      // Mark subscribed=true anyway so we don't retry every tick.
-      this.signerSubscribed = true;
+      this.signerSubscribed = true; // don't spam retry
     }
   }
 

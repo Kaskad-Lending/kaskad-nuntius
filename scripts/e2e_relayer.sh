@@ -62,8 +62,11 @@ echo "  ✓ Anvil running"
 # ─── 2. Deploy contracts ─────────────────────────────
 echo ""
 echo "▸ [2/6] Deploying contracts..."
-DEPLOY_OUTPUT=$(cd ${CONTRACTS_DIR} && ORACLE_SIGNER=${ORACLE_SIGNER_ADDR} \
-  forge script script/Deploy.s.sol \
+DEPLOYER_ADDR=$(cast wallet address ${DEPLOYER_KEY})
+DEPLOY_OUTPUT=$(cd ${CONTRACTS_DIR} && \
+  ORACLE_SIGNER=${ORACLE_SIGNER_ADDR} \
+  ORACLE_ADMIN=${DEPLOYER_ADDR} \
+  forge script script/DeployLocal.s.sol \
     --rpc-url ${RPC_URL} \
     --broadcast \
     --private-key ${DEPLOYER_KEY} \
@@ -83,8 +86,8 @@ echo "  ✓ ETH/USD Aggregator: ${ETH_AGG_ADDR}"
 echo "  ✓ BTC/USD Aggregator: ${BTC_AGG_ADDR}"
 
 # Verify enclave is registered
-ONCHAIN_SIGNER=$(cast call ${ORACLE_ADDR} "oracleSigner()(address)" --rpc-url ${RPC_URL})
-echo "  ✓ Enclave signer on-chain: ${ONCHAIN_SIGNER}"
+SIGNER_COUNT=$(cast call ${ORACLE_ADDR} "signerCount()(uint256)" --rpc-url ${RPC_URL})
+echo "  ✓ Registered signer count: ${SIGNER_COUNT}"
 
 # ─── 3. Build Rust oracle ────────────────────────────
 echo ""

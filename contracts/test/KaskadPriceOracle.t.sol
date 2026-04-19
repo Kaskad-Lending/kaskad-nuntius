@@ -91,15 +91,16 @@ contract KaskadPriceOracleTest is Test {
     // ─── Permissionless: No Owner ────────────────────────────────────
 
     function test_no_owner_functions() public view {
-        // Contract has NO owner(), NO setOracleSigner(), NO transferOwnership()
-        // Verify enclave was registered via attestation
-        (address enclSigner, , , bool active) = oracle.enclave();
-        assertEq(enclSigner, signer);
-        assertTrue(active);
+        // Contract has NO owner(), NO setOracleSigner(), NO transferOwnership().
+        // Signer was added to the valid-signer set via attestation.
+        assertTrue(oracle.validSigner(signer));
+        assertEq(oracle.signerCount(), 1);
     }
 
-    function test_oracleSigner_getter() public view {
-        assertEq(oracle.oracleSigner(), signer);
+    function test_validSigner_getter() public view {
+        assertTrue(oracle.validSigner(signer));
+        assertTrue(oracle.isValidSigner(signer));
+        assertFalse(oracle.validSigner(address(0xDEAD)));
     }
 
     function test_immutable_config() public view {
@@ -118,7 +119,18 @@ contract KaskadPriceOracleTest is Test {
         vm.prank(address(0xCAFE)); // random caller
         fresh.registerEnclave(hex"deadbeef");
 
-        assertEq(fresh.oracleSigner(), signer);
+        assertTrue(fresh.validSigner(signer));
+        assertEq(fresh.signerCount(), 1);
+    }
+
+    function test_registerEnclave_idempotent() public {
+        // setUp registered `signer` once. A second call with the same
+        // attestation is a no-op: signerCount stays 1, no additional
+        // EnclaveRegistered event.
+        assertEq(oracle.signerCount(), 1);
+        oracle.registerEnclave(hex"00");
+        assertEq(oracle.signerCount(), 1);
+        assertTrue(oracle.validSigner(signer));
     }
 
     function test_registerEnclave_revert_invalid_attestation() public {
@@ -151,14 +163,18 @@ contract KaskadPriceOracleTest is Test {
         oracleWithWrongPCR.registerEnclave(hex"00");
     }
 
-    function test_registerEnclave_replaces_old_signer() public {
-        // A new valid enclave can replace the old one (e.g. after restart)
-        address newSigner = address(0xBEEF);
-        MockAttestationVerifier newVerifier = new MockAttestationVerifier(EXPECTED_PCR0, newSigner);
-        KaskadPriceOracle o = new KaskadPriceOracle(EXPECTED_PCR0, address(newVerifier), admin);
+    function test_registerEnclave_fresh_oracle_adds_signer() public {
+        // A fresh oracle wired to a different verifier accepts ITS signer
+        // into its own set. Doesn't touch any other oracle's set — each
+        // deployment is independent.
+        address otherSigner = address(0xBEEF);
+        MockAttestationVerifier otherVerifier = new MockAttestationVerifier(EXPECTED_PCR0, otherSigner);
+        KaskadPriceOracle o = new KaskadPriceOracle(EXPECTED_PCR0, address(otherVerifier), admin);
 
         o.registerEnclave(hex"00");
-        assertEq(o.oracleSigner(), newSigner);
+        assertTrue(o.validSigner(otherSigner));
+        assertFalse(o.validSigner(signer));
+        assertEq(o.signerCount(), 1);
     }
 
     // ─── Price Updates ───────────────────────────────────────────────
@@ -831,29 +847,30 @@ contract RelayerE2ETest is Test {
 
     // ─── E2E: Enclave re-registration (rotation) ──────────────────
 
-    function test_e2e_enclave_rotation_invalidates_old_signer() public {
-        // Submit a price with original signer
+    function test_e2e_fresh_oracle_rejects_foreign_signer() public {
+        // A signature from one oracle's signer isn't valid on another
+        // oracle with a different (independent) signer set.
         _relayPrice(ETH_USD, 212926000000, T0, 5);
 
-        // New enclave boots with a new key
+        // Fresh oracle, fresh verifier, fresh enclave key.
         uint256 newPk = 0xBEEF1;
         address newAddr = vm.addr(newPk);
         MockAttestationVerifier newVerifier = new MockAttestationVerifier(PCR0, newAddr);
-
-        // Re-deploy oracle and re-register.
         KaskadPriceOracle fresh = new KaskadPriceOracle(PCR0, address(newVerifier), admin);
         fresh.registerEnclave(hex"00");
-        assertEq(fresh.oracleSigner(), newAddr);
+        assertTrue(fresh.validSigner(newAddr));
+        assertFalse(fresh.validSigner(signerAddr));
+        assertEq(fresh.signerCount(), 1);
 
-        // Admin must (re-)bless the asset quorum — otherwise the
-        // subsequent updatePrice would hit AssetsNotRegistered before the
-        // signature check fires.
+        // Admin must (re-)bless the asset quorum on the fresh oracle —
+        // otherwise updatePrice hits AssetNotRegistered before signature
+        // check fires.
         bytes32[] memory ids = new bytes32[](1);
         uint8[] memory mins = new uint8[](1);
         ids[0] = ETH_USD; mins[0] = 3;
         _registerAssetsOnto(fresh, ids, mins);
 
-        // Old signer's signature is rejected on fresh oracle
+        // A signature from the *other* oracle's signer is rejected here.
         bytes32 srcHash = keccak256("test");
         bytes memory oldSig = _sign(ETH_USD, 100, T0, 3, srcHash);
         vm.prank(relayer);

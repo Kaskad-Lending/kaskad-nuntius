@@ -26,40 +26,62 @@ import type {
 export interface KaskadPriceOracleInterface extends Interface {
   getFunction(
     nameOrSignature:
+      | "CIRCUIT_BREAKER_STALENESS"
       | "DECIMALS"
       | "MAX_PRICE_CHANGE_BPS"
-      | "MIN_UPDATE_DELAY"
+      | "MAX_RESUME_CHANGE_BPS"
+      | "RESUME_QUORUM_MULTIPLIER"
+      | "admin"
+      | "assetParams"
       | "currentRound"
-      | "enclave"
       | "expectedPCR0"
       | "getLatestPrice"
       | "getRoundData"
+      | "isValidSigner"
       | "latestPrices"
-      | "oracleSigner"
       | "priceHistory"
+      | "registerAssets"
       | "registerEnclave"
+      | "registeredAssetIds"
+      | "signerCount"
       | "updatePrice"
+      | "validSigner"
       | "verifier"
   ): FunctionFragment;
 
   getEvent(
-    nameOrSignatureOrTopic: "EnclaveRegistered" | "PriceUpdated"
+    nameOrSignatureOrTopic:
+      | "AssetsRegistered"
+      | "EnclaveRegistered"
+      | "PriceUpdated"
   ): EventFragment;
 
+  encodeFunctionData(
+    functionFragment: "CIRCUIT_BREAKER_STALENESS",
+    values?: undefined
+  ): string;
   encodeFunctionData(functionFragment: "DECIMALS", values?: undefined): string;
   encodeFunctionData(
     functionFragment: "MAX_PRICE_CHANGE_BPS",
     values?: undefined
   ): string;
   encodeFunctionData(
-    functionFragment: "MIN_UPDATE_DELAY",
+    functionFragment: "MAX_RESUME_CHANGE_BPS",
     values?: undefined
+  ): string;
+  encodeFunctionData(
+    functionFragment: "RESUME_QUORUM_MULTIPLIER",
+    values?: undefined
+  ): string;
+  encodeFunctionData(functionFragment: "admin", values?: undefined): string;
+  encodeFunctionData(
+    functionFragment: "assetParams",
+    values: [BytesLike]
   ): string;
   encodeFunctionData(
     functionFragment: "currentRound",
     values: [BytesLike]
   ): string;
-  encodeFunctionData(functionFragment: "enclave", values?: undefined): string;
   encodeFunctionData(
     functionFragment: "expectedPCR0",
     values?: undefined
@@ -73,20 +95,32 @@ export interface KaskadPriceOracleInterface extends Interface {
     values: [BytesLike, BigNumberish]
   ): string;
   encodeFunctionData(
-    functionFragment: "latestPrices",
-    values: [BytesLike]
+    functionFragment: "isValidSigner",
+    values: [AddressLike]
   ): string;
   encodeFunctionData(
-    functionFragment: "oracleSigner",
-    values?: undefined
+    functionFragment: "latestPrices",
+    values: [BytesLike]
   ): string;
   encodeFunctionData(
     functionFragment: "priceHistory",
     values: [BytesLike, BigNumberish]
   ): string;
   encodeFunctionData(
+    functionFragment: "registerAssets",
+    values: [BytesLike[], BigNumberish[]]
+  ): string;
+  encodeFunctionData(
     functionFragment: "registerEnclave",
     values: [BytesLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "registeredAssetIds",
+    values?: undefined
+  ): string;
+  encodeFunctionData(
+    functionFragment: "signerCount",
+    values?: undefined
   ): string;
   encodeFunctionData(
     functionFragment: "updatePrice",
@@ -99,22 +133,38 @@ export interface KaskadPriceOracleInterface extends Interface {
       BytesLike
     ]
   ): string;
+  encodeFunctionData(
+    functionFragment: "validSigner",
+    values: [AddressLike]
+  ): string;
   encodeFunctionData(functionFragment: "verifier", values?: undefined): string;
 
+  decodeFunctionResult(
+    functionFragment: "CIRCUIT_BREAKER_STALENESS",
+    data: BytesLike
+  ): Result;
   decodeFunctionResult(functionFragment: "DECIMALS", data: BytesLike): Result;
   decodeFunctionResult(
     functionFragment: "MAX_PRICE_CHANGE_BPS",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
-    functionFragment: "MIN_UPDATE_DELAY",
+    functionFragment: "MAX_RESUME_CHANGE_BPS",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "RESUME_QUORUM_MULTIPLIER",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(functionFragment: "admin", data: BytesLike): Result;
+  decodeFunctionResult(
+    functionFragment: "assetParams",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
     functionFragment: "currentRound",
     data: BytesLike
   ): Result;
-  decodeFunctionResult(functionFragment: "enclave", data: BytesLike): Result;
   decodeFunctionResult(
     functionFragment: "expectedPCR0",
     data: BytesLike
@@ -128,11 +178,11 @@ export interface KaskadPriceOracleInterface extends Interface {
     data: BytesLike
   ): Result;
   decodeFunctionResult(
-    functionFragment: "latestPrices",
+    functionFragment: "isValidSigner",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
-    functionFragment: "oracleSigner",
+    functionFragment: "latestPrices",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
@@ -140,14 +190,43 @@ export interface KaskadPriceOracleInterface extends Interface {
     data: BytesLike
   ): Result;
   decodeFunctionResult(
+    functionFragment: "registerAssets",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
     functionFragment: "registerEnclave",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "registeredAssetIds",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "signerCount",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
     functionFragment: "updatePrice",
     data: BytesLike
   ): Result;
+  decodeFunctionResult(
+    functionFragment: "validSigner",
+    data: BytesLike
+  ): Result;
   decodeFunctionResult(functionFragment: "verifier", data: BytesLike): Result;
+}
+
+export namespace AssetsRegisteredEvent {
+  export type InputTuple = [admin: AddressLike, numAssets: BigNumberish];
+  export type OutputTuple = [admin: string, numAssets: bigint];
+  export interface OutputObject {
+    admin: string;
+    numAssets: bigint;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
 }
 
 export namespace EnclaveRegisteredEvent {
@@ -239,26 +318,21 @@ export interface KaskadPriceOracle extends BaseContract {
     event?: TCEvent
   ): Promise<this>;
 
+  CIRCUIT_BREAKER_STALENESS: TypedContractMethod<[], [bigint], "view">;
+
   DECIMALS: TypedContractMethod<[], [bigint], "view">;
 
   MAX_PRICE_CHANGE_BPS: TypedContractMethod<[], [bigint], "view">;
 
-  MIN_UPDATE_DELAY: TypedContractMethod<[], [bigint], "view">;
+  MAX_RESUME_CHANGE_BPS: TypedContractMethod<[], [bigint], "view">;
+
+  RESUME_QUORUM_MULTIPLIER: TypedContractMethod<[], [bigint], "view">;
+
+  admin: TypedContractMethod<[], [string], "view">;
+
+  assetParams: TypedContractMethod<[arg0: BytesLike], [bigint], "view">;
 
   currentRound: TypedContractMethod<[arg0: BytesLike], [bigint], "view">;
-
-  enclave: TypedContractMethod<
-    [],
-    [
-      [string, bigint, string, boolean] & {
-        signer: string;
-        registeredAt: bigint;
-        pcr0: string;
-        active: boolean;
-      }
-    ],
-    "view"
-  >;
 
   expectedPCR0: TypedContractMethod<[], [string], "view">;
 
@@ -287,12 +361,15 @@ export interface KaskadPriceOracle extends BaseContract {
     "view"
   >;
 
+  isValidSigner: TypedContractMethod<[who: AddressLike], [boolean], "view">;
+
   latestPrices: TypedContractMethod<
     [arg0: BytesLike],
     [
-      [bigint, bigint, bigint, string, bigint] & {
+      [bigint, bigint, bigint, bigint, string, bigint] & {
         price: bigint;
         timestamp: bigint;
+        signedTimestamp: bigint;
         numSources: bigint;
         sourcesHash: string;
         roundId: bigint;
@@ -301,20 +378,25 @@ export interface KaskadPriceOracle extends BaseContract {
     "view"
   >;
 
-  oracleSigner: TypedContractMethod<[], [string], "view">;
-
   priceHistory: TypedContractMethod<
     [arg0: BytesLike, arg1: BigNumberish],
     [
-      [bigint, bigint, bigint, string, bigint] & {
+      [bigint, bigint, bigint, bigint, string, bigint] & {
         price: bigint;
         timestamp: bigint;
+        signedTimestamp: bigint;
         numSources: bigint;
         sourcesHash: string;
         roundId: bigint;
       }
     ],
     "view"
+  >;
+
+  registerAssets: TypedContractMethod<
+    [ids: BytesLike[], minSources: BigNumberish[]],
+    [void],
+    "nonpayable"
   >;
 
   registerEnclave: TypedContractMethod<
@@ -322,6 +404,10 @@ export interface KaskadPriceOracle extends BaseContract {
     [void],
     "nonpayable"
   >;
+
+  registeredAssetIds: TypedContractMethod<[], [string[]], "view">;
+
+  signerCount: TypedContractMethod<[], [bigint], "view">;
 
   updatePrice: TypedContractMethod<
     [
@@ -336,6 +422,8 @@ export interface KaskadPriceOracle extends BaseContract {
     "nonpayable"
   >;
 
+  validSigner: TypedContractMethod<[arg0: AddressLike], [boolean], "view">;
+
   verifier: TypedContractMethod<[], [string], "view">;
 
   getFunction<T extends ContractMethod = ContractMethod>(
@@ -343,31 +431,29 @@ export interface KaskadPriceOracle extends BaseContract {
   ): T;
 
   getFunction(
+    nameOrSignature: "CIRCUIT_BREAKER_STALENESS"
+  ): TypedContractMethod<[], [bigint], "view">;
+  getFunction(
     nameOrSignature: "DECIMALS"
   ): TypedContractMethod<[], [bigint], "view">;
   getFunction(
     nameOrSignature: "MAX_PRICE_CHANGE_BPS"
   ): TypedContractMethod<[], [bigint], "view">;
   getFunction(
-    nameOrSignature: "MIN_UPDATE_DELAY"
+    nameOrSignature: "MAX_RESUME_CHANGE_BPS"
   ): TypedContractMethod<[], [bigint], "view">;
+  getFunction(
+    nameOrSignature: "RESUME_QUORUM_MULTIPLIER"
+  ): TypedContractMethod<[], [bigint], "view">;
+  getFunction(
+    nameOrSignature: "admin"
+  ): TypedContractMethod<[], [string], "view">;
+  getFunction(
+    nameOrSignature: "assetParams"
+  ): TypedContractMethod<[arg0: BytesLike], [bigint], "view">;
   getFunction(
     nameOrSignature: "currentRound"
   ): TypedContractMethod<[arg0: BytesLike], [bigint], "view">;
-  getFunction(
-    nameOrSignature: "enclave"
-  ): TypedContractMethod<
-    [],
-    [
-      [string, bigint, string, boolean] & {
-        signer: string;
-        registeredAt: bigint;
-        pcr0: string;
-        active: boolean;
-      }
-    ],
-    "view"
-  >;
   getFunction(
     nameOrSignature: "expectedPCR0"
   ): TypedContractMethod<[], [string], "view">;
@@ -399,13 +485,17 @@ export interface KaskadPriceOracle extends BaseContract {
     "view"
   >;
   getFunction(
+    nameOrSignature: "isValidSigner"
+  ): TypedContractMethod<[who: AddressLike], [boolean], "view">;
+  getFunction(
     nameOrSignature: "latestPrices"
   ): TypedContractMethod<
     [arg0: BytesLike],
     [
-      [bigint, bigint, bigint, string, bigint] & {
+      [bigint, bigint, bigint, bigint, string, bigint] & {
         price: bigint;
         timestamp: bigint;
+        signedTimestamp: bigint;
         numSources: bigint;
         sourcesHash: string;
         roundId: bigint;
@@ -413,17 +503,15 @@ export interface KaskadPriceOracle extends BaseContract {
     ],
     "view"
   >;
-  getFunction(
-    nameOrSignature: "oracleSigner"
-  ): TypedContractMethod<[], [string], "view">;
   getFunction(
     nameOrSignature: "priceHistory"
   ): TypedContractMethod<
     [arg0: BytesLike, arg1: BigNumberish],
     [
-      [bigint, bigint, bigint, string, bigint] & {
+      [bigint, bigint, bigint, bigint, string, bigint] & {
         price: bigint;
         timestamp: bigint;
+        signedTimestamp: bigint;
         numSources: bigint;
         sourcesHash: string;
         roundId: bigint;
@@ -432,8 +520,21 @@ export interface KaskadPriceOracle extends BaseContract {
     "view"
   >;
   getFunction(
+    nameOrSignature: "registerAssets"
+  ): TypedContractMethod<
+    [ids: BytesLike[], minSources: BigNumberish[]],
+    [void],
+    "nonpayable"
+  >;
+  getFunction(
     nameOrSignature: "registerEnclave"
   ): TypedContractMethod<[attestationDoc: BytesLike], [void], "nonpayable">;
+  getFunction(
+    nameOrSignature: "registeredAssetIds"
+  ): TypedContractMethod<[], [string[]], "view">;
+  getFunction(
+    nameOrSignature: "signerCount"
+  ): TypedContractMethod<[], [bigint], "view">;
   getFunction(
     nameOrSignature: "updatePrice"
   ): TypedContractMethod<
@@ -449,9 +550,19 @@ export interface KaskadPriceOracle extends BaseContract {
     "nonpayable"
   >;
   getFunction(
+    nameOrSignature: "validSigner"
+  ): TypedContractMethod<[arg0: AddressLike], [boolean], "view">;
+  getFunction(
     nameOrSignature: "verifier"
   ): TypedContractMethod<[], [string], "view">;
 
+  getEvent(
+    key: "AssetsRegistered"
+  ): TypedContractEvent<
+    AssetsRegisteredEvent.InputTuple,
+    AssetsRegisteredEvent.OutputTuple,
+    AssetsRegisteredEvent.OutputObject
+  >;
   getEvent(
     key: "EnclaveRegistered"
   ): TypedContractEvent<
@@ -468,6 +579,17 @@ export interface KaskadPriceOracle extends BaseContract {
   >;
 
   filters: {
+    "AssetsRegistered(address,uint256)": TypedContractEvent<
+      AssetsRegisteredEvent.InputTuple,
+      AssetsRegisteredEvent.OutputTuple,
+      AssetsRegisteredEvent.OutputObject
+    >;
+    AssetsRegistered: TypedContractEvent<
+      AssetsRegisteredEvent.InputTuple,
+      AssetsRegisteredEvent.OutputTuple,
+      AssetsRegisteredEvent.OutputObject
+    >;
+
     "EnclaveRegistered(address,bytes32,uint256)": TypedContractEvent<
       EnclaveRegisteredEvent.InputTuple,
       EnclaveRegisteredEvent.OutputTuple,
