@@ -10,6 +10,17 @@ resource "aws_launch_template" "prod" {
     enabled = true
   }
 
+  # IMDSv2-only. `http_tokens = "required"` forces the session-token
+  # handshake on every metadata read, defeating trivial SSRF-based IAM
+  # credential theft. `http_put_response_hop_limit = 1` keeps a
+  # compromised host-side service (e.g. pull_api.py) from forwarding
+  # metadata responses through an extra network hop.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+
   # No SSH key
   # key_name = ""
 

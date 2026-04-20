@@ -12,6 +12,16 @@ resource "aws_instance" "builder" {
     enabled = true
   }
 
+  # IMDSv2-only. `http_tokens = "required"` forces the session-token
+  # handshake on every metadata read, defeating trivial SSRF-based IAM
+  # credential theft. `http_put_response_hop_limit = 1` limits the TTL
+  # so a compromised Docker container (hop 2) cannot reach IMDS at all.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+
   # No SSH key — zero access
   # key_name = "" # intentionally omitted
 

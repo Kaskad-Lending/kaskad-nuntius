@@ -1,14 +1,11 @@
 name: Production Deploy
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'Cargo.*'
-      - 'Dockerfile'
-      - 'enclave/**'
-      - 'infra/user-data-builder.sh'
+  # Manual-only. Pushes to `main` no longer trigger a production deploy —
+  # operator opens Actions → "Production Deploy" → "Run workflow" when
+  # they're ready for a new EIF to roll out. Keeps code changes decoupled
+  # from live-rollouts and prevents accidental prod drift from routine
+  # merges.
   workflow_dispatch:
 
 permissions:
