@@ -1,0 +1,12 @@
+# ─── Required: set these before terraform apply ──────────────
+
+rpc_url         = "https://your-rpc-endpoint.com"
+oracle_contract = "0x0000000000000000000000000000000000000000"
+chain_id        = 1
+
+# ─── Optional: override defaults ─────────────────────────────
+
+# aws_region       = "us-east-1"
+# instance_type    = "c5.xlarge"
+# eif_bucket_name  = "kaskad-oracle-eif"
+# environment      = "prod"

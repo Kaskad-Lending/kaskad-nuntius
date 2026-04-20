@@ -1,0 +1,132 @@
+name: Production Deploy
+
+on:
+  # Manual-only. Pushes to `main` no longer trigger a production deploy —
+  # operator opens Actions → "Production Deploy" → "Run workflow" when
+  # they're ready for a new EIF to roll out. Keeps code changes decoupled
+  # from live-rollouts and prevents accidental prod drift from routine
+  # merges.
+  workflow_dispatch:
+
+permissions:
+  id-token: write # Required for OIDC
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  BUILDER_NAME: kaskad-oracle-builder
+  OIDC_ROLE_ARN: arn:aws:iam::095931689333:role/kaskad-oracle-github-ci
+  PROD_ASG_NAME: kaskad-oracle-prod-asg
+  EIF_BUCKET: kaskad-oracle-eif
+
+jobs:
+  deploy:
+    name: Build & Deploy EIF
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Start builder instance
+        id: builder
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=${{ env.BUILDER_NAME }}" "Name=instance-state-name,Values=running,stopped,stopping,pending" --query "Reservations[].Instances[0].InstanceId" --output text)
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          
+          STATE=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[].Instances[0].State.Name" --output text)
+          echo "Current state: $STATE"
+          
+          if [ "$STATE" == "stopping" ]; then
+            echo "Instance is stopping, waiting for it to stop..."
+            aws ec2 wait instance-stopped --instance-ids $INSTANCE_ID
+          fi
+          
+          aws ec2 start-instances --instance-ids $INSTANCE_ID
+          aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+
+      - name: Zip source and upload to S3
+        run: |
+          zip -r source.zip . -x "*.git*" "target/*" "infra/.terraform/*"
+          aws s3 cp source.zip s3://${{ env.EIF_BUCKET }}/builds/${{ github.sha }}/source.zip
+
+      - name: Wait for SSM agent
+        run: |
+          echo "Waiting for SSM agent to be online..."
+          for i in {1..30}; do
+            STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=${{ steps.builder.outputs.instance_id }}" \
+              --query "InstanceInformationList[0].PingStatus" --output text)
+            if [ "$STATUS" == "Online" ]; then
+              echo "SSM agent is online!"
+              exit 0
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 10
+          done
+          echo "SSM agent timeout"
+          exit 1
+
+      - name: Run build via SSM
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids ${{ steps.builder.outputs.instance_id }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "set -e",
+              "export COMMIT=${{ github.sha }}",
+              "export eif_bucket=${{ env.EIF_BUCKET }}",
+              "export aws_region=${{ env.AWS_REGION }}",
+              "sudo dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel awscli docker git",
+              "sudo systemctl start docker",
+              "rm -rf /tmp/build && mkdir -p /tmp/build",
+              "aws s3 cp s3://$eif_bucket/builds/$COMMIT/source.zip /tmp/source.zip",
+              "unzip -q /tmp/source.zip -d /tmp/build/",
+              "cd /tmp/build && sudo docker build -t kaskad-oracle:latest .",
+              "sudo nitro-cli build-enclave --docker-uri kaskad-oracle:latest --output-file /tmp/oracle.eif",
+              "sudo chown $(whoami):$(whoami) /tmp/oracle.eif",
+              "ls -la /tmp/oracle.eif",
+              "aws s3 cp /tmp/oracle.eif s3://$eif_bucket/latest.eif"
+            ]' \
+            --query "Command.CommandId" --output text)
+          
+          echo "SSM Command ID: $CMD_ID"
+          
+          # Custom waiter loop (aws ssm wait has a short default timeout)
+          while true; do
+            # Wait for command to finish
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id ${{ steps.builder.outputs.instance_id }} \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            
+            echo "Build Status: $STATUS"
+            if [ "$STATUS" == "Success" ]; then
+              break
+            elif [[ "$STATUS" == "Failed" || "$STATUS" == "Cancelled" || "$STATUS" == "TimedOut" ]]; then
+              echo "SSM command failed with status: $STATUS"
+              aws ssm get-command-invocation \
+                --command-id "$CMD_ID" \
+                --instance-id ${{ steps.builder.outputs.instance_id }} \
+                --query "{Out:StandardOutputContent,Err:StandardErrorContent}" --output json
+              exit 1
+            fi
+            sleep 30
+          done
+        timeout-minutes: 25
+
+      - name: Stop builder instance
+        if: always()
+        run: |
+          aws ec2 stop-instances --instance-ids ${{ steps.builder.outputs.instance_id }}
+
+      - name: Trigger production refresh
+        run: |
+          aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name ${{ env.PROD_ASG_NAME }} \
+            --preferences '{"MinHealthyPercentage": 0}' 
+          echo "Production ASG refresh started."

@@ -1,0 +1,23 @@
+{
+  "name": "@kaskad/tee-oracle-relayer",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsup src/index.ts --format esm --dts",
+    "typechain": "typechain --target=ethers-v6 --out-dir=src/types/contracts abi/*.json",
+    "clean": "rm -rf dist src/types/contracts"
+  },
+  "dependencies": {
+    "ethers": "^6.16.0"
+  },
+  "devDependencies": {
+    "@typechain/ethers-v6": "^0.5.1",
+    "@types/node": "^22.0.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.19.4",
+    "typechain": "^8.3.2",
+    "typescript": "^5.8.3"
+  }
+}

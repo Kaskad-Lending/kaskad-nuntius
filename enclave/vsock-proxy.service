@@ -1,0 +1,20 @@
+[Unit]
+Description=Kaskad VSOCK Proxy for Nitro Enclave
+After=network.target nitro-enclaves-allocator.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/kaskad/vsock_proxy.py 5000
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=multi-user.target

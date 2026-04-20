@@ -1,0 +1,18 @@
+Kaskad TEE Oracle
+Copyright 2026 Kaskad
+
+This product includes software developed by Kaskad (https://github.com/Kaskad-Lending).
+
+This product uses the following third-party software:
+
+  - OpenZeppelin Contracts
+    https://github.com/OpenZeppelin/openzeppelin-contracts
+    Licensed under the MIT License.
+
+  - Marlin NitroProver
+    https://github.com/marlinprotocol/NitroProver
+    Licensed under the MIT License.
+
+  - AWS Nitro Enclaves NSM API
+    https://github.com/aws/aws-nitro-enclaves-nsm-api
+    Licensed under the Apache License 2.0.

@@ -1,0 +1,10 @@
+/target
+reference/
+.env
+*.eif
+contracts/cache/
+contracts/out/
+docs/audit_scope.html
+.claude/
+docs/timestamps.md
+CLAUDE.md
