@@ -56,7 +56,14 @@ impl PriceSource for Kraken {
             .first()
             .ok_or_else(|| eyre::eyre!("kraken: missing last price"))?
             .parse()?;
-        let volume: f64 = ticker.v.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        // Strict parse: see audit R-9. `unwrap_or(0.0)` previously let a
+        // missing or malformed v[1] silently become zero-volume.
+        let volume: f64 = ticker
+            .v
+            .get(1)
+            .ok_or_else(|| eyre::eyre!("kraken: v[1] missing (24h volume)"))?
+            .parse()
+            .map_err(|e| eyre::eyre!("kraken volume parse failed: {}", e))?;
 
         Ok(Some(PricePoint {
             price,

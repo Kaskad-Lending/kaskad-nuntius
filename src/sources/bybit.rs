@@ -61,7 +61,12 @@ impl PriceSource for Bybit {
             ));
         }
         let price: f64 = ticker.last_price.parse()?;
-        let volume: f64 = ticker.volume24h.parse().unwrap_or(0.0);
+        // Strict parse: see audit R-9. `unwrap_or(0.0)` previously let a
+        // malformed volume24h silently become zero-volume.
+        let volume: f64 = ticker
+            .volume24h
+            .parse()
+            .map_err(|e| eyre::eyre!("bybit volume parse failed: {}", e))?;
 
         Ok(Some(PricePoint {
             price,

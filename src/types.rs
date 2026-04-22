@@ -31,6 +31,19 @@ pub struct AssetConfig {
     /// source-specific symbol/pair identifier. A source whose name is
     /// absent from this map does NOT contribute to this asset.
     pub sources: HashMap<String, String>,
+
+    /// Strict-weighting policy. When `true`, the oracle refuses to publish
+    /// a cycle for this asset if the aggregator fell back to equal
+    /// weighting (fewer than half the surviving sources reported positive
+    /// volume). Set this for deep-liquidity critical assets (BTC/USD,
+    /// ETH/USD) where volume weighting is a defense against volume-
+    /// nullification manipulation (audit EXPLOIT-3).
+    ///
+    /// Default `false` for backward compatibility — assets whose data
+    /// sources lack volume fields (spot-only endpoints, TWAPs) keep
+    /// working unchanged.
+    #[serde(default)]
+    pub require_volume_weight: bool,
 }
 
 impl AssetConfig {

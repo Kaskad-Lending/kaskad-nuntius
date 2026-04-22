@@ -48,6 +48,12 @@ struct PriceResponse {
     num_assets: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     attestation_doc: Option<String>,
+    /// Monotonic counter of aggregator equal-weight fallback events since
+    /// process start (audit EXPLOIT-3). Off-chain monitors poll the
+    /// `health` endpoint; a sudden jump means volume reporting collapsed
+    /// on ≥50 % of sources — treat as a security event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    equal_weight_fallbacks: Option<u64>,
 }
 
 pub async fn run_price_server(
@@ -167,6 +173,7 @@ fn process_request(
                 signer: Some(signer_address.to_string()),
                 num_assets: Some(count),
                 attestation_doc: None,
+                equal_weight_fallbacks: None,
             }
         }
         "get_price" => {
@@ -181,6 +188,7 @@ fn process_request(
                         signer: None,
                         num_assets: None,
                         attestation_doc: None,
+                        equal_weight_fallbacks: None,
                     }
                 }
             };
@@ -195,6 +203,7 @@ fn process_request(
                         signer: Some(signer_address.to_string()),
                         num_assets: None,
                         attestation_doc: None,
+                        equal_weight_fallbacks: None,
                     },
                     Err(e) => PriceResponse {
                         prices: None,
@@ -204,6 +213,7 @@ fn process_request(
                         signer: None,
                         num_assets: None,
                         attestation_doc: None,
+                        equal_weight_fallbacks: None,
                     },
                 },
                 None => PriceResponse {
@@ -214,6 +224,7 @@ fn process_request(
                     signer: None,
                     num_assets: None,
                     attestation_doc: None,
+                    equal_weight_fallbacks: None,
                 },
             }
         }
@@ -233,6 +244,7 @@ fn process_request(
                 signer: Some(signer_address.to_string()),
                 num_assets: None,
                 attestation_doc: fresh.as_ref().map(hex::encode),
+                equal_weight_fallbacks: None,
             }
         }
         "health" => {
@@ -245,6 +257,10 @@ fn process_request(
                 signer: Some(signer_address.to_string()),
                 num_assets: Some(store.len()),
                 attestation_doc: None,
+                // Expose the equal-weight fallback counter on health
+                // so off-chain monitors can alert on a climb without
+                // parsing enclave console logs (audit EXPLOIT-3).
+                equal_weight_fallbacks: Some(crate::aggregator::equal_weight_fallback_count()),
             }
         }
         _ => PriceResponse {
@@ -255,6 +271,7 @@ fn process_request(
             signer: None,
             num_assets: None,
             attestation_doc: None,
+            equal_weight_fallbacks: None,
         },
     }
 }
