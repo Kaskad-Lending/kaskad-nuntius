@@ -50,7 +50,13 @@ impl PriceSource for GateIo {
             ));
         }
         let price: f64 = ticker.last.parse()?;
-        let volume: f64 = ticker.base_volume.parse().unwrap_or(0.0);
+        // Strict parse: schema drift or malformed volume drops the whole
+        // sample instead of silently becoming 0 (audit R-9). Legitimate
+        // zero-volume strings ("0", "0.0") still parse cleanly.
+        let volume: f64 = ticker
+            .base_volume
+            .parse()
+            .map_err(|e| eyre::eyre!("gateio volume parse failed: {}", e))?;
 
         Ok(Some(PricePoint {
             price,

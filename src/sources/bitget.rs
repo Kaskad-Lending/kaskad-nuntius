@@ -63,7 +63,12 @@ impl PriceSource for Bitget {
         }
 
         let price: f64 = ticker.last_pr.parse()?;
-        let volume: f64 = ticker.base_volume.parse().unwrap_or(0.0);
+        // Strict parse: see audit R-9. `unwrap_or(0.0)` previously let a
+        // malformed base_volume silently become zero-volume.
+        let volume: f64 = ticker
+            .base_volume
+            .parse()
+            .map_err(|e| eyre::eyre!("bitget volume parse failed: {}", e))?;
 
         Ok(Some(PricePoint {
             price,

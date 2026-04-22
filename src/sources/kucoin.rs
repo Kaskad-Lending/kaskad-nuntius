@@ -51,7 +51,13 @@ impl PriceSource for Kucoin {
             ));
         }
         let price: f64 = resp.data.price.parse()?;
-        let volume: f64 = resp.data.vol.parse().unwrap_or(0.0);
+        // Strict parse: see audit R-9. `unwrap_or(0.0)` previously let a
+        // malformed vol silently become zero-volume.
+        let volume: f64 = resp
+            .data
+            .vol
+            .parse()
+            .map_err(|e| eyre::eyre!("kucoin volume parse failed: {}", e))?;
 
         Ok(Some(PricePoint {
             price,

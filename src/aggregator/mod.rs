@@ -1,11 +1,36 @@
 use crate::types::PricePoint;
 use alloy_primitives::U256;
 use eyre::{eyre, Result};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Cap a single source's volume weight at N× the median of positive volumes.
 /// Prevents one CEX from dominating the weighted median via self-reported
 /// volume (audit finding C-5: cap the trust a single source can buy).
 const VOLUME_WEIGHT_CAP_FACTOR: f64 = 5.0;
+
+/// Whether `weighted_median` computed a result from per-source volumes or
+/// fell back to equal weights because fewer than half the sources had
+/// positive volume. Callers with a strict policy (critical assets) can
+/// refuse to publish in `EqualFallback` mode (audit EXPLOIT-3: an
+/// attacker who nullifies volume reporting across ≥50 % of sources can
+/// otherwise silently disable the depth signal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightingMode {
+    VolumeWeighted,
+    EqualFallback,
+}
+
+/// Monotonic counter of `EqualFallback` events since process start. The
+/// pull-API `health` response exposes this so an off-chain monitor can
+/// page when the counter climbs faster than baseline (audit EXPLOIT-3
+/// mitigation 2).
+static EQUAL_WEIGHT_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of the fallback counter. Monotonic; only resets on process
+/// restart.
+pub fn equal_weight_fallback_count() -> u64 {
+    EQUAL_WEIGHT_FALLBACK_COUNT.load(Ordering::Relaxed)
+}
 
 /// Maximum price (in human units) that `to_fixed_point` will accept.
 /// 1e20 fits in U256 with 8 decimals and is far above any realistic asset
@@ -83,33 +108,45 @@ fn median_sorted(values: &mut [f64]) -> f64 {
     }
 }
 
-/// Compute the weighted median of a set of price observations.
+/// Compute the weighted median of a set of price observations, and report
+/// whether volume weighting or the equal-weight fallback was used.
 ///
 /// Weighting uses the per-source 24 h volume, capped at
 /// `VOLUME_WEIGHT_CAP_FACTOR` × median(positive volumes) to prevent a
 /// single source with an absurd self-reported volume from controlling
 /// the median (audit C-5). Falls back to equal weighting if fewer than
-/// half the sources report positive volume (and warns: audit M-5).
-pub fn weighted_median(prices: &[PricePoint]) -> Option<f64> {
+/// half the sources report positive volume (warns AND increments a
+/// metric: audit M-5 and EXPLOIT-3). A caller with a strict policy can
+/// inspect the returned `WeightingMode` and refuse to publish in
+/// `EqualFallback`.
+pub fn weighted_median(prices: &[PricePoint]) -> Option<(f64, WeightingMode)> {
     if prices.is_empty() {
         return None;
     }
     if prices.len() == 1 {
-        return Some(prices[0].price);
+        // A single observation is a degenerate case — volume weighting
+        // doesn't apply. Report it as `VolumeWeighted` so the caller's
+        // strict-policy check does not fire on this trivial path.
+        return Some((prices[0].price, WeightingMode::VolumeWeighted));
     }
 
     let sources_with_volume = prices.iter().filter(|p| p.volume > 0.0).count();
     let use_volume = sources_with_volume * 2 > prices.len();
 
-    if !use_volume {
+    let mode = if use_volume {
+        WeightingMode::VolumeWeighted
+    } else {
         // Silent disablement is how an attacker forces equal-weighting by
-        // flooding zero-volume samples (audit M-5). Log it so it's visible.
+        // flooding zero-volume samples (audit M-5 / EXPLOIT-3). Log it
+        // AND bump a monotonic counter so an off-chain monitor can alert.
+        EQUAL_WEIGHT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(
             total_sources = prices.len(),
             sources_with_volume,
             "weighted_median falling back to equal weight — volume quorum not met"
         );
-    }
+        WeightingMode::EqualFallback
+    };
 
     // Volume-weight cap: collect positive volumes, take their median, cap
     // every weight at N × that median. Stops a single large-volume source
@@ -146,10 +183,10 @@ pub fn weighted_median(prices: &[PricePoint]) -> Option<f64> {
     for (price, weight) in &weighted {
         cumulative += weight;
         if cumulative >= half {
-            return Some(*price);
+            return Some((*price, mode));
         }
     }
-    Some(weighted.last().unwrap().0)
+    Some((weighted.last().unwrap().0, mode))
 }
 
 /// Reject outliers using MAD (Median Absolute Deviation).
@@ -250,27 +287,62 @@ mod tests {
     #[test]
     fn test_weighted_median_odd() {
         let prices = make_prices(&[100.0, 102.0, 101.0]);
-        let median = weighted_median(&prices).unwrap();
+        let (median, mode) = weighted_median(&prices).unwrap();
         assert_eq!(median, 101.0);
+        // No volume data on any sample → equal-weight fallback.
+        assert_eq!(mode, WeightingMode::EqualFallback);
     }
 
     #[test]
     fn test_weighted_median_even() {
         let prices = make_prices(&[100.0, 102.0, 101.0, 103.0]);
-        let median = weighted_median(&prices).unwrap();
+        let (median, _mode) = weighted_median(&prices).unwrap();
         assert!(median >= 101.0 && median <= 102.0);
     }
 
     #[test]
     fn test_weighted_median_single() {
         let prices = make_prices(&[42.0]);
-        assert_eq!(weighted_median(&prices).unwrap(), 42.0);
+        assert_eq!(weighted_median(&prices).unwrap().0, 42.0);
     }
 
     #[test]
     fn test_weighted_median_empty() {
         let prices: Vec<PricePoint> = vec![];
         assert!(weighted_median(&prices).is_none());
+    }
+
+    #[test]
+    fn test_weighted_median_mode_reports_volume_weighted() {
+        let prices = make_prices_with_volume(&[(100.0, 10.0), (101.0, 20.0), (99.5, 15.0)]);
+        let (_, mode) = weighted_median(&prices).unwrap();
+        assert_eq!(mode, WeightingMode::VolumeWeighted);
+    }
+
+    #[test]
+    fn test_weighted_median_mode_reports_equal_fallback() {
+        // 3 of 5 have zero volume → 2/5 have positive → fallback.
+        let prices = make_prices_with_volume(&[
+            (100.0, 0.0),
+            (101.0, 0.0),
+            (99.5, 0.0),
+            (100.5, 10.0),
+            (100.2, 10.0),
+        ]);
+        let (_, mode) = weighted_median(&prices).unwrap();
+        assert_eq!(mode, WeightingMode::EqualFallback);
+    }
+
+    #[test]
+    fn test_equal_weight_fallback_counter_increments() {
+        let before = equal_weight_fallback_count();
+        let prices = make_prices(&[100.0, 101.0, 99.5]); // all zero volume
+        let _ = weighted_median(&prices).unwrap();
+        let after = equal_weight_fallback_count();
+        assert!(
+            after > before,
+            "fallback counter must increment on equal-weight path"
+        );
     }
 
     #[test]
@@ -365,7 +437,7 @@ mod tests {
             (2000.2, 1_050.0),
             (1998.0, 1e12), // attacker
         ]);
-        let m = weighted_median(&prices).unwrap();
+        let (m, _) = weighted_median(&prices).unwrap();
         // Attacker tries to pull to $1998; with cap they can't.
         assert!(
             m >= 1999.0,

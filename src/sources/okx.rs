@@ -55,7 +55,12 @@ impl PriceSource for Okx {
             ));
         }
         let price: f64 = ticker.last.parse()?;
-        let volume: f64 = ticker.vol24h.parse().unwrap_or(0.0);
+        // Strict parse: see audit R-9. `unwrap_or(0.0)` previously let a
+        // malformed vol24h silently become zero-volume.
+        let volume: f64 = ticker
+            .vol24h
+            .parse()
+            .map_err(|e| eyre::eyre!("okx volume parse failed: {}", e))?;
 
         Ok(Some(PricePoint {
             price,

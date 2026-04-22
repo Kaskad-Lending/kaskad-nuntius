@@ -300,13 +300,25 @@ async fn main() -> Result<()> {
             }
 
             // 3. Compute weighted median price.
-            let median = match aggregator::weighted_median(&prices) {
+            let (median, mode) = match aggregator::weighted_median(&prices) {
                 Some(m) => m,
                 None => {
                     warn!(asset = %asset.symbol, "no prices after filtering");
                     continue;
                 }
             };
+
+            // Strict-policy assets (e.g. BTC/USD, ETH/USD) refuse to publish
+            // when the aggregator fell back to equal weighting — EXPLOIT-3.
+            // Better to serve a stale price (consumers' staleness guard
+            // kicks in) than a depth-blind one.
+            if asset.require_volume_weight && mode == aggregator::WeightingMode::EqualFallback {
+                warn!(
+                    asset = %asset.symbol,
+                    "require_volume_weight: volume quorum not met, skipping publication (fail-closed)"
+                );
+                continue;
+            }
 
             // 4. Deviation / heartbeat — both keyed on enclave-authoritative
             //    `signed_ts`, never the host clock (audit C-3/H-9).
