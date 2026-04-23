@@ -176,7 +176,7 @@ async fn main() -> Result<()> {
     } else {
         info!("Running in HOST mode — HTTP via direct connection");
     }
-    let client = http_client::HttpClient::new(enclave_mode);
+    let client = http_client::HttpClient::new(enclave_mode, config.exchange_hostnames.clone());
 
     // (config loaded above — used here for source registration.)
     let price_sources: Vec<Box<dyn PriceSource>> = vec![

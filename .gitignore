@@ -8,3 +8,4 @@ docs/audit_scope.html
 .claude/
 docs/timestamps.md
 CLAUDE.md
+enclave/__pycache__/
