@@ -1,6 +1,23 @@
 {
   "version": 1,
-  "_note": "This file is baked into the enclave EIF via include_str! and is therefore measured in PCR0. Any change to its content produces a different PCR0 and requires on-chain re-registration of the oracle. Keys under `sources` MUST match a registered PriceSource::name() — otherwise the mapping is silently ignored for that source.",
+  "_note": "This file is baked into the enclave EIF via include_str! and is therefore measured in PCR0. Any change to its content produces a different PCR0 and requires on-chain re-registration of the oracle. Keys under `sources` MUST match a registered PriceSource::name() — otherwise the mapping is silently ignored for that source. `exchange_hostnames` is the allowlist of hostnames the enclave's HttpClient may connect to — startup validates that every source's hardcoded URL hostname appears here.",
+  "exchange_hostnames": [
+    "api.binance.com",
+    "www.okx.com",
+    "api.bybit.com",
+    "api.coinbase.com",
+    "api.coingecko.com",
+    "api.mexc.com",
+    "api.kucoin.com",
+    "api.gateio.ws",
+    "api.kraken.com",
+    "api.bitget.com",
+    "api-pub.bitfinex.com",
+    "www.bitstamp.net",
+    "api.crypto.com",
+    "api.huobi.pro",
+    "apis.igralabs.com"
+  ],
   "assets": [
     {
       "symbol": "ETH/USD",

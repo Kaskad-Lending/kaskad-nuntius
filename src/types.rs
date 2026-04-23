@@ -58,6 +58,13 @@ impl AssetConfig {
 pub struct AssetsConfig {
     #[allow(dead_code)]
     pub version: u32,
+    /// Explicit allowlist of hostnames the enclave may issue HTTPS
+    /// requests to. Source modules each hardcode a URL — on startup we
+    /// cross-check that every source's hostname appears here, so a
+    /// future source addition that forgets to update the list aborts
+    /// the enclave before it signs anything. The list travels with
+    /// the rest of the config into PCR0.
+    pub exchange_hostnames: Vec<String>,
     pub assets: Vec<AssetConfig>,
 }
 
@@ -72,6 +79,14 @@ pub fn load_assets() -> Result<AssetsConfig> {
     let parsed: AssetsConfig = serde_json::from_str(ASSETS_JSON)?;
     if parsed.assets.is_empty() {
         eyre::bail!("assets.json has zero assets — refusing to start");
+    }
+    if parsed.exchange_hostnames.is_empty() {
+        eyre::bail!("assets.json has no exchange_hostnames — refusing to start");
+    }
+    for h in &parsed.exchange_hostnames {
+        if h.is_empty() || h.contains('/') || h.contains(' ') {
+            eyre::bail!("assets.json: invalid exchange_hostname {:?}", h);
+        }
     }
     // Every asset must have a realistic quorum and at least as many source
     // mappings. Enforce at load time so a misconfig cannot silently sign
@@ -124,6 +139,55 @@ mod tests {
                 a.symbol
             );
         }
+    }
+
+    /// Drift-guard: each source module hardcodes its HTTPS URL. The
+    /// HttpClient enforces an allowlist against
+    /// `config.exchange_hostnames`. If the two go out of sync the
+    /// enclave either refuses to fetch from a legitimate source OR
+    /// lets a newly-added hostname through without being measured in
+    /// PCR0. This test pins the expected (source_name, hostname)
+    /// mapping — adding a new exchange requires editing THIS list
+    /// AND the config, forcing visible review.
+    #[test]
+    fn source_hostnames_match_config_allowlist() {
+        const EXPECTED: &[(&str, &str)] = &[
+            ("binance", "api.binance.com"),
+            ("okx", "www.okx.com"),
+            ("bybit", "api.bybit.com"),
+            ("coinbase", "api.coinbase.com"),
+            ("coingecko", "api.coingecko.com"),
+            ("mexc", "api.mexc.com"),
+            ("kucoin", "api.kucoin.com"),
+            ("gateio", "api.gateio.ws"),
+            ("kraken", "api.kraken.com"),
+            ("bitget", "api.bitget.com"),
+            ("bitfinex", "api-pub.bitfinex.com"),
+            ("bitstamp", "www.bitstamp.net"),
+            ("crypto_com", "api.crypto.com"),
+            ("htx", "api.huobi.pro"),
+            ("igralabs", "apis.igralabs.com"),
+        ];
+
+        let cfg = load_assets().expect("assets.json must parse");
+        let declared: std::collections::HashSet<&str> =
+            cfg.exchange_hostnames.iter().map(String::as_str).collect();
+
+        for (name, host) in EXPECTED {
+            assert!(
+                declared.contains(host),
+                "source {} hostname {} missing from exchange_hostnames",
+                name,
+                host
+            );
+        }
+        assert_eq!(
+            declared.len(),
+            EXPECTED.len(),
+            "exchange_hostnames has {} entries but EXPECTED has {} — drift",
+            declared.len(),
+            EXPECTED.len()
+        );
     }
 
     #[test]

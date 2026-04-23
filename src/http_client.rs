@@ -23,10 +23,19 @@ const MAX_RESPONSE_BYTES: u64 = 1 << 20; // 1 MiB — CEX ticker responses are t
 #[derive(Clone)]
 pub struct HttpClient {
     reqwest_client: reqwest::Client,
+    /// Allowlist of hostnames the client will issue requests to. Set at
+    /// construction from `config/assets.json → exchange_hostnames` so
+    /// the allowlist is measured in PCR0 alongside the source code that
+    /// uses it. Any `get_json_with_time` call to a hostname not in this
+    /// list returns an error without opening a connection — a
+    /// defence-in-depth layer against enclave-side code paths that
+    /// might otherwise be tricked into fetching an attacker-controlled
+    /// URL (audit EXPLOIT-class CONNECT destination-allowlist).
+    allowed_hosts: Vec<String>,
 }
 
 impl HttpClient {
-    pub fn new(enclave_mode: bool) -> Self {
+    pub fn new(enclave_mode: bool, allowed_hosts: Vec<String>) -> Self {
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .connect_timeout(std::time::Duration::from_secs(5))
@@ -43,6 +52,7 @@ impl HttpClient {
 
         Self {
             reqwest_client: builder.build().expect("failed to create reqwest client"),
+            allowed_hosts,
         }
     }
 
@@ -54,6 +64,18 @@ impl HttpClient {
         &self,
         url: &str,
     ) -> Result<(T, u64)> {
+        // Hostname allowlist gate. Parse URL before any network call.
+        let parsed = reqwest::Url::parse(url).map_err(|e| eyre!("invalid url {}: {}", url, e))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| eyre!("url missing host: {}", url))?;
+        if !self.allowed_hosts.iter().any(|h| h == host) {
+            return Err(eyre!(
+                "disallowed host {} (not in exchange_hostnames allowlist)",
+                host
+            ));
+        }
+
         let resp = self.reqwest_client.get(url).send().await?;
         let status = resp.status();
 
