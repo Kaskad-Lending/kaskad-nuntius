@@ -22,7 +22,7 @@ import struct
 import sys
 import time
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from collections import defaultdict
 
 # VSOCK constants
@@ -33,6 +33,12 @@ VSOCK_PORT = 5001
 # Rate limiting
 RATE_LIMIT = 60        # requests per window
 RATE_WINDOW = 60       # seconds
+
+# Concurrency cap. `ThreadingHTTPServer` spawns a fresh thread per request
+# unbounded — one slowloris-style client can exhaust threads / FDs. This
+# semaphore caps simultaneous in-flight handlers; overflow returns 503.
+MAX_CONCURRENT = 64
+_concurrency = threading.Semaphore(MAX_CONCURRENT)
 
 # ─── Rate Limiter ────────────────────────────────────────────
 
@@ -127,6 +133,18 @@ class PullAPIHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the pull API."""
 
     def do_GET(self):
+        # Concurrency gate: non-blocking acquire — if MAX_CONCURRENT
+        # handlers are already in flight, shed load with 503 instead of
+        # growing the thread pool unbounded.
+        if not _concurrency.acquire(blocking=False):
+            self.send_json(503, {"error": "server overloaded, retry"})
+            return
+        try:
+            self._handle_get()
+        finally:
+            _concurrency.release()
+
+    def _handle_get(self):
         # Rate limit check
         client_ip = self.client_address[0]
         if not rate_limiter.is_allowed(client_ip):
@@ -191,9 +209,13 @@ class PullAPIHandler(BaseHTTPRequestHandler):
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 
-    server = HTTPServer(("0.0.0.0", port), PullAPIHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), PullAPIHandler)
+    # Daemonise request threads so shutdown doesn't wait on in-flight
+    # handlers that are themselves blocked on a slow VSOCK call.
+    server.daemon_threads = True
     print(f"[pull-api] HTTP server listening on port {port}")
     print(f"[pull-api] Rate limit: {RATE_LIMIT} req/{RATE_WINDOW}s per IP")
+    print(f"[pull-api] Max concurrent handlers: {MAX_CONCURRENT}")
     print(f"[pull-api] Enclave VSOCK: CID={ENCLAVE_CID} port={VSOCK_PORT}")
 
     try:
