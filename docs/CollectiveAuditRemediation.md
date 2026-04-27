@@ -341,42 +341,40 @@ matters:
 
 ---
 
-## Findings still open (round-2 multi-agent audit)
+## Round-2 multi-agent audit follow-up
 
-Not addressed in this session. Reference for next round:
+A second remediation pass addressed most of the round-2 findings. Status:
 
-**Solidity (in `kaskad-nuntius-contracts`)**
+### Closed in code (this session)
 
-- F-3 deploy script comments still reference removed `envOr` fallback.
-- F-4 `withdrawWithPrices` aToken rebasing dust accumulation.
-- F-5 `registerAssets` unbounded delete loop griefing.
-- F-6 `KaskadAggregatorV3.getRoundData(non_existent)` returns
-  `answer=0` success (Chainlink convention violation).
-- F-13 `evm_version` not pinned in `foundry.toml`.
+**Contracts (kaskad-nuntius-contracts):**
+- **F-13** evm_version pinned to "cancun" in `foundry.toml` — PR #5.
+- **F-5** `registerAssets` capped at `MAX_ASSETS = 32` — PR #6.
+- **F-6** `getRoundData` reverts with `NoRoundData` on missing round — PR #6.
+- **D-2** `EXPECTED_PCR1/2 != bytes32(0)` pre-flight require in `Deploy.s.sol` — PR #5.
+- **D-3** `ORACLE_ADMIN != deployer` pre-flight require — PR #5.
+- **D-5** optional `EXPECTED_ENCLAVE_SIGNER` binding — PR #5.
 
-**Rust runtime**
+**Rust runtime (PR #44):**
+- **R-1** `spawn_blocking` wrapped in `Semaphore(64)`, overflow drops connection.
+- **R-2** `get_attestation` cached 5 min (well inside 3 h leaf cert TTL).
+- **R-4** `read_exact_with_deadline` enforces 15 s wall-clock budget; idle timeout no longer spans days.
+- **R-6** `KASKAD_ALLOW_MOCK_SIGNER=1` opt-in required for MockSigner outside `ENCLAVE_MODE`. Test scripts updated.
+- **R-8** `warn!` on handler error no longer echoes attacker-controlled bytes.
+- **R-19** price server failure → `std::process::exit(1)`; systemd / ASG restart kicks in.
 
-- R-1 `tokio::spawn_blocking` unbounded in enclave price_server. (C4
-  fixed the host-side analogue.)
-- R-2 `get_attestation` spam starves NSM serial device.
-- R-4 `vec![0u8; req_len]` drip-feed bypasses idle read_timeout.
-- R-6 `ORACLE_PRIVATE_KEY` env footgun (one typo of `ENCLAVE_MODE` →
-  host-controlled signing key).
-- R-7 `blocking_read` writer-preferring `RwLock` stalls.
-- R-8 `handle_connection` error echo into host-readable logs.
-- R-19 price server crash silent (no abort).
-- R-20 `attestation_doc` returns `None` without distinguishing error
-  code.
+**Infra:**
+- **S-1** Dockerfile base images digest-pinned — PR #45.
 
-**Deploy / Infra / Supply**
+### Closed by decision (skipped after analysis)
 
-- D-2 explicit `EXPECTED_PCR1/2 != 0` check at script-level.
-- D-3 `ORACLE_ADMIN != deployer` assertion.
-- D-5 attestation-doc → expected-signer binding at deploy.
-- S-1 Dockerfile base image tag-pinned (not digest-pinned).
-- S-3 relayer `package-lock.json` not committed.
-- S-5 builder long-lived EC2 (vs ephemeral spot-per-build).
-- S-9 apk packages not pinned.
+- **F-3** Originally listed open in error — `Deploy.s.sol` already had no stale `envOr` references.
+- **F-4** Audit overstates: `aToken.transferFrom + pool.withdraw` with the same `pullAmount` is atomic; `getReserveNormalizedIncome` is a view function whose value during the tx equals what `updateState` then stores. `rayDiv` / `rayMul` round identically across both ops, net scaled balance change = 0. No dust within an atomic tx. (Donations on the router are a separate concern, already covered by the M-1 delta-based refund pattern.)
+- **R-7** `blocking_read` on writer-preferring `RwLock` — fix would be a switch to `arc-swap` or `parking_lot` + benchmark. Not a regression; the existing aggregator cycle holds the write lock briefly. Backlog.
+- **R-20** `attestation_doc` returns `None` without distinguishing "NSM unavailable" vs "not initialized". UX, not security. Backlog.
+- **S-3** relayer `package-lock.json` — relayer is out of scope for this session per operator.
+- **S-5** ephemeral builder EC2 (one fresh spot per build) — substantial infra refactor, separate session.
+- **S-9** apk package version pinning — would require an Alpine APK archive snapshot service to keep CI working through Alpine repo updates. Operational maintenance burden outweighs the marginal PCR0-stability gain on top of S-1's image digest. Backlog.
 
 ---
 
@@ -395,4 +393,7 @@ Not addressed in this session. Reference for next round:
 | Sentinel iteration (H-3)    | rejected — Aave caps reserves        | –                           | –                |
 | `debtToCover = 0` (M-4)     | rejected — Aave is no-op, not revert | –                           | –                |
 | EXPLOIT-3 alt (tighter MAD) | rejected — counterproductive         | –                           | –                |
-| Round-2 multi-agent         | partial                              | –                           | ~20 findings     |
+| Round-2 contracts hygiene   | ✓ #5, #6 (split repo) + #43 (bump)   | redeploy contract (PCR0 ↻)  | –                |
+| Round-2 rust hardening      | ✓ #44                                | tf apply + EIF rebuild      | R-7, R-20 backlog|
+| Round-2 infra (Docker pin)  | ✓ #45                                | EIF rebuild                 | S-5, S-9 backlog |
+| Round-2 relayer (S-3)       | out of scope                         | –                           | –                |
