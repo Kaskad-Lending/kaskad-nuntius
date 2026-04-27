@@ -6,10 +6,10 @@ CONTRACTS_DIR="${PROJECT_DIR}/contracts"
 ANVIL_PORT=8547
 RPC_URL="http://127.0.0.1:${ANVIL_PORT}"
 DEPLOYER_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-ALB_URL="http://kaskad-oracle-alb-670133639.us-east-1.elb.amazonaws.com"
+ORACLE_URL="${ORACLE_URL:-https://oracle.kaskad.live}"
 
-echo "▸ Fetching prices from ALB..."
-RESPONSE=$(curl -s $ALB_URL/prices)
+echo "▸ Fetching prices from ${ORACLE_URL}..."
+RESPONSE=$(curl -s $ORACLE_URL/prices)
 SIGNER_ADDR=$(echo "$RESPONSE" | jq -r '.signer')
 
 if [ -z "$SIGNER_ADDR" ] || [ "$SIGNER_ADDR" == "null" ]; then
@@ -19,7 +19,7 @@ fi
 echo "  ✓ Signer: $SIGNER_ADDR"
 
 echo "▸ Fetching Attestation Document from ALB..."
-ATTESTATION_HEX=$(curl -s $ALB_URL/attestation | jq -r '.attestation_doc')
+ATTESTATION_HEX=$(curl -s $ORACLE_URL/attestation | jq -r '.attestation_doc')
 
 if [ -z "$ATTESTATION_HEX" ] || [ "$ATTESTATION_HEX" == "null" ]; then
     echo "  ⚠ Failed to get attestation doc (Enclave might be running in Mock mode locally)"
