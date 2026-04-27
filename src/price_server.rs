@@ -17,6 +17,9 @@ use crate::types::SignedPriceUpdate;
 use crate::{PriceStore, SharedSigner};
 use eyre::Result;
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 #[cfg(target_os = "linux")]
@@ -24,6 +27,26 @@ use std::os::unix::io::FromRawFd;
 
 #[cfg(target_os = "linux")]
 const VMADDR_CID_ANY: u32 = 0xFFFFFFFF;
+
+/// Hard cap on concurrent connection handlers (audit R-1). Without this,
+/// a host-local attacker can open thousands of slowloris VSOCK
+/// connections and exhaust the Tokio blocking pool / FDs. Overflow
+/// connections are dropped at accept time.
+const MAX_INFLIGHT: usize = 64;
+
+/// Total per-connection wall-clock budget from accept to last byte
+/// (audit R-4). The previous `set_read_timeout(10s)` only enforced an
+/// idle timeout — a drip-feeder writing 1 byte every 9 s could hold a
+/// connection for days. This deadline is checked between every read
+/// and shrinks `set_read_timeout` accordingly.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(15);
+
+/// Cache TTL for the attestation doc (audit R-2). NSM signs each
+/// `Request::Attestation` synchronously and is a serial device; spam
+/// at `get_attestation` previously starved real signing path
+/// indirectly. AWS Nitro leaf certs live ~3 h, so caching for 5 min
+/// is well inside the validity window and removes the DoS primitive.
+const ATTESTATION_CACHE_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Deserialize)]
 struct PriceRequest {
@@ -65,17 +88,46 @@ pub async fn run_price_server(
     info!(port = port, "Starting VSOCK price server");
 
     let listener = create_listener(port)?;
-    info!(port = port, "VSOCK price server listening");
+    info!(
+        port = port,
+        max_inflight = MAX_INFLIGHT,
+        "VSOCK price server listening"
+    );
+
+    let semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT));
 
     loop {
         let (stream, _addr) = accept_connection(&listener)?;
+
+        // Non-blocking acquire — if MAX_INFLIGHT handlers are already
+        // in flight, drop this connection at accept time rather than
+        // grow the blocking pool unbounded (audit R-1).
+        let permit = match Arc::clone(&semaphore).try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                drop(stream); // closes immediately
+                warn!("price server overload — dropping connection");
+                continue;
+            }
+        };
+
         let store = store.clone();
         let signer = signer.clone();
         let signer_addr = signer_address.clone();
 
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = handle_connection(stream, &store, &signer, &signer_addr) {
-                warn!(error = %e, "price server connection error");
+            // `_permit` is dropped (released) when the closure returns,
+            // so the semaphore count tracks live handlers exactly.
+            let _permit = permit;
+            if handle_connection(stream, &store, &signer, &signer_addr).is_err() {
+                // Audit R-8: do NOT include the raw error message — a
+                // serde_json parse error on attacker-controlled bytes
+                // would otherwise echo those bytes into host-readable
+                // enclave logs. The fact of a failed connection is
+                // observable via this warn line; deeper debugging
+                // happens via tcpdump on the VSOCK port, not log
+                // messages.
+                warn!("price server connection error");
             }
         });
     }
@@ -87,13 +139,13 @@ fn handle_connection(
     signer: &SharedSigner,
     signer_address: &str,
 ) -> Result<()> {
-    use std::io::{Read, Write};
+    use std::io::Write;
 
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
+    let deadline = Instant::now() + REQUEST_DEADLINE;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
 
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf)?;
+    read_exact_with_deadline(&mut stream, &mut len_buf, deadline)?;
     let req_len = u32::from_be_bytes(len_buf) as usize;
 
     if req_len > 1024 * 64 {
@@ -101,7 +153,7 @@ fn handle_connection(
     }
 
     let mut req_buf = vec![0u8; req_len];
-    stream.read_exact(&mut req_buf)?;
+    read_exact_with_deadline(&mut stream, &mut req_buf, deadline)?;
 
     let request: PriceRequest = serde_json::from_slice(&req_buf)?;
     let response = process_request(&request, store, signer, signer_address);
@@ -112,6 +164,67 @@ fn handle_connection(
     stream.flush()?;
 
     Ok(())
+}
+
+/// Read `buf.len()` bytes from `stream`, but bail if total elapsed time
+/// exceeds the `deadline` regardless of per-byte progress (audit R-4).
+/// Sets the OS-level `read_timeout` to the remaining budget on each
+/// iteration, so a drip-feeder making 1-byte progress per second still
+/// hits the wall.
+fn read_exact_with_deadline(
+    stream: &mut std::net::TcpStream,
+    buf: &mut [u8],
+    deadline: Instant,
+) -> Result<()> {
+    use std::io::Read;
+
+    let mut filled = 0;
+    while filled < buf.len() {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(eyre::eyre!("request read deadline exceeded"));
+        }
+        // Shrink the per-read timeout to the remaining budget so the
+        // syscall returns control even mid-read.
+        stream.set_read_timeout(Some(deadline - now))?;
+        match stream.read(&mut buf[filled..]) {
+            Ok(0) => return Err(eyre::eyre!("connection closed mid-read")),
+            Ok(n) => filled += n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(eyre::eyre!("request read timed out"));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Cached attestation doc + when it was fetched. The Mutex is held only
+/// for the hash-map lookups + a clone of ~9 KiB bytes, which is far
+/// cheaper than the NSM round-trip the cache replaces.
+static ATTESTATION_CACHE: Mutex<Option<(Vec<u8>, Instant)>> = Mutex::new(None);
+
+/// Return the attestation doc, serving from cache if it's < TTL old.
+/// Falls back to `signer.attestation_doc()` on miss / stale, and
+/// updates the cache if the fetch succeeds (audit R-2).
+fn cached_attestation(signer: &dyn OracleSigner) -> Option<Vec<u8>> {
+    if let Ok(guard) = ATTESTATION_CACHE.lock() {
+        if let Some((doc, fetched)) = &*guard {
+            if fetched.elapsed() < ATTESTATION_CACHE_TTL {
+                return Some(doc.clone());
+            }
+        }
+    }
+    let fresh = signer.attestation_doc()?;
+    if let Ok(mut guard) = ATTESTATION_CACHE.lock() {
+        *guard = Some((fresh.clone(), Instant::now()));
+    }
+    Some(fresh)
 }
 
 /// Sign a cached price with the enclave-authoritative timestamp computed
@@ -229,13 +342,15 @@ fn process_request(
             }
         }
         "get_attestation" => {
-            // Regenerate fresh on every request — AWS Nitro leaf certs live ~3h,
-            // caching would serve expired docs and break registerEnclave on-chain.
-            let fresh = signer.attestation_doc();
+            // 5-minute cache (audit R-2): NSM is a serial device; spam
+            // here used to indirectly starve other request paths.
+            // Leaf certs live ~3 h so a 5-min TTL is well inside the
+            // validity window.
+            let doc = cached_attestation(signer.as_ref());
             PriceResponse {
                 prices: None,
                 price: None,
-                error: if fresh.is_none() {
+                error: if doc.is_none() {
                     Some("Attestation document unavailable".into())
                 } else {
                     None
@@ -243,7 +358,7 @@ fn process_request(
                 status: None,
                 signer: Some(signer_address.to_string()),
                 num_assets: None,
-                attestation_doc: fresh.as_ref().map(hex::encode),
+                attestation_doc: doc.as_ref().map(hex::encode),
                 equal_weight_fallbacks: None,
             }
         }

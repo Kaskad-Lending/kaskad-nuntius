@@ -73,6 +73,9 @@ echo "  This will take ~10-15 seconds (API calls to exchanges)..."
 echo ""
 
 PULL_API_PORT=5001
+# KASKAD_ALLOW_MOCK_SIGNER=1: opt-in to MockSigner outside ENCLAVE_MODE.
+# The Rust binary refuses this combo silently in production (audit R-6).
+KASKAD_ALLOW_MOCK_SIGNER=1 \
 ORACLE_PRIVATE_KEY=${ORACLE_PRIVATE_KEY} \
 VSOCK_PORT=${PULL_API_PORT} \
 RUST_LOG=info \

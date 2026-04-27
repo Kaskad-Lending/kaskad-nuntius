@@ -103,6 +103,9 @@ echo "  Fetching from 8 exchanges — first cycle takes ~10-15s..."
 
 # Run oracle in continuous mode (NOT SINGLE_RUN) so pull API stays alive.
 # We'll query the API after the first cycle populates prices.
+# KASKAD_ALLOW_MOCK_SIGNER=1: opt-in to MockSigner outside ENCLAVE_MODE
+# (audit R-6: prod binary refuses the combo without this flag).
+KASKAD_ALLOW_MOCK_SIGNER=1 \
 ORACLE_PRIVATE_KEY=${ORACLE_PRIVATE_KEY} \
 VSOCK_PORT=${PULL_API_PORT} \
 RUST_LOG=info \
