@@ -462,15 +462,15 @@ After your changes are merged to `main` and CI completes (~15 min):
 
 ```bash
 # 1. Check health
-curl http://kaskad-oracle-alb-670133639.us-east-1.elb.amazonaws.com/health
+curl https://oracle.kaskad.live/health
 # → {"status":"ok","signer":"0x...","num_assets":5}
 
 # 2. Check all prices
-curl http://kaskad-oracle-alb-670133639.us-east-1.elb.amazonaws.com/prices | python3 -m json.tool
+curl https://oracle.kaskad.live/prices | python3 -m json.tool
 # → should have non-empty "prices" array with all 5 assets
 
 # 3. Check a specific asset
-curl http://kaskad-oracle-alb-670133639.us-east-1.elb.amazonaws.com/price/BTC/USD
+curl https://oracle.kaskad.live/price/BTC/USD
 # → single price entry with signature
 
 # 4. Check CloudWatch logs for warnings/errors

@@ -11,7 +11,7 @@ function optionalEnv(name: string, fallback: string): string {
 }
 
 export interface Config {
-  /** ALB URL serving the TEE pull API (e.g. http://kaskad-oracle-alb-xxx.elb.amazonaws.com) */
+  /** Public HTTPS endpoint serving the TEE pull API (https://oracle.kaskad.live) */
   oracleApiUrl: string;
   /** RPC endpoint for Galleon / target chain */
   rpcUrl: string;
