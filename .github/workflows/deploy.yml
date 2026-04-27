@@ -18,6 +18,7 @@ env:
   OIDC_ROLE_ARN: arn:aws:iam::095931689333:role/kaskad-oracle-github-ci
   PROD_ASG_NAME: kaskad-oracle-prod-asg
   EIF_BUCKET: kaskad-oracle-eif
+  KMS_RELEASE_ALIAS: alias/kaskad-oracle-release
 
 jobs:
   deploy:
@@ -81,7 +82,7 @@ jobs:
               "export COMMIT=${{ github.sha }}",
               "export eif_bucket=${{ env.EIF_BUCKET }}",
               "export aws_region=${{ env.AWS_REGION }}",
-              "sudo dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel awscli docker git",
+              "sudo dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel awscli docker git jq",
               "sudo systemctl start docker",
               "rm -rf /tmp/build && mkdir -p /tmp/build",
               "aws s3 cp s3://$eif_bucket/builds/$COMMIT/source.zip /tmp/source.zip",
@@ -90,7 +91,15 @@ jobs:
               "sudo nitro-cli build-enclave --docker-uri kaskad-oracle:latest --output-file /tmp/oracle.eif",
               "sudo chown $(whoami):$(whoami) /tmp/oracle.eif",
               "ls -la /tmp/oracle.eif",
-              "aws s3 cp /tmp/oracle.eif s3://$eif_bucket/latest.eif"
+              "sha384sum /tmp/oracle.eif | awk \"{print \\$1}\" > /tmp/oracle.eif.sha384",
+              "sudo nitro-cli describe-eif --eif-path /tmp/oracle.eif | jq -r .Measurements > /tmp/pcr0.json",
+              "aws kms sign --key-id ${{ env.KMS_RELEASE_ALIAS }} --message fileb:///tmp/oracle.eif.sha384 --message-type RAW --signing-algorithm ECDSA_SHA_384 --output text --query Signature | base64 -d > /tmp/oracle.eif.sha384.sig",
+              "aws kms sign --key-id ${{ env.KMS_RELEASE_ALIAS }} --message fileb:///tmp/pcr0.json --message-type RAW --signing-algorithm ECDSA_SHA_384 --output text --query Signature | base64 -d > /tmp/pcr0.json.sig",
+              "aws s3 cp /tmp/oracle.eif s3://$eif_bucket/latest.eif",
+              "aws s3 cp /tmp/oracle.eif.sha384 s3://$eif_bucket/latest.eif.sha384",
+              "aws s3 cp /tmp/oracle.eif.sha384.sig s3://$eif_bucket/latest.eif.sha384.sig",
+              "aws s3 cp /tmp/pcr0.json s3://$eif_bucket/pcr0.json",
+              "aws s3 cp /tmp/pcr0.json.sig s3://$eif_bucket/pcr0.json.sig"
             ]' \
             --query "Command.CommandId" --output text)
           
