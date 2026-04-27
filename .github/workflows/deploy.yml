@@ -88,7 +88,7 @@ jobs:
               "export COMMIT=${{ github.sha }}",
               "export eif_bucket=${{ env.EIF_BUCKET }}",
               "export aws_region=${{ env.AWS_REGION }}",
-              "sudo dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel awscli docker git jq",
+              "sudo dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel awscli docker git jq unzip",
               "sudo systemctl start docker",
               "rm -rf /tmp/build && mkdir -p /tmp/build",
               "aws s3 cp s3://$eif_bucket/builds/$COMMIT/source.zip /tmp/source.zip",
