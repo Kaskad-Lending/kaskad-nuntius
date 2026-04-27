@@ -55,6 +55,12 @@ jobs:
           zip -r source.zip . -x "*.git*" "target/*" "infra/.terraform/*"
           aws s3 cp source.zip s3://${{ env.EIF_BUCKET }}/builds/${{ github.sha }}/source.zip
 
+      - name: Upload pull_api.py to S3 bootstrap location
+        # Prod EC2 user-data fetches this at boot (S3 GetObject) instead
+        # of inlining (we'd blow the 16 KiB user-data limit, see PR #37).
+        run: |
+          aws s3 cp enclave/pull_api.py s3://${{ env.EIF_BUCKET }}/pull_api.py
+
       - name: Wait for SSM agent
         run: |
           echo "Waiting for SSM agent to be online..."
