@@ -98,13 +98,30 @@ async fn main() -> Result<()> {
             panic!("Enclave mode requested but target is not Linux/Nitro compatible");
         }
     } else {
+        // Audit R-6: refuse to silently fall back to MockSigner when
+        // `ENCLAVE_MODE` is unset. A typo in the systemd unit / Docker
+        // env on a Nitro production host would otherwise let a
+        // host-controlled `ORACLE_PRIVATE_KEY` env-var sign all
+        // prices. Operator must explicitly opt-in for dev / CI.
+        if std::env::var("KASKAD_ALLOW_MOCK_SIGNER").is_err() {
+            return Err(eyre::eyre!(
+                "ENCLAVE_MODE not set and KASKAD_ALLOW_MOCK_SIGNER not set. \
+                 Refusing to fall back to MockSigner — this would let a \
+                 typo of ENCLAVE_MODE on a Nitro host sign prices with a \
+                 host-controlled key. Set KASKAD_ALLOW_MOCK_SIGNER=1 for \
+                 dev / CI."
+            ));
+        }
         match std::env::var("ORACLE_PRIVATE_KEY") {
             Ok(key) => {
-                info!("Using private key from ORACLE_PRIVATE_KEY env");
+                info!("Using private key from ORACLE_PRIVATE_KEY env (KASKAD_ALLOW_MOCK_SIGNER=1)");
                 Box::new(MockSigner::new(&key)?)
             }
             Err(_) => {
-                info!("No ORACLE_PRIVATE_KEY found, generating random key for testing");
+                info!(
+                    "No ORACLE_PRIVATE_KEY found, generating random MockSigner key \
+                     (KASKAD_ALLOW_MOCK_SIGNER=1, dev only)"
+                );
                 Box::new(MockSigner::random())
             }
         }
@@ -135,7 +152,14 @@ async fn main() -> Result<()> {
         )
         .await
         {
-            error!(error = %e, "Price server failed");
+            // Audit R-19: previously the price server could silently
+            // exit (e.g. listener loop returns Err) leaving the
+            // oracle loop running and signing into the void. Aborting
+            // the process so systemd `Restart=always` (production)
+            // and CI runners surface the failure instead of the
+            // pull API quietly going dark.
+            error!(error = %e, "Price server failed — aborting process");
+            std::process::exit(1);
         }
     });
 
