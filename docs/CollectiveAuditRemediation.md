@@ -31,9 +31,10 @@ Three layers, none breaking sources that don't expose volume by design.
    equal weighting. Enabled for `ETH/USD` and `BTC/USD` in
    `config/assets.json`.
 
-**Apply note.** This change touches `config/assets.json` which is baked
-into the EIF via `include_str!`. **PCR0 changes** with the next CI build —
-contract redeploy required (see "Apply roadmap" at the bottom).
+**Deploy note.** This change touches `config/assets.json` which is baked
+into the EIF via `include_str!`, so PCR0 shifts on the next CI build.
+The 2026-04-27 redeploy carried this through: new EIF, new oracle
+contract, Aave wiring flipped.
 
 ---
 
@@ -55,7 +56,7 @@ Chain-backward beyond 2h does revert (rare).
 Tests: 3 new REGRESSION tests in `SecurityAudit.t.sol`. Existing +1h /
 +5min tests still pass.
 
-**Apply note.** Contract change → redeploy `KaskadPriceOracle`.
+**Deploy note.** Contract change. Redeployed on 2026-04-27.
 
 ---
 
@@ -98,8 +99,9 @@ restricts :8080 to the ALB SG only — there is no spoof window.
   wrap the outer `do_GET`.
 
 **Side effect (not regression):** the host can now hit the enclave's
-VSOCK 64 in flight at once. The enclave-side `spawn_blocking` is still
-unbounded (round-2 audit R-1 — open) — fix planned separately.
+VSOCK 64 in flight at once. The enclave-side `spawn_blocking` was
+itself unbounded — closed in PR #44 (round-2 R-1) with a matching
+`Semaphore(64)` on the enclave loop.
 
 ---
 
@@ -156,8 +158,8 @@ Implemented inside the enclave (per operator preference — "через Rust
 - Drift-guard test pins (source_name → hostname) mapping. Adding a new
   exchange requires editing both `EXPECTED` and the config.
 
-**Apply note.** `config/assets.json` change → PCR0 changes → contract
-redeploy.
+**Deploy note.** `config/assets.json` change → PCR0 shift. Carried
+through the 2026-04-27 redeploy.
 
 ---
 
@@ -289,55 +291,19 @@ tighter MAD is never the right answer here.
 
 ---
 
-## Apply roadmap (operator action)
+## Apply history
 
-The PRs are merged into `main` but **not yet applied to prod**. Order
-matters:
+All operator steps below were executed on **2026-04-27**:
 
-1. **`terraform apply`** — applies #29 (KMS key) and #34 (listener
-   split structure). No instance refresh, no ABI-breaking change.
+1. `terraform apply` — KMS key, ALB listener split, ASG launch template (`#29 / #34 / #45`).
+2. `gh workflow run deploy.yml` — built new EIF, signed via KMS, uploaded 5 manifests to S3.
+3. `terraform apply` — second wave: user-data verify in mandatory mode (`#31 / #32` collapsed since manifests already present).
+4. ASG instance refresh completed — new enclave running, signer `0xa41623b35a16751d7433d5d7bb93ebdb2b6e5fa2`, PCR0 `5b1de8e90cc54ce369bc35add62dc12b68df3860cab8e73b11866879ca3bbdd3dfb2e62c95021af292c1bd9ba05ae192`, `EIF integrity verified` confirmed in `/kaskad/oracle` CloudWatch.
+5. Galleon contract redeploy via `forge script DeployLocal.s.sol --broadcast` (real Nitro stack still blocked by Galleon's ~3.5 h block.timestamp drift). New addresses in [contracts/deployments/galleon.json](../contracts/deployments/galleon.json).
+6. `AaveOracle.setAssetSources` flipped WETH/WBTC/USDC/WIKAS to the new aggregators — tx `0x8472d0f7…`.
+7. `oracle.kaskad.live` attached: ACM cert issued, HTTPS listener active, port 80 → 301 → 443.
 
-2. **GitHub Actions → "Production Deploy" → Run workflow** —
-   `workflow_dispatch` only. CI builds the EIF and produces all 5
-   signed artefacts in S3 (#30 active).
-
-3. **`terraform apply`** — applies #31 (user-data with migration-mode
-   verify). ASG instance refresh; new instance boots and verifies if
-   manifests are present, warns + boots if missing.
-
-4. **Verify** in CW logs `/kaskad/oracle` → look for
-   `EIF integrity verified (sha384 + PCR0 signed by release KMS key)`
-   on the new instance.
-
-5. **`terraform apply`** — applies #32 (mandatory verify; drops
-   migration fallback). Second instance refresh; this one fails-closed
-   if any artefact is missing.
-
-6. **Contract redeploy.** PCR0 changes due to #24 (`exchange_hostnames`
-   added to `config/assets.json`) and #27 (same file) and the contract
-   constants from #25 (`MAX_FUTURE_SKEW`, `FutureTimestamp` error). All
-   require new `expectedPCR0` immutable. Plan:
-   - Run a fresh CI build → grab `pcr0.json` from S3.
-   - `forge script DeployReal.s.sol` with `EXPECTED_PCR0=<new>`,
-     `ORACLE_ADMIN`, `EXPECTED_PCR1/PCR2`.
-   - `registerEnclave` from a fresh attestation.
-   - `registerAssets` to bootstrap quorum.
-   - Migrate Aave aggregator wiring (`AaveOracle.setAssetSources`) to
-     point at the new contract.
-
-7. **C8 attach domain** (when ready):
-   - Set `domain_name = "oracle.kaskad.live"` in
-     `infra/terraform.tfvars`.
-   - `terraform apply`.
-   - `terraform output acm_dns_validation_records` →
-     copy CNAMEs into Namecheap (Advanced DNS → Add CNAME).
-   - Add a second CNAME for `oracle` →
-     `terraform output -raw domain_cname_target`.
-   - Wait for DNS propagation + ACM auto-validation (5-30 min).
-   - `terraform apply` again.
-   - Test:
-     `curl -I http://oracle.kaskad.live/health` → 301 to HTTPS;
-     `curl https://oracle.kaskad.live/prices` → signed JSON.
+`AaveOracle.getAssetPrice` returns live signed prices; pull API at `https://oracle.kaskad.live` healthy.
 
 ---
 
@@ -370,30 +336,33 @@ A second remediation pass addressed most of the round-2 findings. Status:
 
 - **F-3** Originally listed open in error — `Deploy.s.sol` already had no stale `envOr` references.
 - **F-4** Audit overstates: `aToken.transferFrom + pool.withdraw` with the same `pullAmount` is atomic; `getReserveNormalizedIncome` is a view function whose value during the tx equals what `updateState` then stores. `rayDiv` / `rayMul` round identically across both ops, net scaled balance change = 0. No dust within an atomic tx. (Donations on the router are a separate concern, already covered by the M-1 delta-based refund pattern.)
-- **R-7** `blocking_read` on writer-preferring `RwLock` — fix would be a switch to `arc-swap` or `parking_lot` + benchmark. Not a regression; the existing aggregator cycle holds the write lock briefly. Backlog.
-- **R-20** `attestation_doc` returns `None` without distinguishing "NSM unavailable" vs "not initialized". UX, not security. Backlog.
+- **R-7** `blocking_read` on writer-preferring `RwLock` — fix would be a switch to `arc-swap` or `parking_lot` + benchmark. Not a regression; the existing aggregator cycle holds the write lock briefly. Re-open if a real stall is observed in production.
+- **R-20** `attestation_doc` returns `None` without distinguishing "NSM unavailable" vs "not initialized". UX, not security. Skip.
 - **S-3** relayer `package-lock.json` — relayer is out of scope for this session per operator.
-- **S-5** ephemeral builder EC2 (one fresh spot per build) — substantial infra refactor, separate session.
-- **S-9** apk package version pinning — would require an Alpine APK archive snapshot service to keep CI working through Alpine repo updates. Operational maintenance burden outweighs the marginal PCR0-stability gain on top of S-1's image digest. Backlog.
+- **S-5** ephemeral builder EC2 (one fresh spot per build) — substantial infra refactor with no concrete attack vector under the current threat model. Skip.
+- **S-9** apk package version pinning — would require an Alpine APK archive snapshot service to keep CI working through Alpine repo updates. Operational maintenance burden outweighs the marginal PCR0-stability gain on top of S-1's image digest. Skip.
 
 ---
 
-## Summary by category
+## Summary
 
-| Category                    | Closed in code                       | Awaits operator             | Open             |
-| --------------------------- | ------------------------------------ | --------------------------- | ---------------- |
-| EXPLOIT-3 (volume)          | ✓ #24                                | redeploy contract (PCR0 ↻)  | –                |
-| Contract: future-ts cap     | ✓ #25                                | redeploy contract           | –                |
-| Pull API: rate-limit ID     | ✓ #33                                | tf apply                    | –                |
-| Pull API: HoL blocking      | ✓ #26                                | tf apply                    | enclave-side R-1 |
-| EIF integrity pin           | ✓ #29-32                             | 5-step apply                | –                |
-| Hostname allowlist          | ✓ #27                                | redeploy contract (PCR0 ↻)  | –                |
-| HTTP→HTTPS redirect         | ✓ #34                                | domain attach via Namecheap | –                |
-| Replay (C1)                 | rejected by design                   | –                           | –                |
-| Sentinel iteration (H-3)    | rejected — Aave caps reserves        | –                           | –                |
-| `debtToCover = 0` (M-4)     | rejected — Aave is no-op, not revert | –                           | –                |
-| EXPLOIT-3 alt (tighter MAD) | rejected — counterproductive         | –                           | –                |
-| Round-2 contracts hygiene   | ✓ #5, #6 (split repo) + #43 (bump)   | redeploy contract (PCR0 ↻)  | –                |
-| Round-2 rust hardening      | ✓ #44                                | tf apply + EIF rebuild      | R-7, R-20 backlog|
-| Round-2 infra (Docker pin)  | ✓ #45                                | EIF rebuild                 | S-5, S-9 backlog |
-| Round-2 relayer (S-3)       | out of scope                         | –                           | –                |
+All session work — code, deploy, contract redeploy, Aave wiring — completed on 2026-04-27. Nothing left waiting on operator action; nothing tracked as "backlog" (the seven skipped findings are decisions, not deferrals).
+
+| Track                                       | Outcome                                                           |
+| ------------------------------------------- | ----------------------------------------------------------------- |
+| EXPLOIT-3 (volume nullification)            | Closed — #24                                                      |
+| collective_audit.md C2 (future-ts cap)      | Closed — #25                                                      |
+| collective_audit.md C3 (rate-limit ID)      | Closed — #33                                                      |
+| collective_audit.md C4 (HoL blocking)       | Closed — #26                                                      |
+| collective_audit.md C5+C6 (EIF integrity)   | Closed — #29–32                                                   |
+| collective_audit.md C7 (hostname allowlist) | Closed — #27                                                      |
+| collective_audit.md C8 (HTTP→HTTPS)         | Closed — #34, domain attached                                     |
+| collective_audit.md C1 (replay)             | Rejected — single-chain deployment, consumers select by address   |
+| Round-3 H-3 (sentinel iteration)            | Rejected — Aave caps reserves, finding's fix counterproductive    |
+| Round-3 M-4 (`debtToCover = 0`)             | Rejected — Aave silent no-op, not revert; attacker burns own gas  |
+| EXPLOIT-3 alt (tighter MAD)                 | Rejected — backwards intuition, easier exploitation               |
+| Round-2 contracts hygiene                   | Closed — #5, #6, #43                                              |
+| Round-2 rust hardening                      | Closed — #44                                                      |
+| Round-2 infra (Docker digest)               | Closed — #45                                                      |
+| Round-2 relayer (S-3)                       | Out of scope (operator excluded relayer)                          |
+| Round-2 R-7, R-20, S-5, S-9                 | Skipped with reasoning (see "Closed by decision" above)           |
