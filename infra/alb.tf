@@ -1,9 +1,9 @@
 # ─── ALB for Pull API (HTTPS → port 8080) ────────────────────
 
 variable "domain_name" {
-  description = "Domain name for the oracle API (e.g. oracle.kaskad.io)"
+  description = "Domain name for the oracle API. Set empty to skip ACM/HTTPS and stay on bare ALB DNS."
   type        = string
-  default     = ""
+  default     = "oracle.kaskad.live"
 }
 
 # ACM Certificate (DNS validation)
