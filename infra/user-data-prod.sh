@@ -234,9 +234,11 @@ SVC
 systemctl enable --now kaskad-vsock-proxy.service
 
 # ─── Create Pull API (inbound: internet → enclave) ───
-cat > /opt/kaskad/pull_api.py << 'PULLAPI'
-${pull_api_script}
-PULLAPI
+# Pulled from S3 (kept in repo at enclave/pull_api.py, uploaded by CI)
+# instead of being inlined into user-data — the inline version blew the
+# 16 KiB EC2 user-data limit once the EIF integrity-pin block landed.
+aws s3 cp s3://${eif_bucket}/pull_api.py /opt/kaskad/pull_api.py
+chmod +x /opt/kaskad/pull_api.py
 
 cat > /etc/systemd/system/kaskad-pull-api.service << SVC
 [Unit]
