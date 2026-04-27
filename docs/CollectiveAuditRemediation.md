@@ -314,6 +314,7 @@ A second remediation pass addressed most of the round-2 findings. Status:
 ### Closed in code (this session)
 
 **Contracts (kaskad-nuntius-contracts):**
+
 - **F-13** evm_version pinned to "cancun" in `foundry.toml` — PR #5.
 - **F-5** `registerAssets` capped at `MAX_ASSETS = 32` — PR #6.
 - **F-6** `getRoundData` reverts with `NoRoundData` on missing round — PR #6.
@@ -322,6 +323,7 @@ A second remediation pass addressed most of the round-2 findings. Status:
 - **D-5** optional `EXPECTED_ENCLAVE_SIGNER` binding — PR #5.
 
 **Rust runtime (PR #44):**
+
 - **R-1** `spawn_blocking` wrapped in `Semaphore(64)`, overflow drops connection.
 - **R-2** `get_attestation` cached 5 min (well inside 3 h leaf cert TTL).
 - **R-4** `read_exact_with_deadline` enforces 15 s wall-clock budget; idle timeout no longer spans days.
@@ -330,6 +332,7 @@ A second remediation pass addressed most of the round-2 findings. Status:
 - **R-19** price server failure → `std::process::exit(1)`; systemd / ASG restart kicks in.
 
 **Infra:**
+
 - **S-1** Dockerfile base images digest-pinned — PR #45.
 
 ### Closed by decision (skipped after analysis)
@@ -346,23 +349,45 @@ A second remediation pass addressed most of the round-2 findings. Status:
 
 ## Summary
 
-All session work — code, deploy, contract redeploy, Aave wiring — completed on 2026-04-27. Nothing left waiting on operator action; nothing tracked as "backlog" (the seven skipped findings are decisions, not deferrals).
+All session work — code, deploy, contract redeploy, wiring — completed on 2026-04-27.
 
-| Track                                       | Outcome                                                           |
-| ------------------------------------------- | ----------------------------------------------------------------- |
-| EXPLOIT-3 (volume nullification)            | Closed — #24                                                      |
-| collective_audit.md C2 (future-ts cap)      | Closed — #25                                                      |
-| collective_audit.md C3 (rate-limit ID)      | Closed — #33                                                      |
-| collective_audit.md C4 (HoL blocking)       | Closed — #26                                                      |
-| collective_audit.md C5+C6 (EIF integrity)   | Closed — #29–32                                                   |
-| collective_audit.md C7 (hostname allowlist) | Closed — #27                                                      |
-| collective_audit.md C8 (HTTP→HTTPS)         | Closed — #34, domain attached                                     |
-| collective_audit.md C1 (replay)             | Rejected — single-chain deployment, consumers select by address   |
-| Round-3 H-3 (sentinel iteration)            | Rejected — Aave caps reserves, finding's fix counterproductive    |
-| Round-3 M-4 (`debtToCover = 0`)             | Rejected — Aave silent no-op, not revert; attacker burns own gas  |
-| EXPLOIT-3 alt (tighter MAD)                 | Rejected — backwards intuition, easier exploitation               |
-| Round-2 contracts hygiene                   | Closed — #5, #6, #43                                              |
-| Round-2 rust hardening                      | Closed — #44                                                      |
-| Round-2 infra (Docker digest)               | Closed — #45                                                      |
-| Round-2 relayer (S-3)                       | Out of scope (operator excluded relayer)                          |
-| Round-2 R-7, R-20, S-5, S-9                 | Skipped with reasoning (see "Closed by decision" above)           |
+### Closed
+
+| Finding                                  | PR(s)                            |
+| ---------------------------------------- | -------------------------------- |
+| EXPLOIT-3 (volume nullification)         | #24                              |
+| C2 — future-ts cap                       | #25 (+ contracts #3)             |
+| C3 — pull API rate-limit identity        | #33                              |
+| C4 — pull API HoL blocking               | #26                              |
+| C5 + C6 — EIF integrity pin              | #29, #30, #31, #32               |
+| C7 — hostname allowlist                  | #27                              |
+| C8 — HTTP→HTTPS redirect + domain attach | #34, ACM cert + Namecheap CNAMEs |
+| Round-2 F-5 — `registerAssets` cap       | contracts #6 (+ bump #43)        |
+| Round-2 F-6 — `getRoundData` revert      | contracts #6                     |
+| Round-2 F-13 — `evm_version` pin         | contracts #5                     |
+| Round-2 D-2 — PCR1/2 non-zero            | contracts #5                     |
+| Round-2 D-3 — admin ≠ deployer           | contracts #5                     |
+| Round-2 D-5 — expected-signer binding    | contracts #5                     |
+| Round-2 R-1 — `spawn_blocking` semaphore | #44                              |
+| Round-2 R-2 — `get_attestation` cache    | #44                              |
+| Round-2 R-4 — drip-feed deadline         | #44                              |
+| Round-2 R-6 — `KASKAD_ALLOW_MOCK_SIGNER` | #44                              |
+| Round-2 R-8 — error-log redact           | #44                              |
+| Round-2 R-19 — abort on crash            | #44                              |
+| Round-2 S-1 — Docker digest pin          | #45                              |
+
+### Skipped
+
+| Finding                                                 | Reason                                                                                                                                                                                                                              |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C1 — signature replay across deployments/chains         | Single-chain deployment; consumers select an oracle by deployed address, not by PCR0 / signer. Attacker's shadow contract is irrelevant unless a consumer is misconfigured to trust it. Re-open when a multi-chain plan exists.     |
+| Round-3 H-3 — `_checkAllAssets` unbounded iteration     | Aave v3 caps reserves at 128; worst-case 1.28 M gas, well within block limit. Sentinel returning `false` on stale prices is correct behaviour, not a DoS. Auditor's proposed fixes (cap iteration / force Router) are lossy or unenforceable. |
+| Round-3 M-4 — `debtToCover = 0` griefing                | Verified Aave v3 source: `debtToCover == 0` does **not** revert, the call is a silent no-op. Wasted gas is the attacker's own. `_pushPrices` slot consumption is not exhaustible (`uint80` rounds). `require(debtToCover > 0)` would relocate the no-op revert from Aave to Router with no security gain. |
+| EXPLOIT-3 alternative — "tighter MAD sigma in fallback" | Backwards. If attacker has nullified volume on ≥50 % of sources, they control ≥50 % of survivors. Tighter MAD rejects more samples — preferentially the honest minority — making the exploit easier. Replaced with `require_volume_weight = true` fail-closed policy in #24. |
+| Round-2 F-3 — deploy script `envOr` references          | Listed open in error; `Deploy.s.sol` already had no stale `envOr` references at the time of audit reading.                                                                                                                          |
+| Round-2 F-4 — `withdrawWithPrices` aToken dust          | Atomic-tx invariant: `aToken.transferFrom(U) + pool.withdraw(U)` netto-zero scaled balance change. `getReserveNormalizedIncome` is a view function returning the same index value `updateState` then stores; `rayDiv` / `rayMul` round identically. No dust within an atomic tx. Donations are M-1, separate. |
+| Round-2 R-7 — `blocking_read` writer-preferring RwLock  | Fix = switch to `arc-swap` / `parking_lot` + benchmark. Not a regression — aggregator cycle holds the write lock briefly. Re-open if a real stall is observed in production.                                                        |
+| Round-2 R-20 — `attestation_doc` returns `None`         | UX issue (no structured error code distinguishing "NSM unavailable" vs "not initialized"). Not security.                                                                                                                            |
+| Round-2 S-3 — relayer `package-lock.json`               | Relayer is out of scope per operator request.                                                                                                                                                                                       |
+| Round-2 S-5 — long-lived builder EC2                    | Substantial infra refactor (one fresh spot instance per build) with no concrete attack vector under the current threat model.                                                                                                       |
+| Round-2 S-9 — apk package version pin                   | Would require an Alpine APK archive snapshot service to keep CI working through repo updates. Operational maintenance burden outweighs the marginal PCR0-stability gain on top of S-1's base-image digest pin.                       |
