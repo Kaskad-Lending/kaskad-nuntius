@@ -73,57 +73,49 @@ openssl pkey -pubin -inform DER -in /opt/kaskad/release_pubkey.der \
   -outform PEM -out /opt/kaskad/release_pubkey.pem
 echo "Release pubkey fetched: $(ls -l /opt/kaskad/release_pubkey.pem)"
 
-# EIF body is mandatory; signature artefacts are best-effort during
-# the migration window. Once PR-D lands, the `|| MIGRATION_MODE=1`
-# fallback is dropped and missing signatures fail-close.
-aws s3 cp s3://${eif_bucket}/latest.eif /opt/kaskad/oracle.eif
-echo "EIF downloaded: $(ls -lh /opt/kaskad/oracle.eif)"
+# Pull EIF + 4 signed manifests. `set -euo pipefail` at the top of the
+# script means any `aws s3 cp` failure exits the boot non-zero — there
+# is no migration-mode fallback any more.
+aws s3 cp s3://${eif_bucket}/latest.eif               /opt/kaskad/oracle.eif
+aws s3 cp s3://${eif_bucket}/latest.eif.sha384        /opt/kaskad/oracle.eif.sha384
+aws s3 cp s3://${eif_bucket}/latest.eif.sha384.sig    /opt/kaskad/oracle.eif.sha384.sig
+aws s3 cp s3://${eif_bucket}/pcr0.json                /opt/kaskad/pcr0.json
+aws s3 cp s3://${eif_bucket}/pcr0.json.sig            /opt/kaskad/pcr0.json.sig
+echo "EIF + manifests downloaded: $(ls -lh /opt/kaskad/oracle.eif)"
 
-MIGRATION_MODE=0
-if aws s3 cp s3://${eif_bucket}/latest.eif.sha384     /opt/kaskad/oracle.eif.sha384 \
-   && aws s3 cp s3://${eif_bucket}/latest.eif.sha384.sig /opt/kaskad/oracle.eif.sha384.sig \
-   && aws s3 cp s3://${eif_bucket}/pcr0.json             /opt/kaskad/pcr0.json \
-   && aws s3 cp s3://${eif_bucket}/pcr0.json.sig         /opt/kaskad/pcr0.json.sig; then
+# 1) Verify the signature on the SHA-384 manifest itself.
+openssl dgst -sha384 -verify /opt/kaskad/release_pubkey.pem \
+  -signature /opt/kaskad/oracle.eif.sha384.sig \
+  /opt/kaskad/oracle.eif.sha384 \
+  || { echo "FATAL: oracle.eif.sha384 signature invalid"; exit 1; }
 
-  # 1) Verify the signature on the SHA-384 manifest itself.
-  openssl dgst -sha384 -verify /opt/kaskad/release_pubkey.pem \
-    -signature /opt/kaskad/oracle.eif.sha384.sig \
-    /opt/kaskad/oracle.eif.sha384 \
-    || { echo "FATAL: oracle.eif.sha384 signature invalid"; exit 1; }
-
-  # 2) Verify the EIF on disk hashes to the signed digest.
-  ACTUAL_SHA=$(sha384sum /opt/kaskad/oracle.eif | awk '{print $1}')
-  EXPECTED_SHA=$(cat /opt/kaskad/oracle.eif.sha384)
-  if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-    echo "FATAL: EIF sha384 mismatch: actual=$ACTUAL_SHA expected=$EXPECTED_SHA"
-    exit 1
-  fi
-
-  # 3) Verify the signature on the PCR0 manifest.
-  openssl dgst -sha384 -verify /opt/kaskad/release_pubkey.pem \
-    -signature /opt/kaskad/pcr0.json.sig \
-    /opt/kaskad/pcr0.json \
-    || { echo "FATAL: pcr0.json signature invalid"; exit 1; }
-
-  # 4) Verify the EIF's actual PCR0 matches the signed manifest. Defends
-  #    against an attacker that swapped EIF bytes for a different but
-  #    same-sha384 file (impossible under SHA-384 collision resistance,
-  #    but cheap belt+braces) AND against a manifest that points at
-  #    PCR0 the local EIF doesn't actually produce.
-  EXPECTED_PCR0=$(jq -r '.PCR0' /opt/kaskad/pcr0.json)
-  ACTUAL_PCR0=$(nitro-cli describe-eif --eif-path /opt/kaskad/oracle.eif \
-    | jq -r '.Measurements.PCR0')
-  if [ "$EXPECTED_PCR0" != "$ACTUAL_PCR0" ]; then
-    echo "FATAL: PCR0 mismatch: expected=$EXPECTED_PCR0 actual=$ACTUAL_PCR0"
-    exit 1
-  fi
-
-  echo "EIF integrity verified (sha384 + PCR0 signed by release KMS key)"
-else
-  MIGRATION_MODE=1
-  echo "WARN: signed manifests absent or unreachable in S3 — booting in migration mode."
-  echo "WARN: this fallback will be removed by the next infra rollout (PR-D)."
+# 2) Verify the EIF on disk hashes to the signed digest.
+ACTUAL_SHA=$(sha384sum /opt/kaskad/oracle.eif | awk '{print $1}')
+EXPECTED_SHA=$(cat /opt/kaskad/oracle.eif.sha384)
+if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+  echo "FATAL: EIF sha384 mismatch: actual=$ACTUAL_SHA expected=$EXPECTED_SHA"
+  exit 1
 fi
+
+# 3) Verify the signature on the PCR0 manifest.
+openssl dgst -sha384 -verify /opt/kaskad/release_pubkey.pem \
+  -signature /opt/kaskad/pcr0.json.sig \
+  /opt/kaskad/pcr0.json \
+  || { echo "FATAL: pcr0.json signature invalid"; exit 1; }
+
+# 4) Verify the EIF's actual PCR0 matches the signed manifest. Belt +
+#    braces against (a) a sha384-colliding-but-distinct EIF (infeasible
+#    under SHA-384, but cheap to check) and (b) a manifest pointing at
+#    a PCR0 the local EIF doesn't actually produce.
+EXPECTED_PCR0=$(jq -r '.PCR0' /opt/kaskad/pcr0.json)
+ACTUAL_PCR0=$(nitro-cli describe-eif --eif-path /opt/kaskad/oracle.eif \
+  | jq -r '.Measurements.PCR0')
+if [ "$EXPECTED_PCR0" != "$ACTUAL_PCR0" ]; then
+  echo "FATAL: PCR0 mismatch: expected=$EXPECTED_PCR0 actual=$ACTUAL_PCR0"
+  exit 1
+fi
+
+echo "EIF integrity verified (sha384 + PCR0 signed by release KMS key)"
 
 # ─── Create HTTP CONNECT proxy (Python, stdlib only) ───
 cat > /opt/kaskad/http_connect_proxy.py << 'CONNECTPROXY'
