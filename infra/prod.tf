@@ -43,6 +43,7 @@ resource "aws_launch_template" "prod" {
     enclave_cpu_count   = var.enclave_cpu_count
     enclave_memory_mib  = var.enclave_memory_mib
     pull_api_script     = file("${path.module}/../enclave/pull_api.py")
+    vpc_cidr            = var.vpc_cidr
   }))
 
   tag_specifications {

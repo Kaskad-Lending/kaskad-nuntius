@@ -238,13 +238,17 @@ cat > /opt/kaskad/pull_api.py << 'PULLAPI'
 ${pull_api_script}
 PULLAPI
 
-cat > /etc/systemd/system/kaskad-pull-api.service << 'SVC'
+cat > /etc/systemd/system/kaskad-pull-api.service << SVC
 [Unit]
 Description=Kaskad Pull API (HTTP → VSOCK)
 After=network.target
 
 [Service]
 Type=simple
+# VPC_CIDR tells pull_api.py which TCP peers to treat as ALB (and
+# therefore trust X-Forwarded-For for). Outside-VPC peers are direct
+# hits whose XFF is spoofable — the Python code falls back to peer.
+Environment=VPC_CIDR=${vpc_cidr}
 ExecStart=/usr/bin/python3 /opt/kaskad/pull_api.py 8080
 Restart=always
 RestartSec=5
