@@ -16,7 +16,9 @@ Security:
   - No secrets exposed — only signed price data
 """
 
+import ipaddress
 import json
+import os
 import socket
 import struct
 import sys
@@ -39,6 +41,54 @@ RATE_WINDOW = 60       # seconds
 # semaphore caps simultaneous in-flight handlers; overflow returns 503.
 MAX_CONCURRENT = 64
 _concurrency = threading.Semaphore(MAX_CONCURRENT)
+
+# Real-client-IP resolution behind the ALB.
+#
+# Direct connections to :8080 are blocked at the host security group —
+# only ALB inside the VPC can reach us — so when the TCP peer is in
+# `VPC_CIDR` we trust `X-Forwarded-For`. Anything from outside the VPC
+# is a misconfiguration / direct hit; fall back to the peer address
+# verbatim (no spoof window).
+#
+# `VPC_CIDR` is set via systemd `Environment=` in kaskad-pull-api.service,
+# substituted from terraform's `var.vpc_cidr`. Default 10.0.0.0/16
+# matches the project's existing VPC config.
+_VPC_CIDR_STR = os.environ.get("VPC_CIDR", "10.0.0.0/16")
+try:
+    _VPC_CIDR = ipaddress.ip_network(_VPC_CIDR_STR)
+except ValueError:
+    print(f"[pull-api] WARN: invalid VPC_CIDR={_VPC_CIDR_STR!r}, falling back to 10.0.0.0/16",
+          file=sys.stderr)
+    _VPC_CIDR = ipaddress.ip_network("10.0.0.0/16")
+
+
+def get_client_ip(handler):
+    """Return the real client IP. Trusts `X-Forwarded-For` only when the
+    immediate peer is inside the VPC (i.e. our ALB). For anything else
+    the peer address is returned as-is."""
+    peer_str = handler.client_address[0]
+    try:
+        peer = ipaddress.ip_address(peer_str)
+    except (ValueError, TypeError):
+        return peer_str
+
+    if peer not in _VPC_CIDR:
+        # Direct hit (dev / mis-routed) — peer IS the client, do not
+        # honour `X-Forwarded-For` (spoofable in this case).
+        return str(peer)
+
+    xff = handler.headers.get("X-Forwarded-For", "").strip()
+    if not xff:
+        return str(peer)
+    # AWS ALB format: "<client>, <proxy1>, <proxy2>". First entry is the
+    # original client. Trim + validate as IP; on malformed header, fall
+    # back to the peer (ALB) so we still rate-limit, just less precisely.
+    first = xff.split(",")[0].strip()
+    try:
+        ipaddress.ip_address(first)
+        return first
+    except ValueError:
+        return str(peer)
 
 # ─── Rate Limiter ────────────────────────────────────────────
 
@@ -145,8 +195,8 @@ class PullAPIHandler(BaseHTTPRequestHandler):
             _concurrency.release()
 
     def _handle_get(self):
-        # Rate limit check
-        client_ip = self.client_address[0]
+        # Rate limit check — keyed on the real client IP, not the ALB.
+        client_ip = get_client_ip(self)
         if not rate_limiter.is_allowed(client_ip):
             self.send_json(429, {
                 "error": "rate limit exceeded",
@@ -195,13 +245,13 @@ class PullAPIHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("X-RateLimit-Remaining", str(rate_limiter.remaining(self.client_address[0])))
+        self.send_header("X-RateLimit-Remaining", str(rate_limiter.remaining(get_client_ip(self))))
         self.end_headers()
         self.wfile.write(body)
 
     def log_message(self, format, *args):
         """Override to use structured logging."""
-        print(f"[pull-api] {self.client_address[0]} - {format % args}")
+        print(f"[pull-api] {get_client_ip(self)} - {format % args}")
 
 
 # ─── Main ────────────────────────────────────────────────────
