@@ -119,12 +119,6 @@ output "release_kms_alias" {
 # the enclave key, which forces a full Mock-verifier + Oracle +
 # aggregators redeploy on Galleon.
 
-variable "sealing_allowed_pcr0" {
-  description = "List of PCR0 measurements (hex, 96 chars) the sealing KMS key will decrypt for. CI publishes a new PCR0 on each EIF build; operator updates this list."
-  type        = list(string)
-  default     = []
-}
-
 resource "aws_kms_key" "sealing" {
   description              = "Kaskad Oracle enclave signing-key sealing key (PCR0-gated decrypt)"
   customer_master_key_spec = "SYMMETRIC_DEFAULT"
@@ -132,45 +126,48 @@ resource "aws_kms_key" "sealing" {
   deletion_window_in_days  = 30
   enable_key_rotation      = true
 
+  # CI mutates this policy on each EIF build (deploy.yml). ignore_changes
+  # prevents terraform from reverting CI's PCR0 allowlist updates.
+  lifecycle {
+    ignore_changes = [policy]
+  }
+
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = concat(
-      [
-        # Account root — admin / break-glass.
-        {
-          Sid       = "RootAccountFullAccess"
-          Effect    = "Allow"
-          Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
-          Action    = "kms:*"
-          Resource  = "*"
-        },
-        # Prod EC2 role: kms:Encrypt unconditional (host-side OK,
-        # the plaintext lives only inside the enclave anyway).
-        {
-          Sid       = "ProdEncryptOnFirstBoot"
-          Effect    = "Allow"
-          Principal = { AWS = aws_iam_role.prod.arn }
-          Action    = ["kms:Encrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-          Resource  = "*"
-        },
-      ],
-      # kms:Decrypt only with a Nitro attestation that resolves to
-      # one of the allowed PCR0 measurements.
-      length(var.sealing_allowed_pcr0) > 0 ? [
-        {
-          Sid       = "ProdDecryptWithAttestation"
-          Effect    = "Allow"
-          Principal = { AWS = aws_iam_role.prod.arn }
-          Action    = "kms:Decrypt"
-          Resource  = "*"
-          Condition = {
-            "ForAnyValue:StringEqualsIgnoreCase" = {
-              "kms:RecipientAttestation:PCR0" = var.sealing_allowed_pcr0
-            }
+    Statement = [
+      # Account root — admin / break-glass.
+      {
+        Sid       = "RootAccountFullAccess"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      # Prod EC2 role: kms:Encrypt unconditional (host-side OK; the
+      # plaintext lives only inside the enclave anyway).
+      {
+        Sid       = "ProdEncryptOnFirstBoot"
+        Effect    = "Allow"
+        Principal = { AWS = aws_iam_role.prod.arn }
+        Action    = ["kms:Encrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
+        Resource  = "*"
+      },
+      # Decrypt requires Nitro attestation with PCR0 in allowlist.
+      # Placeholder never matches a real measurement: deny-all until
+      # CI's first run appends the real PCR0.
+      {
+        Sid       = "ProdDecryptWithAttestation"
+        Effect    = "Allow"
+        Principal = { AWS = aws_iam_role.prod.arn }
+        Action    = "kms:Decrypt"
+        Resource  = "*"
+        Condition = {
+          "ForAnyValue:StringEqualsIgnoreCase" = {
+            "kms:RecipientAttestation:PCR0" = ["0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"]
           }
         }
-      ] : []
-    )
+      },
+    ]
   })
 
   tags = {
