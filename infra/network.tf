@@ -107,43 +107,8 @@ resource "aws_security_group" "builder" {
   }
 }
 
-# ─── VPC Endpoints (SSM for debugging without SSH) ────────────
-
-resource "aws_security_group" "vpc_endpoints" {
-  name        = "${var.project_name}-vpce-sg"
-  description = "Security group for VPC Endpoints"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = [aws_vpc.main.cidr_block]
-  }
-
-  tags = {
-    Name = "${var.project_name}-vpce-sg"
-  }
-}
-
-resource "aws_vpc_endpoint" "ssm" {
-  vpc_id            = aws_vpc.main.id
-  service_name      = "com.amazonaws.${var.aws_region}.ssm"
-  vpc_endpoint_type = "Interface"
-  subnet_ids        = [aws_subnet.public.id]
-
-  security_group_ids = [aws_security_group.vpc_endpoints.id]
-
-  private_dns_enabled = true
-}
-
-resource "aws_vpc_endpoint" "ssm_messages" {
-  vpc_id            = aws_vpc.main.id
-  service_name      = "com.amazonaws.${var.aws_region}.ssmmessages"
-  vpc_endpoint_type = "Interface"
-  subnet_ids        = [aws_subnet.public.id]
-
-  security_group_ids = [aws_security_group.vpc_endpoints.id]
-
-  private_dns_enabled = true
-}
+# SSM/SSMMessages VPC interface endpoints removed 2026-05-04 — verified
+# the SSM agent reaches AWS over the public route from the public-subnet
+# builder (which has a public IP + IGW + AmazonSSMManagedInstanceCore
+# policy on the role). Two interface endpoints were costing ~$22/mo
+# with no observable benefit to CI deploy SendCommand flow.
