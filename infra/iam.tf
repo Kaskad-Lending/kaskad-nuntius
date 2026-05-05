@@ -31,6 +31,15 @@ resource "aws_iam_role_policy" "prod" {
         Resource = ["${aws_s3_bucket.eif.arn}/*"]
       },
       {
+        # Enclave key sealing: read sealed blob on restart, write
+        # on first boot. Conditional put (If-None-Match) prevents
+        # concurrent first-boot races during instance refresh.
+        Sid    = "SealedKeyReadWrite"
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:PutObject", "s3:GetObjectVersion"]
+        Resource = ["${aws_s3_bucket.eif.arn}/sealed-key.bin"]
+      },
+      {
         Sid    = "CloudWatchLogs"
         Effect = "Allow"
         Action = [
