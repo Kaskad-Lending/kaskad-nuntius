@@ -1,11 +1,11 @@
 # ── Stage 1: Build the oracle binary (static, musl) ──────────────────
-# Digest-pinned (audit S-1). Tag-only references let a Docker Hub
-# registry-tag mutation (or upstream republish) silently drift PCR0.
+# Digest-pinned (audit S-1). Bumped to Rust 1.91.1 because aws-sigv4
+# 1.4.3 (used by sealing.rs for KMS / S3 SigV4) requires rustc 1.91.1.
 # Update by re-running:
 #   curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/rust:pull" | jq -r .token
 #   curl -sI -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.oci.image.index.v1+json" \
-#     https://registry-1.docker.io/v2/library/rust/manifests/1.90-alpine3.20 | grep -i docker-content-digest
-FROM rust:1.90-alpine3.20@sha256:ef86f37c2819ebd1ecb1dbd7efda70c693cb013232688aa136a5a2f1e3b65e55 AS builder
+#     https://registry-1.docker.io/v2/library/rust/manifests/1.91.1-alpine3.20 | grep -i docker-content-digest
+FROM rust:1.91.1-alpine3.20@sha256:1f1428db130caff5a0ae90d268a9dda7ba5fd6dad69792ab23483a31f11c1338 AS builder
 
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconf
 

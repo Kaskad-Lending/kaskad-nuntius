@@ -233,6 +233,35 @@ SVC
 
 systemctl enable --now kaskad-vsock-proxy.service
 
+# ─── Create AWS IAM credentials proxy (host → enclave VSOCK) ───
+# The enclave needs IAM credentials to SigV4-sign KMS / S3 calls when
+# sealing / unsealing its signing key (PR-2 of the key-persistence
+# rollout). It cannot reach IMDSv2 itself; this small Python service
+# accepts VSOCK connections and replies with the instance role's
+# current credentials. The host already has these via the instance
+# profile, so the proxy doesn't expand any privilege.
+aws s3 cp s3://${eif_bucket}/aws-creds-proxy.py /opt/kaskad/aws-creds-proxy.py
+chmod +x /opt/kaskad/aws-creds-proxy.py
+
+cat > /etc/systemd/system/kaskad-creds-proxy.service << 'SVC'
+[Unit]
+Description=Kaskad IAM creds proxy (IMDSv2 → enclave VSOCK)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/kaskad/aws-creds-proxy.py
+Restart=always
+RestartSec=5
+StandardOutput=file:/var/log/kaskad-creds-proxy.log
+StandardError=file:/var/log/kaskad-creds-proxy.log
+
+[Install]
+WantedBy=multi-user.target
+SVC
+
+systemctl enable --now kaskad-creds-proxy.service
+
 # ─── Create Pull API (inbound: internet → enclave) ───
 # Pulled from S3 (kept in repo at enclave/pull_api.py, uploaded by CI)
 # instead of being inlined into user-data — the inline version blew the

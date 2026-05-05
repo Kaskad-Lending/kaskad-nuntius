@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned to match Dockerfile (rust:1.91.1-alpine3.20). aws-sigv4 1.4.3
+# and the aws-credential-types pulled in by sealing.rs require >= 1.91.1.
+channel = "1.91.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
