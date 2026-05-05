@@ -64,12 +64,15 @@ resource "aws_autoscaling_group" "prod" {
   max_size            = 1
   vpc_zone_identifier = [aws_subnet.public.id]
 
-  # Spot instances
+  # On-demand for stability — pure spot kept reclaiming the instance
+  # every few days, and each reclaim regenerates the enclave key
+  # (no key sealing yet) which forces a full Mock-verifier + Oracle +
+  # aggregators redeploy. Overrides retained as a fallback pool in case
+  # AWS runs out of c5.xlarge on-demand capacity in our AZ.
   mixed_instances_policy {
     instances_distribution {
-      on_demand_base_capacity                  = 0
-      on_demand_percentage_above_base_capacity = 0
-      spot_allocation_strategy                 = "capacity-optimized"
+      on_demand_base_capacity                  = 1
+      on_demand_percentage_above_base_capacity = 100
     }
 
     launch_template {
