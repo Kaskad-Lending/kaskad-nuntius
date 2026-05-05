@@ -1,6 +1,9 @@
 mod aggregator;
+mod aws_creds;
 mod http_client;
 mod price_server;
+#[cfg(target_os = "linux")]
+mod sealing;
 mod signer;
 mod sources;
 mod types;
@@ -91,7 +94,11 @@ async fn main() -> Result<()> {
         #[cfg(target_os = "linux")]
         {
             info!("Running in ENCLAVE mode — Initializing EnclaveSigner via NSM");
-            Box::new(signer::EnclaveSigner::new().expect("Failed to init EnclaveSigner"))
+            Box::new(
+                signer::EnclaveSigner::new()
+                    .await
+                    .expect("Failed to init EnclaveSigner"),
+            )
         }
         #[cfg(not(target_os = "linux"))]
         {

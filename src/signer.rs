@@ -172,23 +172,36 @@ pub struct EnclaveSigner {
 
 #[cfg(target_os = "linux")]
 impl EnclaveSigner {
-    pub fn new() -> Result<Self> {
-        // Derive the private key from NSM-provided entropy. `thread_rng` ->
-        // guest-kernel CSPRNG, which in a Nitro guest is seeded in part from
-        // virtio-rng — a host-controlled channel. A malicious host could
-        // bias that pool and make the resulting private key predictable.
-        //
-        // NSM `GetRandom` is backed directly by the Nitro Security Module —
-        // the same hardware component that signs attestation documents. Any
-        // attacker who can weaken this entropy source can already forge
-        // attestations, so the entropy root is bound to the attestation
-        // root.
-        let mut seed = nsm_random_seed()?;
+    /// Build an `EnclaveSigner`. Behaviour depends on the
+    /// `KASKAD_KEY_SEALING` environment variable:
+    ///
+    /// - **Set** (any non-empty value): try to recover the signing
+    ///   key from KMS-sealed S3 storage so the same address survives
+    ///   spot reclaims / instance refreshes. On a first boot (no
+    ///   sealed blob), generate a fresh NSM-rooted key and seal it.
+    ///
+    /// - **Unset** (default): generate a fresh NSM-rooted key on
+    ///   every boot — the legacy behaviour. Each boot produces a
+    ///   different signer address; downstream contract chains must
+    ///   re-register or be redeployed.
+    ///
+    /// Async because the sealed path involves S3 + KMS HTTPS calls
+    /// through the enclave's VSOCK→TCP proxy.
+    pub async fn new() -> Result<Self> {
+        let mut seed: [u8; 32] = if std::env::var("KASKAD_KEY_SEALING").is_ok() {
+            Self::seed_from_sealing().await?
+        } else {
+            // Legacy ephemeral path — fresh NSM entropy every boot.
+            // `thread_rng` would route through the guest-kernel CSPRNG
+            // (seeded from virtio-rng, a host-controlled channel);
+            // NSM `GetRandom` is rooted directly in the Nitro Security
+            // Module that also signs attestation documents.
+            nsm_random_seed()?
+        };
+
         let signing_key = SigningKey::from_bytes((&seed[..]).into())
             .map_err(|e| eyre::eyre!("SigningKey::from_bytes: {}", e))?;
-        // Scrub the seed before leaving the stack — `SigningKey::from_bytes`
-        // copies the scalar into its own storage, so the buffer is no
-        // longer needed.
+        // Scrub the seed before it leaves the stack frame.
         use zeroize::Zeroize;
         seed.zeroize();
 
@@ -199,10 +212,37 @@ impl EnclaveSigner {
             address,
             pubkey_bytes,
         };
-        // Smoke-test the second NSM code path (attestation) early so the
-        // enclave fails fast on a broken NSM instead of at first request.
+        // Smoke-test the second NSM code path (attestation) early so
+        // the enclave fails fast on a broken NSM instead of at first
+        // request.
         me.fresh_attestation_doc()?;
         Ok(me)
+    }
+
+    /// Sealed-key code path. Try `try_unseal` first; on `NoSealedBlob`
+    /// (first boot) generate a fresh NSM seed and seal it via KMS so
+    /// the next boot can recover it.
+    async fn seed_from_sealing() -> Result<[u8; 32]> {
+        use crate::sealing::{seal_and_upload, try_unseal, LoadOutcome};
+        match try_unseal().await {
+            Ok(LoadOutcome::UnsealedExisting(k)) => {
+                tracing::info!("Recovered signing key via KMS attestation unseal");
+                Ok(k)
+            }
+            Ok(LoadOutcome::NoSealedBlob) => {
+                tracing::info!("No sealed blob in S3 — generating fresh NSM-rooted key + sealing");
+                let seed = nsm_random_seed()?;
+                seal_and_upload(&seed).await?;
+                Ok(seed)
+            }
+            Err(e) => {
+                // A failure here is fail-closed on purpose: if KMS /
+                // S3 are unreachable or the policy doesn't accept our
+                // PCR0, we MUST NOT silently fall back to ephemeral
+                // mode — that would defeat the whole point.
+                Err(eyre::eyre!("sealed-key load failed: {}", e))
+            }
+        }
     }
 
     /// Generate a fresh attestation document via NSM. AWS Nitro leaf certs

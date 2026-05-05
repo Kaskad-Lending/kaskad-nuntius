@@ -61,6 +61,12 @@ jobs:
         run: |
           aws s3 cp enclave/pull_api.py s3://${{ env.EIF_BUCKET }}/pull_api.py
 
+      - name: Upload aws-creds-proxy.py to S3 bootstrap location
+        # Host-side IMDSv2 → enclave VSOCK relay used by KMS sealing
+        # (enclave/aws_creds.rs talks to this proxy on VSOCK port 5002).
+        run: |
+          aws s3 cp enclave/aws-creds-proxy.py s3://${{ env.EIF_BUCKET }}/aws-creds-proxy.py
+
       - name: Wait for SSM agent
         run: |
           echo "Waiting for SSM agent to be online..."

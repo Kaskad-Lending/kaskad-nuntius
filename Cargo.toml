@@ -16,6 +16,7 @@ alloy-primitives = "1"
 alloy-sol-types = "1"
 k256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = "0.10"
+sha2 = "0.10"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -44,10 +45,31 @@ rand = "0.8"
 # Scrub private key seed material after use
 zeroize = "1"
 
+# Base64 — used by KMS sealing for AWS API request/response payloads
+base64 = "0.22"
+
+# RSA-2048 ephemeral keypair for KMS attestation Recipient mode
+rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
+
+# SigV4 signer + Identity wrapper for KMS / S3 calls inside the
+# enclave. We use just the signer (not the full AWS SDK), so HTTP
+# transport stays on our existing `reqwest` client routed through
+# the VSOCK→TCP CONNECT proxy.
+aws-sigv4 = "1"
+aws-credential-types = "1"
+aws-smithy-runtime-api = "1"
+
+# Used by sealing.rs to construct AWS API requests for SigV4 signing
+http = "1"
+
 # VSOCK support (Linux only, for Nitro Enclave)
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 aws-nitro-enclaves-nsm-api = "0.4"
+# `vsock` crate gives us a `VsockStream` API for talking to the host's
+# IAM-credential proxy on AF_VSOCK. cfg-gated because the kernel
+# constants are Linux-only.
+vsock = "0.5"
 
 
 [dev-dependencies]
