@@ -19,6 +19,7 @@ env:
   PROD_ASG_NAME: kaskad-oracle-prod-asg
   EIF_BUCKET: kaskad-oracle-eif
   KMS_RELEASE_ALIAS: alias/kaskad-oracle-release
+  KMS_SEALING_ALIAS: alias/kaskad-oracle-sealing
 
 jobs:
   deploy:
@@ -145,9 +146,48 @@ jobs:
         run: |
           aws ec2 stop-instances --instance-ids ${{ steps.builder.outputs.instance_id }}
 
+      - name: Append new PCR0 to sealing KMS policy
+        # kms.tf has lifecycle.ignore_changes = [policy]; CI is the source
+        # of truth for the PCR0 allowlist. Drops the all-zero placeholder
+        # (terraform's deny-all default) and keeps the last 3 real PCR0s
+        # for rollback safety. Idempotent on rebuild of the same EIF.
+        run: |
+          set -euo pipefail
+          PLACEHOLDER="0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"
+
+          aws s3 cp s3://${{ env.EIF_BUCKET }}/pcr0.json /tmp/pcr0.json
+          NEW_PCR0=$(jq -r .PCR0 /tmp/pcr0.json)
+          if ! [[ "$NEW_PCR0" =~ ^[0-9a-f]{96}$ ]]; then
+            echo "FATAL: PCR0 not 96-char lowercase hex: $NEW_PCR0" >&2
+            exit 1
+          fi
+          echo "New PCR0: $NEW_PCR0"
+
+          aws kms get-key-policy \
+            --key-id ${{ env.KMS_SEALING_ALIAS }} \
+            --policy-name default \
+            --query Policy --output text > /tmp/policy.json
+
+          jq --arg new "$NEW_PCR0" --arg placeholder "$PLACEHOLDER" '
+            .Statement |= map(
+              if .Sid == "ProdDecryptWithAttestation" then
+                .Condition["ForAnyValue:StringEqualsIgnoreCase"]["kms:RecipientAttestation:PCR0"] |=
+                  ([$new] + map(select(. != $placeholder and . != $new)))[:3]
+              else . end
+            )
+          ' /tmp/policy.json > /tmp/policy-updated.json
+
+          aws kms put-key-policy \
+            --key-id ${{ env.KMS_SEALING_ALIAS }} \
+            --policy-name default \
+            --policy file:///tmp/policy-updated.json
+
+          echo "Updated PCR0 allowlist:"
+          jq '.Statement[] | select(.Sid == "ProdDecryptWithAttestation") | .Condition' /tmp/policy-updated.json
+
       - name: Trigger production refresh
         run: |
           aws autoscaling start-instance-refresh \
             --auto-scaling-group-name ${{ env.PROD_ASG_NAME }} \
-            --preferences '{"MinHealthyPercentage": 0}' 
+            --preferences '{"MinHealthyPercentage": 0}'
           echo "Production ASG refresh started."

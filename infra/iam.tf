@@ -240,6 +240,16 @@ resource "aws_iam_role_policy" "github_ci" {
             "autoscaling:ResourceTag/Name" = "${var.project_name}-prod-asg"
           }
         }
+      },
+      {
+        # CI appends each new EIF's PCR0 to the sealing key policy.
+        Sid    = "UpdateSealingKmsPolicy"
+        Effect = "Allow"
+        Action = [
+          "kms:GetKeyPolicy",
+          "kms:PutKeyPolicy"
+        ]
+        Resource = [aws_kms_key.sealing.arn]
       }
     ]
   })
