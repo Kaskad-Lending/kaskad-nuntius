@@ -30,9 +30,12 @@ data "aws_ami" "amazon_linux_2023" {
   most_recent = true
   owners      = ["amazon"]
 
+  # `al2023-ami-2023.*` matches the standard AL2023 image and excludes
+  # `al2023-ami-minimal-2023.*` — minimal ships without amazon-ssm-agent
+  # which breaks the CI SendCommand build flow on cold builders.
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["al2023-ami-2023.*-x86_64"]
   }
 
   filter {
