@@ -33,6 +33,9 @@ COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/kaskad-oracl
 
 ENV RUST_LOG=info
 ENV ENCLAVE_MODE=1
+# Activates KMS-attestation key sealing (signer.rs branches on this).
+# Unset → legacy ephemeral key per boot (forces contract redeploy).
+ENV KASKAD_KEY_SEALING=1
 
 # Nitro Enclave boots with lo interface down. Must bring it up
 # before the oracle can bind to 127.0.0.1 (VSOCK→TCP bridge).
