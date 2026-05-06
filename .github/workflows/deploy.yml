@@ -69,9 +69,12 @@ jobs:
           aws s3 cp enclave/aws-creds-proxy.py s3://${{ env.EIF_BUCKET }}/aws-creds-proxy.py
 
       - name: Wait for SSM agent
+        # Builder boots cold after long-stopped periods (24h+); SSM
+        # agent registration can take up to ~10 min on first start.
+        # 60×10s = 10 min cap.
         run: |
           echo "Waiting for SSM agent to be online..."
-          for i in {1..30}; do
+          for i in {1..60}; do
             STATUS=$(aws ssm describe-instance-information \
               --filters "Key=InstanceIds,Values=${{ steps.builder.outputs.instance_id }}" \
               --query "InstanceInformationList[0].PingStatus" --output text)
@@ -79,7 +82,7 @@ jobs:
               echo "SSM agent is online!"
               exit 0
             fi
-            echo "Waiting... ($i/30)"
+            echo "Waiting... ($i/60)"
             sleep 10
           done
           echo "SSM agent timeout"
