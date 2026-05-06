@@ -154,6 +154,8 @@ jobs:
         # of truth for the PCR0 allowlist. Drops the all-zero placeholder
         # (terraform's deny-all default) and keeps the last 3 real PCR0s
         # for rollback safety. Idempotent on rebuild of the same EIF.
+        # If the decrypt statement is missing (e.g. terraform with
+        # ignore_changes never wrote it), inject a fresh one.
         run: |
           set -euo pipefail
           PLACEHOLDER="0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"
@@ -166,22 +168,43 @@ jobs:
           fi
           echo "New PCR0: $NEW_PCR0"
 
+          # KMS Get/PutKeyPolicy do not accept aliases — resolve to ARN.
+          KEY_ARN=$(aws kms describe-key --key-id ${{ env.KMS_SEALING_ALIAS }} --query 'KeyMetadata.Arn' --output text)
+          PROD_ROLE_ARN=$(aws iam get-role --role-name kaskad-oracle-prod --query 'Role.Arn' --output text)
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
           aws kms get-key-policy \
-            --key-id ${{ env.KMS_SEALING_ALIAS }} \
+            --key-id "$KEY_ARN" \
             --policy-name default \
             --query Policy --output text > /tmp/policy.json
 
-          jq --arg new "$NEW_PCR0" --arg placeholder "$PLACEHOLDER" '
-            .Statement |= map(
-              if .Sid == "ProdDecryptWithAttestation" then
-                .Condition["ForAnyValue:StringEqualsIgnoreCase"]["kms:RecipientAttestation:PCR0"] |=
-                  ([$new] + map(select(. != $placeholder and . != $new)))[:3]
-              else . end
-            )
+          # Ensure the decrypt statement exists, then rotate the PCR0 list.
+          jq --arg new "$NEW_PCR0" \
+             --arg placeholder "$PLACEHOLDER" \
+             --arg prod_role "$PROD_ROLE_ARN" '
+            def decrypt_stmt(role; pcr0):
+              { Sid: "ProdDecryptWithAttestation",
+                Effect: "Allow",
+                Principal: { AWS: role },
+                Action: "kms:Decrypt",
+                Resource: "*",
+                Condition: { "ForAnyValue:StringEqualsIgnoreCase":
+                              { "kms:RecipientAttestation:PCR0": [pcr0] } } };
+
+            if any(.Statement[]; .Sid == "ProdDecryptWithAttestation") then
+              .Statement |= map(
+                if .Sid == "ProdDecryptWithAttestation" then
+                  .Condition["ForAnyValue:StringEqualsIgnoreCase"]["kms:RecipientAttestation:PCR0"] |=
+                    ([$new] + map(select(. != $placeholder and . != $new)))[:3]
+                else . end
+              )
+            else
+              .Statement += [ decrypt_stmt($prod_role; $new) ]
+            end
           ' /tmp/policy.json > /tmp/policy-updated.json
 
           aws kms put-key-policy \
-            --key-id ${{ env.KMS_SEALING_ALIAS }} \
+            --key-id "$KEY_ARN" \
             --policy-name default \
             --policy file:///tmp/policy-updated.json
 
