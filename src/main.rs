@@ -85,11 +85,50 @@ async fn main() -> Result<()> {
     // Load the bundled asset config (compiled into the enclave EIF → PCR0).
     let config = load_assets().expect("failed to load bundled config/assets.json");
 
+    let enclave_mode = std::env::var("ENCLAVE_MODE").is_ok();
+
+    // Bring up VSOCK→TCP bridge BEFORE signer init: the sealed-key path
+    // (signer::EnclaveSigner::new) reaches S3/KMS over `127.0.0.1:5000`,
+    // and reqwest will refuse with "error sending request" if the
+    // listener isn't bound yet.
+    if enclave_mode {
+        info!("Running in ENCLAVE mode — starting VSOCK→TCP bridge on 127.0.0.1:5000");
+        #[cfg(target_os = "linux")]
+        {
+            let bridge_listener = match tokio::net::TcpListener::bind("127.0.0.1:5000").await {
+                Ok(l) => {
+                    info!("VSOCK→TCP bridge bound to 127.0.0.1:5000");
+                    l
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to bind VSOCK→TCP bridge on 127.0.0.1:5000");
+                    return Err(e.into());
+                }
+            };
+            tokio::spawn(async move {
+                loop {
+                    match bridge_listener.accept().await {
+                        Ok((tcp_stream, _)) => {
+                            tokio::spawn(async move {
+                                if let Err(e) = bridge_connection(tcp_stream, 3, 5000).await {
+                                    warn!(error = %e, "VSOCK bridge connection failed");
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "VSOCK bridge accept failed");
+                        }
+                    }
+                }
+            });
+        }
+    } else {
+        info!("Running in HOST mode — HTTP via direct connection");
+    }
+
     // Init signer. The enclave key only signs price updates; the per-asset
     // quorum is committed separately by the admin via
     // KaskadPriceOracle.registerAssets (no enclave-side bundle signature).
-    let enclave_mode = std::env::var("ENCLAVE_MODE").is_ok();
-
     let signer: Box<dyn OracleSigner> = if enclave_mode {
         #[cfg(target_os = "linux")]
         {
@@ -170,43 +209,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Start VSOCK→TCP bridge for outbound HTTP proxy (enclave mode only)
-    let enclave_mode = std::env::var("ENCLAVE_MODE").is_ok();
-    if enclave_mode {
-        info!("Running in ENCLAVE mode — starting VSOCK→TCP bridge on 127.0.0.1:5000");
-        #[cfg(target_os = "linux")]
-        {
-            // Bind TCP listener synchronously so we know it's ready before fetching prices
-            let bridge_listener = match tokio::net::TcpListener::bind("127.0.0.1:5000").await {
-                Ok(l) => {
-                    info!("VSOCK→TCP bridge bound to 127.0.0.1:5000");
-                    l
-                }
-                Err(e) => {
-                    error!(error = %e, "Failed to bind VSOCK→TCP bridge on 127.0.0.1:5000");
-                    return Err(e.into());
-                }
-            };
-            tokio::spawn(async move {
-                loop {
-                    match bridge_listener.accept().await {
-                        Ok((tcp_stream, _)) => {
-                            tokio::spawn(async move {
-                                if let Err(e) = bridge_connection(tcp_stream, 3, 5000).await {
-                                    warn!(error = %e, "VSOCK bridge connection failed");
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "VSOCK bridge accept failed");
-                        }
-                    }
-                }
-            });
-        }
-    } else {
-        info!("Running in HOST mode — HTTP via direct connection");
-    }
     let client = http_client::HttpClient::new(enclave_mode, config.exchange_hostnames.clone());
 
     // (config loaded above — used here for source registration.)
