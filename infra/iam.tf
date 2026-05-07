@@ -40,6 +40,18 @@ resource "aws_iam_role_policy" "prod" {
         Resource = ["${aws_s3_bucket.eif.arn}/sealed-key.bin"]
       },
       {
+        # ListBucket so S3 returns 404 (not 403) for a missing
+        # sealed-key.bin on first boot; sealing.rs branches on 404
+        # to enter the generate+seal path.
+        Sid      = "SealedKeyListBucket"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = [aws_s3_bucket.eif.arn]
+        Condition = {
+          StringLike = { "s3:prefix" = ["sealed-key.bin"] }
+        }
+      },
+      {
         Sid    = "CloudWatchLogs"
         Effect = "Allow"
         Action = [
