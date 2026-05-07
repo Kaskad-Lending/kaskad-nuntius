@@ -243,13 +243,23 @@ resource "aws_iam_role_policy" "github_ci" {
       },
       {
         # CI appends each new EIF's PCR0 to the sealing key policy.
+        # DescribeKey resolves the alias to ARN before Get/PutKeyPolicy.
         Sid    = "UpdateSealingKmsPolicy"
         Effect = "Allow"
         Action = [
           "kms:GetKeyPolicy",
-          "kms:PutKeyPolicy"
+          "kms:PutKeyPolicy",
+          "kms:DescribeKey"
         ]
         Resource = [aws_kms_key.sealing.arn]
+      },
+      {
+        # CI reads the prod role ARN so it can synthesise a fresh
+        # decrypt statement when the policy is missing one.
+        Sid      = "ReadProdRoleArn"
+        Effect   = "Allow"
+        Action   = ["iam:GetRole"]
+        Resource = [aws_iam_role.prod.arn]
       }
     ]
   })
