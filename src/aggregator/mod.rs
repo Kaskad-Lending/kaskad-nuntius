@@ -73,7 +73,7 @@ pub fn median_server_time(prices: &[PricePoint]) -> Option<u64> {
     let mut times: Vec<u64> = prices.iter().map(|p| p.server_time).collect();
     times.sort_unstable();
     let n = times.len();
-    Some(if n % 2 == 0 {
+    Some(if n.is_multiple_of(2) {
         // Use integer average — server_time has second resolution anyway.
         (times[n / 2 - 1] + times[n / 2]) / 2
     } else {
@@ -101,7 +101,7 @@ pub fn reject_time_outliers(prices: &mut Vec<PricePoint>) -> Option<u64> {
 fn median_sorted(values: &mut [f64]) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = values.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (values[n / 2 - 1] + values[n / 2]) / 2.0
     } else {
         values[n / 2]
@@ -297,7 +297,7 @@ mod tests {
     fn test_weighted_median_even() {
         let prices = make_prices(&[100.0, 102.0, 101.0, 103.0]);
         let (median, _mode) = weighted_median(&prices).unwrap();
-        assert!(median >= 101.0 && median <= 102.0);
+        assert!((101.0..=102.0).contains(&median));
     }
 
     #[test]

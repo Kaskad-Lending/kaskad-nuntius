@@ -51,6 +51,17 @@ base64 = "0.22"
 # RSA-2048 ephemeral keypair for KMS attestation Recipient mode
 rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
 
+# CMS EnvelopedData parsing — KMS returns the Recipient-mode plaintext
+# as a CMS `EnvelopedData` (RFC 5652) in `CiphertextForRecipient`. AWS
+# KMS emits it as BER with indefinite-length segments, which strict-DER
+# parsers (RustCrypto `der`) reject; `bcder` is a BER-native decoder
+# (NLnetLabs, production-grade in RPKI) that handles indefinite length.
+bcder = "0.7.6"
+
+# AES-256-CBC: the CMS content-encryption layer wrapping the sealed key.
+aes = "0.8"
+cbc = { version = "0.1", features = ["block-padding"] }
+
 # SigV4 signer + Identity wrapper for KMS / S3 calls inside the
 # enclave. We use just the signer (not the full AWS SDK), so HTTP
 # transport stays on our existing `reqwest` client routed through
