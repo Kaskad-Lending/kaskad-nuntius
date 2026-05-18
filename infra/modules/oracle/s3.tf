@@ -3,7 +3,7 @@
 resource "aws_s3_bucket" "eif" {
   bucket = var.eif_bucket_name
 
-  tags = { Name = "${var.project_name}-eif" }
+  tags = { Name = "${var.name_prefix}-eif" }
 }
 
 resource "aws_s3_bucket_versioning" "eif" {

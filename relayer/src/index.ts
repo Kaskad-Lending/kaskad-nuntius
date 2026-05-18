@@ -17,7 +17,7 @@ async function main() {
   const config = loadConfig();
 
   console.log("[Relayer] Starting TEE Oracle Relayer...");
-  console.log(`[Relayer] Oracle API: ${config.oracleApiUrl}`);
+  console.log(`[Relayer] Oracle APIs: ${config.oracleApiUrls.join(", ")}`);
   console.log(`[Relayer] RPC:        ${config.rpcUrl}`);
   console.log(`[Relayer] Contract:   ${config.oracleAddress}`);
   console.log(
@@ -61,7 +61,7 @@ async function main() {
 
   // Components
   const txQueue = new TxQueue(wallet);
-  const poller = new PricePoller(config.oracleApiUrl);
+  const poller = new PricePoller(config.oracleApiUrls);
   const relayer = new Relayer(oracle, txQueue, poller);
 
   // Health check

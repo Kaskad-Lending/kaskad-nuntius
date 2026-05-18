@@ -5,7 +5,7 @@
 # ─── Prod EC2 Role ────────────────────────────────────────────
 
 resource "aws_iam_role" "prod" {
-  name = "${var.project_name}-prod"
+  name = "${var.name_prefix}-prod"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -18,7 +18,7 @@ resource "aws_iam_role" "prod" {
 }
 
 resource "aws_iam_role_policy" "prod" {
-  name = "${var.project_name}-prod-policy"
+  name = "${var.name_prefix}-prod-policy"
   role = aws_iam_role.prod.id
 
   policy = jsonencode({
@@ -87,14 +87,14 @@ resource "aws_iam_role_policy" "prod" {
 }
 
 resource "aws_iam_instance_profile" "prod" {
-  name = "${var.project_name}-prod"
+  name = "${var.name_prefix}-prod"
   role = aws_iam_role.prod.name
 }
 
 # ─── Builder EC2 Role ─────────────────────────────────────────
 
 resource "aws_iam_role" "builder" {
-  name = "${var.project_name}-builder"
+  name = "${var.name_prefix}-builder"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -112,7 +112,7 @@ resource "aws_iam_role_policy_attachment" "builder_ssm" {
 }
 
 resource "aws_iam_role_policy" "builder" {
-  name = "${var.project_name}-builder-policy"
+  name = "${var.name_prefix}-builder-policy"
   role = aws_iam_role.builder.id
 
   policy = jsonencode({
@@ -139,7 +139,7 @@ resource "aws_iam_role_policy" "builder" {
         Resource = ["*"]
         Condition = {
           StringEquals = {
-            "ec2:ResourceTag/Name" = "${var.project_name}-builder"
+            "ec2:ResourceTag/Name" = "${var.name_prefix}-builder"
           }
         }
       },
@@ -154,27 +154,24 @@ resource "aws_iam_role_policy" "builder" {
 }
 
 resource "aws_iam_instance_profile" "builder" {
-  name = "${var.project_name}-builder"
+  name = "${var.name_prefix}-builder"
   role = aws_iam_role.builder.name
 }
 
 # ─── GitHub Actions OIDC Role ─────────────────────────────────
-
-resource "aws_iam_openid_connect_provider" "github" {
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = ["ffffffffffffffffffffffffffffffffffffffff"]
-}
+#
+# The OIDC provider is account-scoped (one per AWS account), so it
+# lives in the root module and its ARN is passed in here.
 
 resource "aws_iam_role" "github_ci" {
-  name = "${var.project_name}-github-ci"
+  name = "${var.name_prefix}-github-ci"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Effect = "Allow"
       Principal = {
-        Federated = aws_iam_openid_connect_provider.github.arn
+        Federated = var.github_oidc_provider_arn
       }
       Action = "sts:AssumeRoleWithWebIdentity"
       Condition = {
@@ -190,7 +187,7 @@ resource "aws_iam_role" "github_ci" {
 }
 
 resource "aws_iam_role_policy" "github_ci" {
-  name = "${var.project_name}-github-ci-policy"
+  name = "${var.name_prefix}-github-ci-policy"
   role = aws_iam_role.github_ci.id
 
   policy = jsonencode({
@@ -207,7 +204,7 @@ resource "aws_iam_role_policy" "github_ci" {
         Resource = ["*"]
         Condition = {
           StringEquals = {
-            "ec2:ResourceTag/Name" = "${var.project_name}-builder"
+            "ec2:ResourceTag/Name" = "${var.name_prefix}-builder"
           }
         }
       },
@@ -249,7 +246,7 @@ resource "aws_iam_role_policy" "github_ci" {
         Resource = ["*"]
         Condition = {
           StringEquals = {
-            "autoscaling:ResourceTag/Name" = "${var.project_name}-prod-asg"
+            "autoscaling:ResourceTag/Name" = "${var.name_prefix}-prod-asg"
           }
         }
       },

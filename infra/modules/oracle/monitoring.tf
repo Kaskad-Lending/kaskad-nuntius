@@ -4,20 +4,20 @@ resource "aws_cloudwatch_log_group" "oracle" {
   name              = "/kaskad/oracle"
   retention_in_days = 30
 
-  tags = { Name = "${var.project_name}-logs" }
+  tags = { Name = "${var.name_prefix}-logs" }
 }
 
 resource "aws_cloudwatch_log_group" "builder" {
   name              = "/kaskad/builder"
   retention_in_days = 7
 
-  tags = { Name = "${var.project_name}-builder-logs" }
+  tags = { Name = "${var.name_prefix}-builder-logs" }
 }
 
 # ─── CloudWatch Alarms ────────────────────────────────────────
 
 resource "aws_cloudwatch_metric_alarm" "no_instances" {
-  alarm_name          = "${var.project_name}-no-running-instances"
+  alarm_name          = "${var.name_prefix}-no-running-instances"
   comparison_operator = "LessThanThreshold"
   evaluation_periods  = 2
   metric_name         = "GroupInServiceInstances"

@@ -1,12 +1,9 @@
-# ─── Required: set these before terraform apply ──────────────
-
-rpc_url         = "https://your-rpc-endpoint.com"
-oracle_contract = "0x0000000000000000000000000000000000000000"
-chain_id        = 1
+# Root variables for the tee-oracle Terraform deployment.
+#
+# Both variables below have sane defaults — copy this file to
+# terraform.tfvars only if you need to override them.
 
 # ─── Optional: override defaults ─────────────────────────────
 
-# aws_region       = "us-east-1"
-# instance_type    = "c5.xlarge"
-# eif_bucket_name  = "kaskad-oracle-eif"
-# environment      = "prod"
+# github_org  = "Kaskad-Lending"
+# github_repo = "kaskad-nuntius"

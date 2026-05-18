@@ -1,57 +1,69 @@
 /**
  * PollLoop — fetches signed prices from the TEE oracle pull API.
  *
- * The pull API uses a length-prefixed JSON protocol over TCP/VSOCK.
- * Behind the ALB we talk plain HTTP (the ALB proxies to the enclave's
- * price_server via the host-side pull_api.py bridge).
- *
- * If the ALB exposes a REST wrapper, we use that. Otherwise we fall
- * back to raw TCP with the length-prefix protocol.
+ * Polls every configured regional endpoint and merges the results.
+ * A region that errors contributes nothing; the others still return,
+ * so a single-region outage never interrupts relaying. The relayer's
+ * upsert keeps the freshest valid signature per asset.
  */
 
 import { SignedPriceUpdate, GetPricesResponse } from "./types.js";
 
 export class PricePoller {
-  private apiUrl: string;
+  private apiUrls: string[];
 
-  constructor(apiUrl: string) {
-    // Normalize: strip trailing slash
-    this.apiUrl = apiUrl.replace(/\/+$/, "");
+  constructor(apiUrls: string[]) {
+    // Normalize: strip trailing slashes.
+    this.apiUrls = apiUrls.map((u) => u.replace(/\/+$/, ""));
   }
 
   /**
-   * Fetch all signed prices from the oracle pull API.
-   * Returns an empty array on transient errors (logged, not thrown).
+   * Fetch and merge all signed prices from every endpoint.
+   * Returns an empty array if every endpoint fails (logged, not thrown).
    */
   async fetchPrices(): Promise<SignedPriceUpdate[]> {
+    const perEndpoint = await Promise.all(
+      this.apiUrls.map((url) => this.fetchFrom(url)),
+    );
+    return perEndpoint.flat();
+  }
+
+  private async fetchFrom(apiUrl: string): Promise<SignedPriceUpdate[]> {
     try {
-      const resp = await fetch(`${this.apiUrl}/prices`, {
+      const resp = await fetch(`${apiUrl}/prices`, {
         signal: AbortSignal.timeout(10_000),
       });
 
       if (!resp.ok) {
-        console.warn(`[Poll] HTTP ${resp.status} from oracle API`);
+        console.warn(`[Poll] HTTP ${resp.status} from ${apiUrl}`);
         return [];
       }
 
       const body: GetPricesResponse = await resp.json();
 
       if (body.error) {
-        console.warn(`[Poll] API error: ${body.error}`);
+        console.warn(`[Poll] API error from ${apiUrl}: ${body.error}`);
         return [];
       }
 
       return body.prices ?? [];
     } catch (err: any) {
-      console.warn(`[Poll] Fetch failed: ${err.message}`);
+      console.warn(`[Poll] Fetch failed from ${apiUrl}: ${err.message}`);
       return [];
     }
   }
 
-  /** Health check. */
+  /** Healthy if at least one endpoint responds. */
   async healthy(): Promise<boolean> {
+    const checks = await Promise.all(
+      this.apiUrls.map((url) => this.healthyOne(url)),
+    );
+    return checks.some((ok) => ok);
+  }
+
+  private async healthyOne(apiUrl: string): Promise<boolean> {
     try {
-      const resp = await fetch(`${this.apiUrl}/health`, {
+      const resp = await fetch(`${apiUrl}/health`, {
         signal: AbortSignal.timeout(5_000),
       });
       return resp.ok;

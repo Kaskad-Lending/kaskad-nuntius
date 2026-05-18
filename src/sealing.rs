@@ -40,12 +40,7 @@ use sha2::Sha256;
 
 use crate::aws_creds::{fetch_creds_via_vsock, IamCredentials};
 
-const AWS_REGION: &str = "us-east-1";
-const S3_BUCKET: &str = "kaskad-oracle-eif";
 const S3_KEY: &str = "sealed-key.bin";
-const KMS_KEY_ALIAS: &str = "alias/kaskad-oracle-sealing";
-
-const KMS_HOST: &str = "kms.us-east-1.amazonaws.com";
 
 pub enum LoadOutcome {
     /// Successfully unsealed an existing key from S3.
@@ -60,7 +55,7 @@ pub async fn try_unseal() -> Result<LoadOutcome> {
     let creds = fetch_creds_via_vsock()?;
     let http = build_proxied_client()?;
 
-    let blob = match s3_get(&http, &creds, S3_BUCKET, S3_KEY).await? {
+    let blob = match s3_get(&http, &creds, S3_KEY).await? {
         Some(b) => b,
         None => return Ok(LoadOutcome::NoSealedBlob),
     };
@@ -116,7 +111,7 @@ pub async fn seal_and_upload(plaintext_key: &[u8; 32]) -> Result<()> {
 
     // KMS Encrypt
     let body = serde_json::json!({
-        "KeyId": KMS_KEY_ALIAS,
+        "KeyId": creds.kms_sealing_alias,
         "Plaintext": base64::engine::general_purpose::STANDARD.encode(plaintext_key),
     })
     .to_string();
@@ -128,7 +123,7 @@ pub async fn seal_and_upload(plaintext_key: &[u8; 32]) -> Result<()> {
         .ok_or_else(|| eyre!("kms:Encrypt: no CiphertextBlob"))?;
     let ciphertext = base64::engine::general_purpose::STANDARD.decode(cipher_b64)?;
 
-    s3_put_if_not_exists(&http, &creds, S3_BUCKET, S3_KEY, &ciphertext).await?;
+    s3_put_if_not_exists(&http, &creds, S3_KEY, &ciphertext).await?;
     Ok(())
 }
 
@@ -151,11 +146,12 @@ async fn kms_post(
     target: &str,
     body: &[u8],
 ) -> Result<Vec<u8>> {
-    let url = format!("https://{}/", KMS_HOST);
+    let host = format!("kms.{}.amazonaws.com", creds.region);
+    let url = format!("https://{}/", host);
     let mut req = HttpRequest::builder()
         .method("POST")
         .uri(&url)
-        .header("host", KMS_HOST)
+        .header("host", &host)
         .header("content-type", "application/x-amz-json-1.1")
         .header("x-amz-target", target)
         .body(body.to_vec())
@@ -182,10 +178,9 @@ async fn kms_post(
 async fn s3_get(
     http: &reqwest::Client,
     creds: &IamCredentials,
-    bucket: &str,
     key: &str,
 ) -> Result<Option<Vec<u8>>> {
-    let host = format!("{}.s3.{}.amazonaws.com", bucket, AWS_REGION);
+    let host = format!("{}.s3.{}.amazonaws.com", creds.eif_bucket, creds.region);
     let url = format!("https://{}/{}", host, key);
     let mut req = HttpRequest::builder()
         .method("GET")
@@ -213,11 +208,10 @@ async fn s3_get(
 async fn s3_put_if_not_exists(
     http: &reqwest::Client,
     creds: &IamCredentials,
-    bucket: &str,
     key: &str,
     body: &[u8],
 ) -> Result<()> {
-    let host = format!("{}.s3.{}.amazonaws.com", bucket, AWS_REGION);
+    let host = format!("{}.s3.{}.amazonaws.com", creds.eif_bucket, creds.region);
     let url = format!("https://{}/{}", host, key);
     let mut req = HttpRequest::builder()
         .method("PUT")
@@ -271,7 +265,7 @@ fn sign_request(
 
     let params: aws_sigv4::http_request::SigningParams = SigningParams::builder()
         .identity(&identity)
-        .region(AWS_REGION)
+        .region(creds.region.as_str())
         .name(service)
         .time(SystemTime::now())
         .settings(settings)

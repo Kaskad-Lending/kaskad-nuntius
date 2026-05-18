@@ -8,6 +8,12 @@ and writes them back as a length-prefixed JSON blob. The enclave
 uses these credentials to SigV4-sign KMS / S3 calls when sealing /
 unsealing its signing key.
 
+The reply also carries this host's region / EIF bucket / KMS sealing
+alias so the enclave is region-agnostic — the same EIF runs in any
+region and learns its endpoints at runtime. Values come from env
+(set by the systemd unit in user-data); defaults reproduce the
+historical us-east-1 stack so an old user-data still serves correctly.
+
 The host already has these credentials by virtue of the instance
 profile, so this proxy doesn't grant the enclave anything extra
 that the host doesn't already have. The enclave's KMS key policy
@@ -20,11 +26,14 @@ Wire format (per accepted connection):
     enclave → host: 1 byte (any value, ignored — connection ping)
     host → enclave: [4 bytes BE length][JSON body]
 
-JSON body matches IMDSv2 schema:
+JSON body (IMDSv2 schema + host config):
     {"AccessKeyId":"...", "SecretAccessKey":"...",
-     "Token":"...", "Expiration":"..."}
+     "Token":"...", "Expiration":"...",
+     "Region":"us-east-1", "EifBucket":"kaskad-oracle-eif",
+     "KmsSealingAlias":"alias/kaskad-oracle-sealing"}
 """
 import json
+import os
 import socket
 import struct
 import sys
@@ -35,6 +44,18 @@ AF_VSOCK = 40
 LISTEN_PORT = 5002
 IMDS_HOST = "http://169.254.169.254"
 TOKEN_TTL = 21600  # 6h
+
+
+def host_config():
+    """Region / EIF bucket / KMS sealing alias for this deployment.
+    Defaults reproduce the historical us-east-1 stack."""
+    return {
+        "Region": os.environ.get("KASKAD_AWS_REGION", "us-east-1"),
+        "EifBucket": os.environ.get("KASKAD_EIF_BUCKET", "kaskad-oracle-eif"),
+        "KmsSealingAlias": os.environ.get(
+            "KASKAD_KMS_SEALING_ALIAS", "alias/kaskad-oracle-sealing"
+        ),
+    }
 
 
 def fetch_creds():
@@ -63,10 +84,12 @@ def fetch_creds():
 
 
 def serve():
+    cfg = host_config()
     s = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
     s.bind((-1, LISTEN_PORT))   # -1 = VMADDR_CID_ANY
     s.listen(8)
-    print(f"[creds-proxy] listening on VSOCK port {LISTEN_PORT}", flush=True)
+    print(f"[creds-proxy] listening on VSOCK port {LISTEN_PORT}; "
+          f"region={cfg['Region']} bucket={cfg['EifBucket']}", flush=True)
     while True:
         try:
             conn, peer = s.accept()
@@ -78,7 +101,7 @@ def serve():
             # Drain the 1-byte ping so the enclave knows it's connected.
             conn.recv(1)
             creds = fetch_creds()
-            body = json.dumps(creds).encode()
+            body = json.dumps({**creds, **cfg}).encode()
             conn.sendall(struct.pack(">I", len(body)))
             conn.sendall(body)
         except Exception as e:
