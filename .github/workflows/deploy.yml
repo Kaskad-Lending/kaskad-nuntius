@@ -1,25 +1,26 @@
 name: Production Deploy
 
 on:
-  # Manual-only. Pushes to `main` no longer trigger a production deploy —
-  # operator opens Actions → "Production Deploy" → "Run workflow" when
-  # they're ready for a new EIF to roll out. Keeps code changes decoupled
-  # from live-rollouts and prevents accidental prod drift from routine
-  # merges.
+  # Manual-only. Operator opens Actions → "Production Deploy" → "Run
+  # workflow", picks the target region, and rolls out a fresh EIF
+  # there. Keeps code changes decoupled from live rollouts.
   workflow_dispatch:
+    inputs:
+      region:
+        description: Target region
+        type: choice
+        options:
+          - us-east-1
+          - eu-west-1
+        default: us-east-1
 
 permissions:
   id-token: write # Required for OIDC
   contents: read
 
 env:
-  AWS_REGION: us-east-1
-  BUILDER_NAME: kaskad-oracle-builder
-  OIDC_ROLE_ARN: arn:aws:iam::095931689333:role/kaskad-oracle-github-ci
-  PROD_ASG_NAME: kaskad-oracle-prod-asg
-  EIF_BUCKET: kaskad-oracle-eif
-  KMS_RELEASE_ALIAS: alias/kaskad-oracle-release
-  KMS_SEALING_ALIAS: alias/kaskad-oracle-sealing
+  AWS_REGION: ${{ inputs.region }}
+  ACCOUNT_ID: "095931689333"
 
 jobs:
   deploy:
@@ -27,6 +28,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve region config
+        # us-east-1 keeps the bare "kaskad-oracle" prefix (historical);
+        # other regions are name-prefixed. Mirrors the terraform
+        # name_prefix in infra/main.tf.
+        run: |
+          REGION="${{ inputs.region }}"
+          if [ "$REGION" = "us-east-1" ]; then
+            PREFIX="kaskad-oracle"
+          else
+            PREFIX="kaskad-oracle-$REGION"
+          fi
+          {
+            echo "NAME_PREFIX=$PREFIX"
+            echo "BUILDER_NAME=$PREFIX-builder"
+            echo "PROD_ASG_NAME=$PREFIX-prod-asg"
+            echo "PROD_ROLE_NAME=$PREFIX-prod"
+            echo "EIF_BUCKET=$PREFIX-eif"
+            echo "OIDC_ROLE_ARN=arn:aws:iam::${{ env.ACCOUNT_ID }}:role/$PREFIX-github-ci"
+            echo "KMS_RELEASE_ALIAS=alias/$PREFIX-release"
+            echo "KMS_SEALING_ALIAS=alias/$PREFIX-sealing"
+          } >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -170,8 +193,7 @@ jobs:
 
           # KMS Get/PutKeyPolicy do not accept aliases — resolve to ARN.
           KEY_ARN=$(aws kms describe-key --key-id ${{ env.KMS_SEALING_ALIAS }} --query 'KeyMetadata.Arn' --output text)
-          PROD_ROLE_ARN=$(aws iam get-role --role-name kaskad-oracle-prod --query 'Role.Arn' --output text)
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          PROD_ROLE_ARN=$(aws iam get-role --role-name ${{ env.PROD_ROLE_NAME }} --query 'Role.Arn' --output text)
 
           aws kms get-key-policy \
             --key-id "$KEY_ARN" \
