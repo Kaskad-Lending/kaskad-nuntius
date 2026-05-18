@@ -45,6 +45,7 @@ resource "aws_launch_template" "prod" {
     vpc_cidr            = var.vpc_cidr
     aws_region          = var.aws_region
     kms_sealing_alias   = aws_kms_alias.sealing.name
+    kms_release_alias   = aws_kms_alias.release.name
   }))
 
   tag_specifications {

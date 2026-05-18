@@ -66,7 +66,7 @@ mkdir -p /opt/kaskad
 # Fetch the release pubkey once at boot. Verification afterwards is
 # pure-local openssl — no per-request KMS round-trip.
 aws kms get-public-key \
-  --key-id alias/kaskad-oracle-release \
+  --key-id ${kms_release_alias} \
   --query PublicKey --output text \
   | base64 -d > /opt/kaskad/release_pubkey.der
 openssl pkey -pubin -inform DER -in /opt/kaskad/release_pubkey.der \
