@@ -10,6 +10,18 @@ output "us_east_1" {
   }
 }
 
+output "eu_west_1" {
+  description = "Key resources for the eu-west-1 oracle deployment"
+  value = {
+    asg            = module.oracle_eu_west_1.prod_asg_name
+    builder        = module.oracle_eu_west_1.builder_instance_id
+    alb_dns        = module.oracle_eu_west_1.alb_dns_name
+    eif_bucket     = module.oracle_eu_west_1.eif_bucket
+    github_ci_role = module.oracle_eu_west_1.github_oidc_role_arn
+    sealing_kms    = module.oracle_eu_west_1.sealing_kms_alias
+  }
+}
+
 output "github_oidc_provider_arn" {
   description = "Account-wide GitHub Actions OIDC provider ARN"
   value       = aws_iam_openid_connect_provider.github.arn

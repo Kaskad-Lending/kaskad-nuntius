@@ -44,6 +44,12 @@ variable "enclave_memory_mib" {
   default     = 512
 }
 
+variable "asg_capacity" {
+  description = "Prod ASG desired/min size. 0 stands up a region's infra before its first EIF deploy; 1 once the EIF bucket is populated."
+  type        = number
+  default     = 1
+}
+
 # ─── S3 ───────────────────────────────────────────────────────
 
 variable "eif_bucket_name" {
