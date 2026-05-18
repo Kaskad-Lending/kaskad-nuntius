@@ -2,94 +2,81 @@ name: Production Deploy
 
 on:
   # Manual-only. Operator opens Actions → "Production Deploy" → "Run
-  # workflow", picks the target region, and rolls out a fresh EIF
-  # there. Keeps code changes decoupled from live rollouts.
+  # workflow", picks the target regions, and rolls out a fresh EIF.
+  # Build-once → distribute: the EIF is built a single time on the
+  # us-east-1 builder, then the byte-identical file is fanned out to
+  # every selected region. One build ⇒ one PCR0 everywhere (mainnet
+  # requires a single PCR0 across regions). Manifests differ only by
+  # their .sig — re-signed per-region with that region's release KMS.
   workflow_dispatch:
     inputs:
-      region:
-        description: Target region
+      regions:
+        description: Target regions
         type: choice
         options:
+          - all
           - us-east-1
           - eu-west-1
-        default: us-east-1
+        default: all
 
 permissions:
   id-token: write # Required for OIDC
   contents: read
 
 env:
-  AWS_REGION: ${{ inputs.region }}
   ACCOUNT_ID: "095931689333"
 
 jobs:
-  deploy:
-    name: Build & Deploy EIF
+  build:
+    name: Build EIF once
     runs-on: ubuntu-latest
+    outputs:
+      regions: ${{ steps.regions.outputs.list }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve region config
-        # us-east-1 keeps the bare "kaskad-oracle" prefix (historical);
-        # other regions are name-prefixed. Mirrors the terraform
-        # name_prefix in infra/main.tf.
+      - name: Resolve target regions
+        id: regions
+        # "all" fans out to every supported region; a single region
+        # picks just that one. Emitted as a JSON array for the
+        # distribute job's matrix.
         run: |
-          REGION="${{ inputs.region }}"
-          if [ "$REGION" = "us-east-1" ]; then
-            PREFIX="kaskad-oracle"
+          if [ "${{ inputs.regions }}" = "all" ]; then
+            LIST='["us-east-1","eu-west-1"]'
           else
-            PREFIX="kaskad-oracle-$REGION"
+            LIST='["${{ inputs.regions }}"]'
           fi
-          {
-            echo "NAME_PREFIX=$PREFIX"
-            echo "BUILDER_NAME=$PREFIX-builder"
-            echo "PROD_ASG_NAME=$PREFIX-prod-asg"
-            echo "PROD_ROLE_NAME=$PREFIX-prod"
-            echo "EIF_BUCKET=$PREFIX-eif"
-            echo "OIDC_ROLE_ARN=arn:aws:iam::${{ env.ACCOUNT_ID }}:role/$PREFIX-github-ci"
-            echo "KMS_RELEASE_ALIAS=alias/$PREFIX-release"
-            echo "KMS_SEALING_ALIAS=alias/$PREFIX-sealing"
-          } >> "$GITHUB_ENV"
+          echo "list=$LIST" >> "$GITHUB_OUTPUT"
+          echo "Distributing to: $LIST"
 
       - name: Configure AWS credentials
+        # Builder lives in us-east-1; this job only ever touches it.
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::095931689333:role/kaskad-oracle-github-ci
+          aws-region: us-east-1
 
       - name: Start builder instance
         id: builder
         run: |
-          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=${{ env.BUILDER_NAME }}" "Name=instance-state-name,Values=running,stopped,stopping,pending" --query "Reservations[].Instances[0].InstanceId" --output text)
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=kaskad-oracle-builder" "Name=instance-state-name,Values=running,stopped,stopping,pending" --query "Reservations[].Instances[0].InstanceId" --output text)
           echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
-          
+
           STATE=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[].Instances[0].State.Name" --output text)
           echo "Current state: $STATE"
-          
+
           if [ "$STATE" == "stopping" ]; then
             echo "Instance is stopping, waiting for it to stop..."
             aws ec2 wait instance-stopped --instance-ids $INSTANCE_ID
           fi
-          
+
           aws ec2 start-instances --instance-ids $INSTANCE_ID
           aws ec2 wait instance-running --instance-ids $INSTANCE_ID
 
       - name: Zip source and upload to S3
         run: |
           zip -r source.zip . -x "*.git*" "target/*" "infra/.terraform/*"
-          aws s3 cp source.zip s3://${{ env.EIF_BUCKET }}/builds/${{ github.sha }}/source.zip
-
-      - name: Upload pull_api.py to S3 bootstrap location
-        # Prod EC2 user-data fetches this at boot (S3 GetObject) instead
-        # of inlining (we'd blow the 16 KiB user-data limit, see PR #37).
-        run: |
-          aws s3 cp enclave/pull_api.py s3://${{ env.EIF_BUCKET }}/pull_api.py
-
-      - name: Upload aws-creds-proxy.py to S3 bootstrap location
-        # Host-side IMDSv2 → enclave VSOCK relay used by KMS sealing
-        # (enclave/aws_creds.rs talks to this proxy on VSOCK port 5002).
-        run: |
-          aws s3 cp enclave/aws-creds-proxy.py s3://${{ env.EIF_BUCKET }}/aws-creds-proxy.py
+          aws s3 cp source.zip s3://kaskad-oracle-eif/builds/${{ github.sha }}/source.zip
 
       - name: Wait for SSM agent
         # Builder boots cold after long-stopped periods (24h+); SSM
@@ -112,6 +99,9 @@ jobs:
           exit 1
 
       - name: Run build via SSM
+        # Builds the EIF and stages exactly three artifacts to S3:
+        # oracle.eif, pcr0.json, oracle.eif.sha384. No signing or
+        # latest.* publish here — that is per-region in distribute.
         run: |
           CMD_ID=$(aws ssm send-command \
             --instance-ids ${{ steps.builder.outputs.instance_id }} \
@@ -119,8 +109,8 @@ jobs:
             --parameters 'commands=[
               "set -e",
               "export COMMIT=${{ github.sha }}",
-              "export eif_bucket=${{ env.EIF_BUCKET }}",
-              "export aws_region=${{ env.AWS_REGION }}",
+              "export eif_bucket=kaskad-oracle-eif",
+              "export aws_region=us-east-1",
               "sudo dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel awscli docker git jq unzip",
               "sudo systemctl start docker",
               "rm -rf /tmp/build && mkdir -p /tmp/build",
@@ -132,18 +122,14 @@ jobs:
               "ls -la /tmp/oracle.eif",
               "sha384sum /tmp/oracle.eif | awk \"{print \\$1}\" > /tmp/oracle.eif.sha384",
               "sudo nitro-cli describe-eif --eif-path /tmp/oracle.eif | jq -r .Measurements > /tmp/pcr0.json",
-              "aws kms sign --key-id ${{ env.KMS_RELEASE_ALIAS }} --message fileb:///tmp/oracle.eif.sha384 --message-type RAW --signing-algorithm ECDSA_SHA_384 --output text --query Signature | base64 -d > /tmp/oracle.eif.sha384.sig",
-              "aws kms sign --key-id ${{ env.KMS_RELEASE_ALIAS }} --message fileb:///tmp/pcr0.json --message-type RAW --signing-algorithm ECDSA_SHA_384 --output text --query Signature | base64 -d > /tmp/pcr0.json.sig",
-              "aws s3 cp /tmp/oracle.eif s3://$eif_bucket/latest.eif",
-              "aws s3 cp /tmp/oracle.eif.sha384 s3://$eif_bucket/latest.eif.sha384",
-              "aws s3 cp /tmp/oracle.eif.sha384.sig s3://$eif_bucket/latest.eif.sha384.sig",
-              "aws s3 cp /tmp/pcr0.json s3://$eif_bucket/pcr0.json",
-              "aws s3 cp /tmp/pcr0.json.sig s3://$eif_bucket/pcr0.json.sig"
+              "aws s3 cp /tmp/oracle.eif s3://$eif_bucket/staging/$COMMIT/oracle.eif",
+              "aws s3 cp /tmp/pcr0.json s3://$eif_bucket/staging/$COMMIT/pcr0.json",
+              "aws s3 cp /tmp/oracle.eif.sha384 s3://$eif_bucket/staging/$COMMIT/oracle.eif.sha384"
             ]' \
             --query "Command.CommandId" --output text)
-          
+
           echo "SSM Command ID: $CMD_ID"
-          
+
           # Custom waiter loop (aws ssm wait has a short default timeout)
           while true; do
             # Wait for command to finish
@@ -151,7 +137,7 @@ jobs:
               --command-id "$CMD_ID" \
               --instance-id ${{ steps.builder.outputs.instance_id }} \
               --query "Status" --output text 2>/dev/null || echo "Pending")
-            
+
             echo "Build Status: $STATUS"
             if [ "$STATUS" == "Success" ]; then
               break
@@ -171,6 +157,80 @@ jobs:
         if: always()
         run: |
           aws ec2 stop-instances --instance-ids ${{ steps.builder.outputs.instance_id }}
+
+      - name: Download staged EIF bundle
+        run: |
+          aws s3 cp s3://kaskad-oracle-eif/staging/${{ github.sha }}/oracle.eif oracle.eif
+          aws s3 cp s3://kaskad-oracle-eif/staging/${{ github.sha }}/pcr0.json pcr0.json
+          aws s3 cp s3://kaskad-oracle-eif/staging/${{ github.sha }}/oracle.eif.sha384 oracle.eif.sha384
+
+      - name: Upload EIF bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eif-bundle
+          path: |
+            oracle.eif
+            pcr0.json
+            oracle.eif.sha384
+
+  distribute:
+    name: Distribute to ${{ matrix.region }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        region: ${{ fromJSON(needs.build.outputs.regions) }}
+    steps:
+      - uses: actions/checkout@v4 # bootstrap scripts published per-region
+
+      - name: Download EIF bundle artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: eif-bundle
+
+      - name: Resolve region config
+        # us-east-1 keeps the bare "kaskad-oracle" prefix (historical);
+        # other regions are name-prefixed. Mirrors the terraform
+        # name_prefix in infra/main.tf.
+        run: |
+          REGION="${{ matrix.region }}"
+          if [ "$REGION" = "us-east-1" ]; then
+            PREFIX="kaskad-oracle"
+          else
+            PREFIX="kaskad-oracle-$REGION"
+          fi
+          {
+            echo "EIF_BUCKET=$PREFIX-eif"
+            echo "OIDC_ROLE_ARN=arn:aws:iam::${{ env.ACCOUNT_ID }}:role/$PREFIX-github-ci"
+            echo "KMS_RELEASE_ALIAS=alias/$PREFIX-release"
+            echo "KMS_SEALING_ALIAS=alias/$PREFIX-sealing"
+            echo "PROD_ROLE_NAME=$PREFIX-prod"
+            echo "PROD_ASG_NAME=$PREFIX-prod-asg"
+          } >> "$GITHUB_ENV"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ matrix.region }}
+
+      - name: Sign manifests with regional release KMS
+        # Same EIF bytes everywhere ⇒ same sha384 / pcr0.json; only the
+        # signature is region-specific (regional release key).
+        run: |
+          aws kms sign --key-id "$KMS_RELEASE_ALIAS" --message fileb://oracle.eif.sha384 --message-type RAW --signing-algorithm ECDSA_SHA_384 --output text --query Signature | base64 -d > oracle.eif.sha384.sig
+          aws kms sign --key-id "$KMS_RELEASE_ALIAS" --message fileb://pcr0.json --message-type RAW --signing-algorithm ECDSA_SHA_384 --output text --query Signature | base64 -d > pcr0.json.sig
+
+      - name: Publish bundle to region S3
+        run: |
+          aws s3 cp oracle.eif s3://$EIF_BUCKET/latest.eif
+          aws s3 cp oracle.eif.sha384 s3://$EIF_BUCKET/latest.eif.sha384
+          aws s3 cp oracle.eif.sha384.sig s3://$EIF_BUCKET/latest.eif.sha384.sig
+          aws s3 cp pcr0.json s3://$EIF_BUCKET/pcr0.json
+          aws s3 cp pcr0.json.sig s3://$EIF_BUCKET/pcr0.json.sig
+          aws s3 cp enclave/pull_api.py s3://$EIF_BUCKET/pull_api.py
+          aws s3 cp enclave/aws-creds-proxy.py s3://$EIF_BUCKET/aws-creds-proxy.py
 
       - name: Append new PCR0 to sealing KMS policy
         # kms.tf has lifecycle.ignore_changes = [policy]; CI is the source
@@ -237,6 +297,6 @@ jobs:
       - name: Trigger production refresh
         run: |
           aws autoscaling start-instance-refresh \
-            --auto-scaling-group-name ${{ env.PROD_ASG_NAME }} \
+            --auto-scaling-group-name $PROD_ASG_NAME \
             --preferences '{"MinHealthyPercentage": 0}'
-          echo "Production ASG refresh started."
+          echo "Production ASG refresh started in ${{ matrix.region }}."
