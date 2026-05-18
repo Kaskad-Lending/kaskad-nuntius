@@ -21,11 +21,13 @@
 //!     "AccessKeyId":     "...",
 //!     "SecretAccessKey": "...",
 //!     "Token":           "...",
-//!     "Expiration":      "2026-05-05T19:42:00Z"
+//!     "Region":          "us-east-1",
+//!     "EifBucket":       "kaskad-oracle-eif",
+//!     "KmsSealingAlias": "alias/kaskad-oracle-sealing"
 //!   }
 //!
-//! Credentials rotate roughly every 6 h (instance role default), so a
-//! caller that holds them for longer than ~5 h should re-fetch.
+//! Each seal / unseal re-fetches creds, so callers never hold them
+//! long enough to need expiry tracking.
 
 use eyre::Result;
 use serde::Deserialize;
@@ -47,11 +49,16 @@ pub struct IamCredentials {
     pub secret_access_key: String,
     #[serde(rename = "Token")]
     pub session_token: String,
-    /// RFC 3339 / ISO 8601 timestamp string. Parsed lazily — most call
-    /// sites just need the three secrets and don't care about expiry
-    /// when the call happens within minutes of fetch.
-    #[serde(rename = "Expiration")]
-    pub expiration: String,
+    /// AWS region of the host instance. `sealing.rs` derives S3 / KMS
+    /// endpoints from it, keeping the EIF region-agnostic.
+    #[serde(rename = "Region")]
+    pub region: String,
+    /// S3 bucket holding this region's `sealed-key.bin`.
+    #[serde(rename = "EifBucket")]
+    pub eif_bucket: String,
+    /// KMS alias of this region's sealing key.
+    #[serde(rename = "KmsSealingAlias")]
+    pub kms_sealing_alias: String,
 }
 
 #[cfg(target_os = "linux")]

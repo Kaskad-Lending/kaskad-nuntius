@@ -43,6 +43,8 @@ resource "aws_launch_template" "prod" {
     enclave_cpu_count   = var.enclave_cpu_count
     enclave_memory_mib  = var.enclave_memory_mib
     vpc_cidr            = var.vpc_cidr
+    aws_region          = var.aws_region
+    kms_sealing_alias   = aws_kms_alias.sealing.name
   }))
 
   tag_specifications {

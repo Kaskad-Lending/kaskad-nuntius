@@ -250,6 +250,9 @@ After=network.target
 
 [Service]
 Type=simple
+Environment=KASKAD_AWS_REGION=${aws_region}
+Environment=KASKAD_EIF_BUCKET=${eif_bucket}
+Environment=KASKAD_KMS_SEALING_ALIAS=${kms_sealing_alias}
 ExecStart=/usr/bin/python3 /opt/kaskad/aws-creds-proxy.py
 Restart=always
 RestartSec=5
