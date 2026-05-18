@@ -19,17 +19,56 @@ terraform {
   #     key    = "tee-oracle/terraform.tfstate"
   #     region = "us-east-1"
   #   }
-
 }
 
 provider "aws" {
-  region = var.aws_region
+  alias  = "us_east_1"
+  region = "us-east-1"
 
   default_tags {
     tags = {
       Project     = "kaskad-oracle"
       ManagedBy   = "terraform"
-      Environment = var.environment
+      Environment = "prod"
     }
   }
+}
+
+provider "aws" {
+  alias  = "eu_west_1"
+  region = "eu-west-1"
+
+  default_tags {
+    tags = {
+      Project     = "kaskad-oracle"
+      ManagedBy   = "terraform"
+      Environment = "prod"
+    }
+  }
+}
+
+# GitHub OIDC provider — exactly one per account, shared across regions.
+resource "aws_iam_openid_connect_provider" "github" {
+  provider        = aws.us_east_1
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["ffffffffffffffffffffffffffffffffffffffff"]
+}
+
+module "oracle_us_east_1" {
+  source    = "./modules/oracle"
+  providers = { aws = aws.us_east_1 }
+
+  name_prefix              = "kaskad-oracle"
+  aws_region               = "us-east-1"
+  vpc_cidr                 = "10.0.0.0/16"
+  eif_bucket_name          = "kaskad-oracle-eif"
+  instance_type            = "c5.xlarge"
+  ami_id                   = "ami-005e66ba9068f1c2a" # standard AL2023 x86_64 (minimal lacks amazon-ssm-agent)
+  enclave_cpu_count        = 2
+  enclave_memory_mib       = 512
+  domain_name              = "oracle.kaskad.live"
+  github_org               = var.github_org
+  github_repo              = var.github_repo
+  github_oidc_provider_arn = aws_iam_openid_connect_provider.github.arn
 }

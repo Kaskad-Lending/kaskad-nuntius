@@ -1,7 +1,7 @@
 # ─── Builder EC2 (stopped by default) ─────────────────────────
 
 resource "aws_instance" "builder" {
-  ami                    = data.aws_ami.amazon_linux_2023.id
+  ami                    = var.ami_id
   instance_type          = var.instance_type
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.builder.id]
@@ -40,7 +40,7 @@ resource "aws_instance" "builder" {
   user_data_replace_on_change = true
 
   tags = {
-    Name        = "${var.project_name}-builder"
+    Name        = "${var.name_prefix}-builder"
     BuildCommit = "none" # Updated by CI before starting
   }
 

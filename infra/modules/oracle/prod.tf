@@ -1,8 +1,8 @@
 # ─── Prod: Spot ASG + Launch Template ─────────────────────────
 
 resource "aws_launch_template" "prod" {
-  name_prefix   = "${var.project_name}-prod-"
-  image_id      = data.aws_ami.amazon_linux_2023.id
+  name_prefix   = "${var.name_prefix}-prod-"
+  image_id      = var.ami_id
   instance_type = var.instance_type
 
   # Nitro Enclave
@@ -48,7 +48,7 @@ resource "aws_launch_template" "prod" {
   tag_specifications {
     resource_type = "instance"
     tags = {
-      Name = "${var.project_name}-prod"
+      Name = "${var.name_prefix}-prod"
     }
   }
 
@@ -58,7 +58,7 @@ resource "aws_launch_template" "prod" {
 }
 
 resource "aws_autoscaling_group" "prod" {
-  name                = "${var.project_name}-prod-asg"
+  name                = "${var.name_prefix}-prod-asg"
   desired_capacity    = 1
   min_size            = 1
   max_size            = 1
@@ -113,7 +113,7 @@ resource "aws_autoscaling_group" "prod" {
 
   tag {
     key                 = "Name"
-    value               = "${var.project_name}-prod-asg"
+    value               = "${var.name_prefix}-prod-asg"
     propagate_at_launch = false
   }
 }

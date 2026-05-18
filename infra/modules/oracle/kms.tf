@@ -20,12 +20,12 @@ resource "aws_kms_key" "release" {
   enable_key_rotation      = false # Asymmetric keys do not support automatic rotation.
 
   tags = {
-    Name = "${var.project_name}-release-signing"
+    Name = "${var.name_prefix}-release-signing"
   }
 }
 
 resource "aws_kms_alias" "release" {
-  name          = "alias/${var.project_name}-release"
+  name          = "alias/${var.name_prefix}-release"
   target_key_id = aws_kms_key.release.id
 }
 
@@ -33,7 +33,7 @@ resource "aws_kms_alias" "release" {
 
 # Builder EC2 (CI runs `aws kms sign` from there) — needs Sign + GetPublicKey.
 resource "aws_iam_role_policy" "builder_kms_sign" {
-  name = "${var.project_name}-builder-kms-sign"
+  name = "${var.name_prefix}-builder-kms-sign"
   role = aws_iam_role.builder.id
 
   policy = jsonencode({
@@ -53,7 +53,7 @@ resource "aws_iam_role_policy" "builder_kms_sign" {
 
 # Prod EC2 (verifies signatures at boot) — public key only, no Sign.
 resource "aws_iam_role_policy" "prod_kms_verify" {
-  name = "${var.project_name}-prod-kms-verify"
+  name = "${var.name_prefix}-prod-kms-verify"
   role = aws_iam_role.prod.id
 
   policy = jsonencode({
@@ -71,7 +71,7 @@ resource "aws_iam_role_policy" "prod_kms_verify" {
 # directly from the GH runner instead of the builder. Today signing happens
 # on the builder via SSM; this grant is reserved for a future CI move.
 resource "aws_iam_role_policy" "github_ci_kms_sign" {
-  name = "${var.project_name}-github-ci-kms-sign"
+  name = "${var.name_prefix}-github-ci-kms-sign"
   role = aws_iam_role.github_ci.id
 
   policy = jsonencode({
@@ -87,16 +87,6 @@ resource "aws_iam_role_policy" "github_ci_kms_sign" {
       Resource = [aws_kms_key.release.arn]
     }]
   })
-}
-
-output "release_kms_key_arn" {
-  description = "ARN of the EIF release signing KMS key"
-  value       = aws_kms_key.release.arn
-}
-
-output "release_kms_alias" {
-  description = "Alias of the release signing KMS key (used by aws kms sign / verify)"
-  value       = aws_kms_alias.release.name
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -171,21 +161,11 @@ resource "aws_kms_key" "sealing" {
   })
 
   tags = {
-    Name = "${var.project_name}-key-sealing"
+    Name = "${var.name_prefix}-key-sealing"
   }
 }
 
 resource "aws_kms_alias" "sealing" {
-  name          = "alias/${var.project_name}-sealing"
+  name          = "alias/${var.name_prefix}-sealing"
   target_key_id = aws_kms_key.sealing.id
-}
-
-output "sealing_kms_key_arn" {
-  description = "ARN of the enclave-key sealing KMS key"
-  value       = aws_kms_key.sealing.arn
-}
-
-output "sealing_kms_alias" {
-  description = "Alias of the sealing KMS key"
-  value       = aws_kms_alias.sealing.name
 }

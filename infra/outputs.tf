@@ -1,45 +1,26 @@
-output "account_id" {
-  value = data.aws_caller_identity.current.account_id
-}
-
-output "prod_asg_name" {
-  value = aws_autoscaling_group.prod.name
-}
-
-output "builder_instance_id" {
-  value = aws_instance.builder.id
-}
-
-output "eif_bucket" {
-  value = aws_s3_bucket.eif.bucket
-}
-
-output "prod_security_group" {
-  value = aws_security_group.prod.id
-}
-
-output "github_oidc_role_arn" {
-  value = aws_iam_role.github_ci.arn
-}
-
-# ─── Data Sources ─────────────────────────────────────────────
-
-data "aws_caller_identity" "current" {}
-
-data "aws_ami" "amazon_linux_2023" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  # `al2023-ami-2023.*` matches the standard AL2023 image and excludes
-  # `al2023-ami-minimal-2023.*` — minimal ships without amazon-ssm-agent
-  # which breaks the CI SendCommand build flow on cold builders.
-  filter {
-    name   = "name"
-    values = ["al2023-ami-2023.*-x86_64"]
+output "us_east_1" {
+  description = "Key resources for the us-east-1 oracle deployment"
+  value = {
+    asg            = module.oracle_us_east_1.prod_asg_name
+    builder        = module.oracle_us_east_1.builder_instance_id
+    alb_dns        = module.oracle_us_east_1.alb_dns_name
+    eif_bucket     = module.oracle_us_east_1.eif_bucket
+    github_ci_role = module.oracle_us_east_1.github_oidc_role_arn
+    sealing_kms    = module.oracle_us_east_1.sealing_kms_alias
   }
+}
 
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
+output "github_oidc_provider_arn" {
+  description = "Account-wide GitHub Actions OIDC provider ARN"
+  value       = aws_iam_openid_connect_provider.github.arn
+}
+
+output "acm_dns_validation_records" {
+  description = "CNAME records to add at the registrar to validate the us-east-1 ACM certificate"
+  value       = module.oracle_us_east_1.acm_dns_validation_records
+}
+
+output "domain_cname_target" {
+  description = "ALB DNS to point the oracle domain CNAME at (us-east-1)"
+  value       = module.oracle_us_east_1.domain_cname_target
 }

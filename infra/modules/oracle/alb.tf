@@ -1,11 +1,5 @@
 # ─── ALB for Pull API (HTTPS → port 8080) ────────────────────
 
-variable "domain_name" {
-  description = "Domain name for the oracle API. Set empty to skip ACM/HTTPS and stay on bare ALB DNS."
-  type        = string
-  default     = "oracle.kaskad.live"
-}
-
 # ACM Certificate (DNS validation)
 resource "aws_acm_certificate" "oracle" {
   count             = var.domain_name != "" ? 1 : 0
@@ -16,18 +10,18 @@ resource "aws_acm_certificate" "oracle" {
     create_before_destroy = true
   }
 
-  tags = { Name = "${var.project_name}-cert" }
+  tags = { Name = "${var.name_prefix}-cert" }
 }
 
 # ALB
 resource "aws_lb" "oracle" {
-  name               = "${var.project_name}-alb"
+  name               = "${var.name_prefix}-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = [aws_subnet.public.id, aws_subnet.public_b.id]
 
-  tags = { Name = "${var.project_name}-alb" }
+  tags = { Name = "${var.name_prefix}-alb" }
 }
 
 # Second subnet in different AZ (required for ALB)
@@ -37,7 +31,7 @@ resource "aws_subnet" "public_b" {
   map_public_ip_on_launch = true
   availability_zone       = "${var.aws_region}b"
 
-  tags = { Name = "${var.project_name}-public-b" }
+  tags = { Name = "${var.name_prefix}-public-b" }
 }
 
 resource "aws_route_table_association" "public_b" {
@@ -47,7 +41,7 @@ resource "aws_route_table_association" "public_b" {
 
 # ALB Security Group
 resource "aws_security_group" "alb" {
-  name_prefix = "${var.project_name}-alb-"
+  name_prefix = "${var.name_prefix}-alb-"
   description = "ALB: HTTPS inbound, 8080 to instances"
   vpc_id      = aws_vpc.main.id
 
@@ -74,7 +68,7 @@ resource "aws_security_group" "alb" {
     cidr_blocks = [var.vpc_cidr]
   }
 
-  tags = { Name = "${var.project_name}-alb-sg" }
+  tags = { Name = "${var.name_prefix}-alb-sg" }
 
   lifecycle {
     create_before_destroy = true
@@ -83,7 +77,7 @@ resource "aws_security_group" "alb" {
 
 # Target Group
 resource "aws_lb_target_group" "oracle" {
-  name     = "${var.project_name}-tg"
+  name     = "${var.name_prefix}-tg"
   port     = 8080
   protocol = "HTTP"
   vpc_id   = aws_vpc.main.id
@@ -99,7 +93,7 @@ resource "aws_lb_target_group" "oracle" {
     matcher             = "200"
   }
 
-  tags = { Name = "${var.project_name}-tg" }
+  tags = { Name = "${var.name_prefix}-tg" }
 }
 
 # HTTPS Listener (when certificate is available)
@@ -153,33 +147,4 @@ resource "aws_lb_listener" "http_forward" {
 resource "aws_autoscaling_attachment" "oracle" {
   autoscaling_group_name = aws_autoscaling_group.prod.name
   lb_target_group_arn    = aws_lb_target_group.oracle.arn
-}
-
-# Output ALB DNS
-output "alb_dns_name" {
-  description = "ALB DNS name — use this to access the pull API directly, or as the CNAME target for the oracle domain"
-  value       = aws_lb.oracle.dns_name
-}
-
-# ─── External DNS (Namecheap etc.) bootstrap ──────────────────
-# If `var.domain_name` is set, Terraform creates the ACM cert with
-# DNS-validation. The certificate stays in `PENDING_VALIDATION` until
-# the operator adds the CNAME records below at the registrar. After
-# DNS propagates (~minutes for Namecheap), `terraform apply` again to
-# unblock the validation, attach HTTPS listener, and flip HTTP to
-# 301-redirect.
-output "acm_dns_validation_records" {
-  description = "CNAME records to add at the registrar (e.g. Namecheap) to validate the ACM certificate. After adding, run `terraform apply` again to finish issuance."
-  value = var.domain_name == "" ? [] : [
-    for opt in aws_acm_certificate.oracle[0].domain_validation_options : {
-      cname_name  = opt.resource_record_name
-      cname_value = opt.resource_record_value
-      type        = opt.resource_record_type
-    }
-  ]
-}
-
-output "domain_cname_target" {
-  description = "Where to point the domain at your registrar — add a CNAME (or ALIAS, if supported) from var.domain_name to this ALB DNS."
-  value       = var.domain_name == "" ? null : aws_lb.oracle.dns_name
 }

@@ -5,12 +5,12 @@ resource "aws_vpc" "main" {
   enable_dns_hostnames = true
   enable_dns_support   = true
 
-  tags = { Name = "${var.project_name}-vpc" }
+  tags = { Name = "${var.name_prefix}-vpc" }
 }
 
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
-  tags   = { Name = "${var.project_name}-igw" }
+  tags   = { Name = "${var.name_prefix}-igw" }
 }
 
 resource "aws_subnet" "public" {
@@ -19,7 +19,7 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
   availability_zone       = "${var.aws_region}a"
 
-  tags = { Name = "${var.project_name}-public" }
+  tags = { Name = "${var.name_prefix}-public" }
 }
 
 resource "aws_route_table" "public" {
@@ -30,7 +30,7 @@ resource "aws_route_table" "public" {
     gateway_id = aws_internet_gateway.main.id
   }
 
-  tags = { Name = "${var.project_name}-public-rt" }
+  tags = { Name = "${var.name_prefix}-public-rt" }
 }
 
 resource "aws_route_table_association" "public" {
@@ -41,7 +41,7 @@ resource "aws_route_table_association" "public" {
 # ─── Security Groups ─────────────────────────────────────────
 
 resource "aws_security_group" "prod" {
-  name_prefix = "${var.project_name}-prod-"
+  name_prefix = "${var.name_prefix}-prod-"
   description = "Prod oracle: ALB inbound on 8080, HTTPS outbound"
   vpc_id      = aws_vpc.main.id
 
@@ -70,7 +70,7 @@ resource "aws_security_group" "prod" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "${var.project_name}-prod-sg" }
+  tags = { Name = "${var.name_prefix}-prod-sg" }
 
   lifecycle {
     create_before_destroy = true
@@ -78,7 +78,7 @@ resource "aws_security_group" "prod" {
 }
 
 resource "aws_security_group" "builder" {
-  name_prefix = "${var.project_name}-builder-"
+  name_prefix = "${var.name_prefix}-builder-"
   description = "Builder: NO inbound, HTTPS outbound for git/docker/S3"
   vpc_id      = aws_vpc.main.id
 
@@ -100,7 +100,7 @@ resource "aws_security_group" "builder" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "${var.project_name}-builder-sg" }
+  tags = { Name = "${var.name_prefix}-builder-sg" }
 
   lifecycle {
     create_before_destroy = true
