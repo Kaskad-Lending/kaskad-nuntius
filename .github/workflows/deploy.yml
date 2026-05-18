@@ -217,7 +217,8 @@ jobs:
               .Statement |= map(
                 if .Sid == "ProdDecryptWithAttestation" then
                   .Condition["ForAnyValue:StringEqualsIgnoreCase"]["kms:RecipientAttestation:PCR0"] |=
-                    ([$new] + map(select(. != $placeholder and . != $new)))[:3]
+                    # AWS collapses a single-element array to a scalar; re-wrap before iterating.
+                    ([$new] + ((if type == "array" then . else [.] end) | map(select(. != $placeholder and . != $new))))[:3]
                 else . end
               )
             else
