@@ -1,0 +1,34 @@
+// Minimal subset of MEXC's PushDataV3ApiWrapper schema — only what we need
+// to decode `publicAggreDepths` (incremental order-book diffs).
+//
+// Field numbers and types verified against the wire format of
+// `cex_data/mexc/PushDataV3ApiWrapper_pb2.py` and
+// `cex_data/mexc/PublicAggreDepthsV3Api_pb2.py`.
+
+syntax = "proto3";
+
+package mexc;
+
+message PushDataV3ApiWrapper {
+  string channel = 1;
+  // Field 313 in the upstream schema; `publicAggreDepths` is the only
+  // body variant we read. Other body variants are skipped by the decoder.
+  optional PublicAggreDepthsV3Api publicAggreDepths = 313;
+  optional string symbol = 3;
+  optional string symbolId = 4;
+  optional int64 createTime = 5;
+  optional int64 sendTime = 6;
+}
+
+message PublicAggreDepthsV3Api {
+  repeated PublicAggreDepthV3ApiItem asks = 1;
+  repeated PublicAggreDepthV3ApiItem bids = 2;
+  string eventType = 3;
+  string fromVersion = 4;
+  string toVersion = 5;
+}
+
+message PublicAggreDepthV3ApiItem {
+  string price = 1;
+  string quantity = 2;
+}

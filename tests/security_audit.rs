@@ -217,10 +217,10 @@ fn POC_non_positive_volume_flips_volume_weighting_off() {
     let sources_with_vol = prices_off.iter().filter(|p| p.1 > 0.0).count();
     assert_eq!(sources_with_vol, 3);
     assert!(sources_with_vol * 2 <= prices_off.len()); // 6 <= 6 → true
-                                                         // Now the median is equal-weight — honest volumes are ignored.
-                                                         // With 2 honest (3) already tied at $1999, $2000, $2001 and 3 attackers
-                                                         // piling onto $2000, $2000 dominates by count. The attacker has
-                                                         // silently weighted-median-DoSed the volume scheme.
+                                                       // Now the median is equal-weight — honest volumes are ignored.
+                                                       // With 2 honest (3) already tied at $1999, $2000, $2001 and 3 attackers
+                                                       // piling onto $2000, $2000 dominates by count. The attacker has
+                                                       // silently weighted-median-DoSed the volume scheme.
     let m_off = weighted_median(&prices_off).unwrap();
     assert_eq!(m_off, 2000.0);
 

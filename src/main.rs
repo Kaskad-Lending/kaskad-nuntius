@@ -1,5 +1,9 @@
 mod aggregator;
 mod aws_creds;
+mod cob;
+mod cob_common;
+mod cob_state;
+mod collectors;
 mod http_client;
 mod price_server;
 #[cfg(target_os = "linux")]
@@ -17,7 +21,7 @@ use tracing::{error, info, warn};
 
 use signer::{MockSigner, OracleSigner};
 use sources::PriceSource;
-use types::{load_assets, AssetConfig, CachedPrice};
+use types::{load_assets, AssetConfig, CachedPrice, PricePoint};
 
 const ORACLE_DECIMALS: u8 = 8;
 const FETCH_INTERVAL_SECS: u64 = 30;
@@ -80,7 +84,7 @@ async fn main() -> Result<()> {
 
     let _ = dotenvy::dotenv();
 
-    info!("🚀 Kaskad TEE Oracle starting...");
+    info!("Kaskad TEE Oracle starting");
 
     // Load the bundled asset config (compiled into the enclave EIF → PCR0).
     let config = load_assets().expect("failed to load bundled config/assets.json");
@@ -230,6 +234,135 @@ async fn main() -> Result<()> {
         Box::new(sources::igralabs::IgraLabs::new(client.clone())),
     ];
 
+    // --- Spawn the WS collector manager + book-state fan-in ----------
+    let (collector_tx, mut collector_rx) =
+        tokio::sync::mpsc::unbounded_channel::<cob_common::CollectorMessage>();
+    let sink = collectors::BookSink::new(Some(collector_tx));
+
+    let (mgr_cmd_tx, mgr_cmd_rx) =
+        tokio::sync::mpsc::unbounded_channel::<cob_common::CollectorCommand>();
+    let (mgr_stats_tx, _mgr_stats_rx) =
+        tokio::sync::broadcast::channel::<cob_common::ExchangeStats>(64);
+
+    // Host mode reads from disk; enclave operators set EXCHANGES_CONFIG_INLINE.
+    let config_path =
+        std::env::var("EXCHANGES_CONFIG").unwrap_or_else(|_| "config/exchanges.json".to_string());
+
+    // Supervisor: exponential-backoff restart loop. Forwarder task
+    // re-publishes outer commands into the live inner_tx across restarts.
+    type CollectorTxSlot = std::sync::Arc<
+        tokio::sync::RwLock<
+            Option<tokio::sync::mpsc::UnboundedSender<cob_common::CollectorCommand>>,
+        >,
+    >;
+    let inner_tx_slot: CollectorTxSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+    let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    {
+        let slot = inner_tx_slot.clone();
+        let stop = stop_flag.clone();
+        tokio::spawn(async move {
+            let mut rx = mgr_cmd_rx;
+            while let Some(cmd) = rx.recv().await {
+                if matches!(cmd, cob_common::CollectorCommand::Stop) {
+                    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                if let Some(tx) = slot.read().await.as_ref() {
+                    let _ = tx.send(cmd);
+                }
+            }
+        });
+    }
+
+    let mgr_config_path = config_path.clone();
+    let mgr_stats_tx_clone = mgr_stats_tx.clone();
+    let mgr_sink = sink.clone();
+    let stop_flag_for_mgr = stop_flag.clone();
+    let slot_for_mgr = inner_tx_slot.clone();
+    let mgr_handle = tokio::spawn(async move {
+        let mut backoff_secs: u64 = 1;
+        loop {
+            if stop_flag_for_mgr.load(std::sync::atomic::Ordering::SeqCst) {
+                info!("CollectorManager: stop flag set, exiting supervisor");
+                break;
+            }
+            let (inner_tx, inner_rx) =
+                tokio::sync::mpsc::unbounded_channel::<cob_common::CollectorCommand>();
+            *slot_for_mgr.write().await = Some(inner_tx);
+
+            // catch_unwind so a panic restarts the manager. Coerce the
+            // non-Send `Box<dyn Error>` to a String before any await.
+            let started_at = std::time::Instant::now();
+            let err_msg: Option<String> = {
+                let run_fut = std::panic::AssertUnwindSafe(collectors::run(
+                    inner_rx,
+                    mgr_config_path.clone(),
+                    mgr_stats_tx_clone.clone(),
+                    mgr_sink.clone(),
+                ));
+                match futures::FutureExt::catch_unwind(run_fut).await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(e)) => Some(e.to_string()),
+                    Err(_panic) => Some("collectors::run panicked".to_string()),
+                }
+            };
+
+            *slot_for_mgr.write().await = None;
+
+            if stop_flag_for_mgr.load(std::sync::atomic::Ordering::SeqCst) {
+                info!("CollectorManager exited cleanly (Stop received)");
+                break;
+            }
+            match err_msg {
+                None => {
+                    info!("CollectorManager exited cleanly");
+                    break;
+                }
+                Some(err_str) => {
+                    if started_at.elapsed() >= std::time::Duration::from_secs(60) {
+                        backoff_secs = 1;
+                    }
+                    error!(error = %err_str, backoff_secs, "CollectorManager terminated; restarting after backoff");
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(60);
+                }
+            }
+        }
+    });
+
+    let book_state: cob_state::SharedBookState = cob_state::new_shared();
+    let consumer_state = book_state.clone();
+    let _fan_in_handle = tokio::spawn(async move {
+        while let Some(msg) = collector_rx.recv().await {
+            if let cob_common::CollectorMessage::Data(book) = msg {
+                cob_state::insert(&consumer_state, book).await;
+            }
+        }
+    });
+
+    // Wait up to 10s for COLD_START_MIN_BOOKS books before the first cycle.
+    let cold_start_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let cold_start_min_books: usize = std::env::var("COLD_START_MIN_BOOKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3);
+    loop {
+        let n = book_state.read().await.len();
+        if n >= cold_start_min_books {
+            info!(books = n, "cold start: quorum reached");
+            break;
+        }
+        if std::time::Instant::now() >= cold_start_deadline {
+            warn!(
+                books = n,
+                min_required = cold_start_min_books,
+                "cold start: timeout waiting for books, proceeding anyway"
+            );
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
     let known_sources: std::collections::HashSet<&str> =
         price_sources.iter().map(|s| s.name()).collect();
 
@@ -257,6 +390,112 @@ async fn main() -> Result<()> {
     // Main oracle loop: fetch → aggregate → sign → store
     loop {
         for asset in &config.assets {
+            if cob::is_cob_asset(asset) {
+                let books = cob::read_books_from_state(asset, &book_state).await;
+                if books.len() < asset.min_sources {
+                    warn!(
+                        asset = %asset.symbol,
+                        num_sources = books.len(),
+                        min_required = asset.min_sources,
+                        "COB Quorum not met. Skipping."
+                    );
+                    continue;
+                }
+                let fair = match cob::consolidated_order_book(&books) {
+                    Some(fv) => fv,
+                    None => {
+                        warn!(asset = %asset.symbol, "COB returned no fair value");
+                        continue;
+                    }
+                };
+
+                // Cycle timestamp: median exchange_timestamp_ms, never the
+                // host wall clock (audit C-3/H-9).
+                let cob_signed_ts: u64 = {
+                    let guard = book_state.read().await;
+                    let mut ts_ms: Vec<i64> = books
+                        .iter()
+                        .filter_map(|b| {
+                            guard.values().find(|book| {
+                                book.exchange_id == b.source
+                                    && cob_common::extract_base_asset(&book.symbol)
+                                        == cob::asset_to_collector_symbol(asset)
+                            })
+                        })
+                        .map(|book| {
+                            if book.exchange_timestamp > 0 {
+                                book.exchange_timestamp
+                            } else {
+                                book.received_timestamp
+                            }
+                        })
+                        .filter(|t| *t > 0)
+                        .collect();
+                    if ts_ms.is_empty() {
+                        warn!(asset = %asset.symbol, "no usable book timestamps; skipping");
+                        continue;
+                    }
+                    ts_ms.sort_unstable();
+                    let mid = ts_ms[ts_ms.len() / 2];
+                    (mid / 1000).max(0) as u64
+                };
+
+                if !state.should_update(asset, fair.price, cob_signed_ts) {
+                    info!(
+                        asset = %asset.symbol,
+                        price = format!("{:.8}", fair.price),
+                        spread_bps = format!("{:.1}", fair.spread_bps),
+                        "COB price within threshold, skipping"
+                    );
+                    continue;
+                }
+
+                let hash_points: Vec<PricePoint> = books
+                    .iter()
+                    .map(|b| PricePoint {
+                        price: b.bids.first().map(|l| l.price).unwrap_or(0.0),
+                        volume: 0.0,
+                        source: b.source.clone(),
+                        server_time: cob_signed_ts,
+                    })
+                    .collect();
+                let price_fixed = match aggregator::to_fixed_point(fair.price, ORACLE_DECIMALS) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(asset = %asset.symbol, error = %e, "fixed-point conversion failed");
+                        continue;
+                    }
+                };
+                let sources_hash = aggregator::sources_hash(&hash_points);
+
+                let cached = CachedPrice {
+                    asset_symbol: asset.symbol.clone(),
+                    asset_id: asset.id(),
+                    price_fixed,
+                    price_human: fair.price,
+                    num_sources: fair.num_sources as u8,
+                    sources_hash,
+                    signed_timestamp: cob_signed_ts,
+                };
+
+                {
+                    let mut store = price_store.write().await;
+                    store.insert(asset.symbol.clone(), cached);
+                }
+
+                info!(
+                    asset = %asset.symbol,
+                    price = format!("{:.8}", fair.price),
+                    price_fixed = %price_fixed,
+                    spread_bps = format!("{:.1}", fair.spread_bps),
+                    num_sources = fair.num_sources,
+                    "cached COB price (signature on-demand)"
+                );
+
+                state.record_update(&asset.symbol, fair.price, cob_signed_ts);
+                continue;
+            }
+
             // 1. Fetch from all sources
             let raw_prices = sources::fetch_all(&price_sources, asset).await;
 
@@ -399,7 +638,7 @@ async fn main() -> Result<()> {
                 price = format!("{:.6}", median),
                 price_fixed = %price_fixed,
                 num_sources = prices.len(),
-                "📦 cached price (signature on-demand)"
+                "cached price (signature on-demand)"
             );
 
             // 6. Record update locally (keyed on enclave-authoritative ts).
@@ -407,11 +646,22 @@ async fn main() -> Result<()> {
         }
 
         if single_run {
-            info!("✅ Single run complete, exiting");
+            info!("Single run complete, requesting collector shutdown");
+            // Tell the supervisor + manager to drain. Best-effort
+            // -- if the mgr is mid-restart the Stop will be replayed
+            // on the next iteration of the supervisor loop.
+            let _ = mgr_cmd_tx.send(cob_common::CollectorCommand::Stop);
+            let shutdown =
+                tokio::time::timeout(std::time::Duration::from_secs(5), mgr_handle).await;
+            match shutdown {
+                Ok(Ok(())) => info!("collectors drained cleanly"),
+                Ok(Err(e)) => warn!(error = %e, "collector supervisor task panicked"),
+                Err(_) => warn!("collector shutdown timed out after 5s"),
+            }
             break;
         }
 
-        info!("💤 sleeping {} seconds...", FETCH_INTERVAL_SECS);
+        info!("sleeping {} seconds", FETCH_INTERVAL_SECS);
         tokio::time::sleep(std::time::Duration::from_secs(FETCH_INTERVAL_SECS)).await;
     }
 

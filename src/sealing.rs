@@ -26,11 +26,11 @@
 
 use std::time::SystemTime;
 
+use aes::Aes256;
 use aws_credential_types::Credentials;
 use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4::SigningParams;
 use aws_smithy_runtime_api::client::identity::Identity;
-use aes::Aes256;
 use base64::Engine;
 use bcder::decode::{Constructed, DecodeError};
 use bcder::{Mode, Oid, Tag};
@@ -163,17 +163,20 @@ fn decrypt_cfr(cfr_der: &[u8], priv_key: &RsaPrivateKey) -> Result<[u8; 32]> {
     let cek = priv_key
         .decrypt(Oaep::new::<Sha256>(), &fields.wrapped_cek)
         .map_err(|e| eyre!("CFR step 3: RSA-OAEP unwrap of content key: {}", e))?;
-    let cek: [u8; 32] = cek
-        .as_slice()
-        .try_into()
-        .map_err(|_| eyre!("CFR step 3: content key wrong length: expected 32, got {}", cek.len()))?;
+    let cek: [u8; 32] = cek.as_slice().try_into().map_err(|_| {
+        eyre!(
+            "CFR step 3: content key wrong length: expected 32, got {}",
+            cek.len()
+        )
+    })?;
 
     // 4. IV must be 16 bytes.
-    let iv: [u8; 16] = fields
-        .iv
-        .as_slice()
-        .try_into()
-        .map_err(|_| eyre!("CFR step 4: AES-CBC IV is not 16 bytes (got {})", fields.iv.len()))?;
+    let iv: [u8; 16] = fields.iv.as_slice().try_into().map_err(|_| {
+        eyre!(
+            "CFR step 4: AES-CBC IV is not 16 bytes (got {})",
+            fields.iv.len()
+        )
+    })?;
 
     // 5. AES-256-CBC decrypt, strip PKCS#7 padding.
     let mut buf = fields.encrypted_content;
