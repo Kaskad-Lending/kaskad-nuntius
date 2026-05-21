@@ -97,6 +97,18 @@
       }
     },
     {
+      "symbol": "USDT/USD",
+      "min_sources": 2,
+      "deviation_threshold_bps": 10,
+      "heartbeat_seconds": 86400,
+      "sources": {
+        "coinbase":  "USDT-USD",
+        "kraken":    "USDTUSD",
+        "bitstamp":  "usdtusd",
+        "coingecko": "tether"
+      }
+    },
+    {
       "symbol": "IGRA/USD",
       "min_sources": 1,
       "deviation_threshold_bps": 300,
