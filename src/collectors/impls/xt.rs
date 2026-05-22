@@ -176,9 +176,10 @@ impl Xt {
                         );
                         return Err(eyre!("xt gap"));
                     }
+                    let exch_ts_ms = d.time_ms;
                     book.apply_deltas(d.bids, d.asks, Some(d.last_id));
                     if !book.is_crossed() {
-                        sink.emit(book.to_orderbook_data(0, received_at));
+                        sink.emit(book.to_orderbook_data(exch_ts_ms, received_at));
                     }
                 }
                 Some(Ok(Message::Ping(p))) => {
@@ -216,6 +217,9 @@ struct RestSnapshot {
 struct XtDelta {
     first_id: u64,
     last_id: u64,
+    /// Exchange `t` field — usually unix ms, but `LatencyTracker::process`
+    /// will up-scale a seconds-resolution value if XT ever ships one (audit M-3).
+    time_ms: i64,
     bids: Vec<(f64, f64)>,
     asks: Vec<(f64, f64)>,
 }
@@ -229,6 +233,13 @@ fn parse_delta(text: &str) -> Option<(String, XtDelta)> {
     let symbol = data.get("s")?.as_str()?.to_lowercase();
     let first_id = parse_u64(data.get("fi")?)?;
     let last_id = parse_u64(data.get("i")?)?;
+    let time_ms = data
+        .get("t")
+        .and_then(|t| {
+            t.as_i64()
+                .or_else(|| t.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(0);
     let bids = parse_levels(data.get("b"));
     let asks = parse_levels(data.get("a"));
     Some((
@@ -236,6 +247,7 @@ fn parse_delta(text: &str) -> Option<(String, XtDelta)> {
         XtDelta {
             first_id,
             last_id,
+            time_ms,
             bids,
             asks,
         },
@@ -260,12 +272,20 @@ mod tests {
 
     #[test]
     fn parse_delta_works() {
-        let s = r#"{"topic":"depth_update","event":"depth_update@btc_usdt","data":{"s":"btc_usdt","fi":12346,"i":12350,"a":[["76865","0"]],"b":[["76860","5.12"]]}}"#;
+        let s = r#"{"topic":"depth_update","event":"depth_update@btc_usdt","data":{"s":"btc_usdt","fi":12346,"i":12350,"t":1704164645123,"a":[["76865","0"]],"b":[["76860","5.12"]]}}"#;
         let (sym, d) = parse_delta(s).unwrap();
         assert_eq!(sym, "btc_usdt");
         assert_eq!(d.first_id, 12346);
         assert_eq!(d.last_id, 12350);
+        assert_eq!(d.time_ms, 1704164645123);
         assert_eq!(d.bids, vec![(76860.0, 5.12)]);
         assert_eq!(d.asks, vec![(76865.0, 0.0)]);
+    }
+
+    #[test]
+    fn parse_delta_time_optional() {
+        let s = r#"{"topic":"depth_update","event":"depth_update@btc_usdt","data":{"s":"btc_usdt","fi":1,"i":2,"a":[],"b":[]}}"#;
+        let (_, d) = parse_delta(s).unwrap();
+        assert_eq!(d.time_ms, 0);
     }
 }

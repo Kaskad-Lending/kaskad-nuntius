@@ -221,9 +221,10 @@ impl Kucoin {
                                       upd.sequence_start);
                                 return Err(eyre!("kucoin gap"));
                             }
+                            let exch_ts_ms = upd.time_ms;
                             book.apply_deltas(upd.bids, upd.asks, Some(upd.sequence_end));
                             if !book.is_crossed() {
-                                sink.emit(book.to_orderbook_data(0, received_at));
+                                sink.emit(book.to_orderbook_data(exch_ts_ms, received_at));
                             }
                         }
                         Some(Ok(Message::Close(_))) | None => return Err(eyre!("WS closed")),
@@ -265,6 +266,10 @@ struct RestSnapshot {
 struct KucoinUpdate {
     sequence_start: u64,
     sequence_end: u64,
+    /// Exchange-side ms timestamp (Kucoin `data.time`). `0` if the
+    /// message omits it; the caller treats that as "no exchange ts"
+    /// and falls back to host receive-time. Audit M-3.
+    time_ms: i64,
     bids: Vec<(f64, f64)>,
     asks: Vec<(f64, f64)>,
 }
@@ -338,6 +343,14 @@ fn parse_l2_message(text: &str) -> Option<(String, KucoinUpdate)> {
     let data = v.get("data")?;
     let sequence_start = parse_u64(data.get("sequenceStart")?)?;
     let sequence_end = parse_u64(data.get("sequenceEnd")?)?;
+    // `time` is exchange-side, millis since epoch (Kucoin doc).
+    let time_ms = data
+        .get("time")
+        .and_then(|t| {
+            t.as_i64()
+                .or_else(|| t.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(0);
     let changes = data.get("changes")?;
     let bids = parse_change_entries(changes.get("bids"));
     let asks = parse_change_entries(changes.get("asks"));
@@ -346,6 +359,7 @@ fn parse_l2_message(text: &str) -> Option<(String, KucoinUpdate)> {
         KucoinUpdate {
             sequence_start,
             sequence_end,
+            time_ms,
             bids,
             asks,
         },
@@ -358,13 +372,23 @@ mod tests {
 
     #[test]
     fn parse_l2() {
-        let s = r#"{"type":"message","topic":"/market/level2:BTC-USDT","subject":"trade.l2update","data":{"sequenceStart":10,"sequenceEnd":12,"changes":{"asks":[["100","1","11"]],"bids":[["99","2","12"]]}}}"#;
+        let s = r#"{"type":"message","topic":"/market/level2:BTC-USDT","subject":"trade.l2update","data":{"sequenceStart":10,"sequenceEnd":12,"time":1704164645123,"changes":{"asks":[["100","1","11"]],"bids":[["99","2","12"]]}}}"#;
         let (sym, upd) = parse_l2_message(s).unwrap();
         assert_eq!(sym, "BTC-USDT");
         assert_eq!(upd.sequence_start, 10);
         assert_eq!(upd.sequence_end, 12);
+        assert_eq!(upd.time_ms, 1704164645123);
         assert_eq!(upd.asks, vec![(100.0, 1.0)]);
         assert_eq!(upd.bids, vec![(99.0, 2.0)]);
+    }
+
+    #[test]
+    fn parse_l2_time_optional() {
+        // `time` absent — `time_ms` defaults to 0 (caller treats it as
+        // "no exchange ts" and falls back to host receive-time).
+        let s = r#"{"type":"message","topic":"/market/level2:BTC-USDT","subject":"trade.l2update","data":{"sequenceStart":10,"sequenceEnd":12,"changes":{"asks":[],"bids":[]}}}"#;
+        let (_, upd) = parse_l2_message(s).unwrap();
+        assert_eq!(upd.time_ms, 0);
     }
 
     #[test]
@@ -377,6 +401,7 @@ mod tests {
         KucoinUpdate {
             sequence_start: start,
             sequence_end: end,
+            time_ms: 0,
             bids: vec![(100.0, 1.0)],
             asks: vec![(101.0, 1.0)],
         }

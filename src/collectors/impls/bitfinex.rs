@@ -64,13 +64,22 @@ impl Bitfinex {
             .await?;
         }
 
-        // chan_id ↔ symbol routing built up from subscribed events.
+        // chan_id ↔ subscribed-form symbol routing built up from `subscribed`
+        // events. LocalBook is keyed by subscribed-form (what Bitfinex echoes)
+        // but the OrderBookData it emits carries the normalized form
+        // (`tBTCUSD` → `BTCUSD`) so downstream `extract_base_asset` resolves
+        // to `BTC` without the generic T-strip hack (audit C-1).
         let mut chan_to_symbol: HashMap<i64, String> = HashMap::new();
         let mut books: HashMap<String, LocalBook> = self
             .config
             .pairs
             .iter()
-            .map(|p| (p.clone(), LocalBook::new("bitfinex", p.clone())))
+            .map(|p| {
+                (
+                    p.clone(),
+                    LocalBook::new("bitfinex", strip_bitfinex_t_prefix(p)),
+                )
+            })
             .collect();
         let mut tick: u64 = 0;
 
@@ -173,6 +182,20 @@ impl Collector for Bitfinex {
 
 type Levels = Vec<(f64, f64)>;
 
+/// `tBTCUSD` → `BTCUSD`; anything not starting with lowercase `t` + an
+/// uppercase letter passes through unchanged. Used only inside this
+/// collector — `cob_common::extract_base_asset` no longer does it
+/// generically (that produced collisions for tokens that legitimately
+/// begin with `T`, e.g. TBTC / TUSDC / TUSD).
+fn strip_bitfinex_t_prefix(symbol: &str) -> String {
+    let bytes = symbol.as_bytes();
+    if bytes.len() >= 2 && bytes[0] == b't' && bytes[1].is_ascii_uppercase() {
+        symbol[1..].to_string()
+    } else {
+        symbol.to_string()
+    }
+}
+
 fn split_levels(arr: &[Value]) -> (Levels, Levels) {
     let mut bids = Vec::new();
     let mut asks = Vec::new();
@@ -253,5 +276,22 @@ mod tests {
         assert!(b.is_empty());
         assert_eq!(a, vec![(100.0, 1.5)]);
         assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn strip_t_prefix_normalises_bitfinex_pairs() {
+        assert_eq!(strip_bitfinex_t_prefix("tBTCUSD"), "BTCUSD");
+        assert_eq!(strip_bitfinex_t_prefix("tETHUSD"), "ETHUSD");
+    }
+
+    #[test]
+    fn strip_t_prefix_leaves_other_symbols_alone() {
+        // Tokens that legitimately begin with uppercase T must be
+        // preserved — the audit C-1 collision case.
+        assert_eq!(strip_bitfinex_t_prefix("TBTCUSD"), "TBTCUSD");
+        assert_eq!(strip_bitfinex_t_prefix("TUSDCUSDT"), "TUSDCUSDT");
+        assert_eq!(strip_bitfinex_t_prefix("TRUMPUSDT"), "TRUMPUSDT");
+        // Bitfinex funding/derivative prefixes other than `t` pass through.
+        assert_eq!(strip_bitfinex_t_prefix("fUSD"), "fUSD");
     }
 }

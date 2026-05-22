@@ -1,6 +1,17 @@
 //! Consolidated Order Book (Algorithm 1, Mea/KEF): GCD-grid projection,
 //! cross-venue arbitrage clearing, fair mid-price. Pure compute, no I/O.
 //! Inputs come from `cob_state`, populated by the WS collector layer.
+//!
+//! USD pricing assumption (audit C-2).
+//! ---
+//! Every feed in `config/exchanges.json` is USDT-quoted (`BTC/USDT`, `ETH/USDT`,
+//! `USDC/USDT`, `KAS/USDT`). The oracle publishes them under USD names
+//! (`BTC/USD`, ...). This rebroadcast is honest *only as long as USDT ≈ USD*.
+//! If USDT depegs (Mar-2023 USDC, May-2022 UST are precedents), an
+//! unguarded oracle would silently lie. To detect that, the consumer
+//! must read `probe_usdc_mid` before publishing USD-named prices: USDC
+//! is itself USDT-quoted, so its consolidated mid is a direct USDT/USD
+//! proxy. If it strays from 1.0 beyond a tolerance, fail closed.
 
 use std::collections::BTreeMap;
 
@@ -19,9 +30,18 @@ pub struct Level {
 #[derive(Debug, Clone)]
 pub struct OrderBookSnapshot {
     pub source: String,
+    /// Normalised base ticker (`BTC`, `ETH`, ...). Filled in by
+    /// `read_books_from_state`; tests build it directly. Used by the
+    /// per-book spread gate to pick the right tolerance (audit M-4).
+    pub base_asset: String,
     pub bids: Vec<Level>,
     pub asks: Vec<Level>,
     pub tick_size: f64,
+    /// Best-effort exchange-side timestamp in unix-ms, or the local
+    /// receive time if the venue's payload had no usable timestamp
+    /// (audit C-3 / M-1: the main loop signs with the median of these,
+    /// never the host wall clock).
+    pub exchange_timestamp_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -230,7 +250,24 @@ pub fn consolidated_order_book(books: &[OrderBookSnapshot]) -> Option<FairValue>
 // ---------------------------------------------------------------------------
 
 const MIN_BOOK_DEPTH: usize = 3;
-const MAX_SPREAD_BPS: f64 = 500.0;
+/// Fallback spread cap for bases not enumerated below. Anything wider than
+/// 5 % is almost certainly stale or manipulated — keep it as a generous
+/// last-resort gate, not a regular operating point. Audit M-4.
+const MAX_SPREAD_BPS_DEFAULT: f64 = 500.0;
+
+/// Per-base spread cap. Honest top-of-book on major-CEX BTC/ETH/USDC stays
+/// well under 10 bps; a compromised venue can otherwise pad the spread
+/// up to MAX_SPREAD_BPS_DEFAULT and still pass sanity. These tighter caps
+/// reject manipulation early — at the per-book gate — instead of letting
+/// it land in the consolidated grid.
+fn max_spread_bps_for(base: &str) -> f64 {
+    match base {
+        "BTC" | "ETH" => 30.0,
+        "USDC" => 20.0,
+        "KAS" => 100.0,
+        _ => MAX_SPREAD_BPS_DEFAULT,
+    }
+}
 
 fn is_book_usable(book: &OrderBookSnapshot) -> bool {
     if book.bids.len() < MIN_BOOK_DEPTH || book.asks.len() < MIN_BOOK_DEPTH {
@@ -260,10 +297,14 @@ fn is_book_usable(book: &OrderBookSnapshot) -> bool {
     }
     let mid = (best_bid + best_ask) / 2.0;
     let spread_bps = (best_ask - best_bid) / mid * 10_000.0;
-    if spread_bps > MAX_SPREAD_BPS {
+    let max_spread_bps = max_spread_bps_for(&book.base_asset);
+    if spread_bps > max_spread_bps {
         warn!(
             source = book.source.as_str(),
-            spread_bps, "rejected: spread too wide"
+            base = book.base_asset.as_str(),
+            spread_bps,
+            max_spread_bps,
+            "rejected: spread too wide"
         );
         return false;
     }
@@ -295,12 +336,21 @@ pub async fn read_books_from_state(
     asset: &AssetConfig,
     state: &SharedBookState,
 ) -> Vec<OrderBookSnapshot> {
-    let now_ms = chrono::Utc::now().timestamp_millis();
     let symbol_filter = asset_to_collector_symbol(asset);
     if symbol_filter.is_empty() {
         return Vec::new();
     }
+    read_books_filtered(symbol_filter, state).await
+}
 
+/// Lower-level reader used by both `read_books_from_state` and the
+/// USDT-peg gate. Takes the base ticker filter directly (`"USDC"`,
+/// `"BTC"`, ...) so we don't need a synthetic `AssetConfig`.
+async fn read_books_filtered(
+    symbol_filter: &str,
+    state: &SharedBookState,
+) -> Vec<OrderBookSnapshot> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
     let guard = state.read().await;
     let mut snapshots: Vec<OrderBookSnapshot> = guard
         .values()
@@ -310,25 +360,38 @@ pub async fn read_books_from_state(
                 && !book.bids.is_empty()
                 && !book.asks.is_empty()
         })
-        .map(|book| OrderBookSnapshot {
-            source: book.exchange_id.clone(),
-            bids: book
-                .bids
-                .iter()
-                .map(|l| Level {
-                    price: l.price,
-                    quantity: l.quantity,
-                })
-                .collect(),
-            asks: book
-                .asks
-                .iter()
-                .map(|l| Level {
-                    price: l.price,
-                    quantity: l.quantity,
-                })
-                .collect(),
-            tick_size: tick_size_for(&book.exchange_id, &extract_base_asset(&book.symbol)),
+        .map(|book| {
+            let base = extract_base_asset(&book.symbol);
+            // Prefer the exchange's own timestamp; fall back to the local
+            // receive time only when the venue didn't give us one. NEVER
+            // host wall clock — audit C-3.
+            let ts_ms = if book.exchange_timestamp > 0 {
+                book.exchange_timestamp
+            } else {
+                book.received_timestamp
+            };
+            OrderBookSnapshot {
+                source: book.exchange_id.clone(),
+                tick_size: tick_size_for(&book.exchange_id, &base),
+                base_asset: base,
+                bids: book
+                    .bids
+                    .iter()
+                    .map(|l| Level {
+                        price: l.price,
+                        quantity: l.quantity,
+                    })
+                    .collect(),
+                asks: book
+                    .asks
+                    .iter()
+                    .map(|l| Level {
+                        price: l.price,
+                        quantity: l.quantity,
+                    })
+                    .collect(),
+                exchange_timestamp_ms: ts_ms,
+            }
         })
         .filter(is_book_usable)
         .collect();
@@ -356,6 +419,40 @@ pub fn is_cob_asset(asset: &AssetConfig) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// USDT-peg gate (audit C-2)
+// ---------------------------------------------------------------------------
+
+/// Tolerance for the USDC/USDT proxy used as a USDT-peg sentinel.
+/// 50 bps = 0.50 % drift from $1.00 is the line at which we refuse to
+/// publish USD-named prices that are actually USDT-quoted.
+pub const MAX_USDT_DEPEG_BPS: f64 = 50.0;
+
+/// Run a COB pass on USDC books (which are USDT-quoted) and return the
+/// consolidated mid. Returns `None` when fewer than `min_sources` books
+/// are usable — the caller decides whether that means "wait and retry"
+/// or "fail closed".
+pub async fn probe_usdc_mid(state: &SharedBookState, min_sources: usize) -> Option<f64> {
+    let books = read_books_filtered("USDC", state).await;
+    if books.len() < min_sources {
+        return None;
+    }
+    consolidated_order_book(&books).map(|fv| fv.price)
+}
+
+/// `Ok(mid)` if the USDT peg holds within `MAX_USDT_DEPEG_BPS`; otherwise
+/// `Err(observed_mid)` so the caller can log what it saw. `None` propagates
+/// when there aren't enough USDC sources yet — fail-closed at the caller.
+pub async fn usdt_peg_ok(state: &SharedBookState, min_sources: usize) -> Option<Result<f64, f64>> {
+    let mid = probe_usdc_mid(state, min_sources).await?;
+    let drift_bps = (mid - 1.0).abs() * 10_000.0;
+    if drift_bps <= MAX_USDT_DEPEG_BPS {
+        Some(Ok(mid))
+    } else {
+        Some(Err(mid))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -366,6 +463,7 @@ mod tests {
     fn make_book(source: &str, bids: &[(f64, f64)], asks: &[(f64, f64)]) -> OrderBookSnapshot {
         OrderBookSnapshot {
             source: source.to_string(),
+            base_asset: "KAS".to_string(),
             bids: bids
                 .iter()
                 .map(|&(p, q)| Level {
@@ -381,6 +479,7 @@ mod tests {
                 })
                 .collect(),
             tick_size: 0.00001,
+            exchange_timestamp_ms: 0,
         }
     }
 
@@ -413,15 +512,19 @@ mod tests {
         let books = vec![
             OrderBookSnapshot {
                 source: "a".to_string(),
+                base_asset: "KAS".into(),
                 bids: vec![],
                 asks: vec![],
                 tick_size: 0.0001,
+                exchange_timestamp_ms: 0,
             },
             OrderBookSnapshot {
                 source: "b".to_string(),
+                base_asset: "KAS".into(),
                 bids: vec![],
                 asks: vec![],
                 tick_size: 0.00005,
+                exchange_timestamp_ms: 0,
             },
         ];
         let grid = compute_common_grid(&books);
@@ -481,6 +584,46 @@ mod tests {
     }
 
     #[test]
+    fn btc_book_rejected_at_40bps_spread() {
+        // Audit M-4: BTC tolerance is 30 bps; 40 bps must be rejected.
+        // Builds a BTC book directly (cap-per-base lookup goes via
+        // `base_asset` on the snapshot).
+        let mut b = make_book(
+            "spoofer",
+            &[(50_000.0, 1.0), (49_999.0, 1.0), (49_998.0, 1.0)],
+            &[(50_200.0, 1.0), (50_201.0, 1.0), (50_202.0, 1.0)],
+        );
+        b.base_asset = "BTC".to_string();
+        // (50200-50000)/50100 ≈ 40 bps.
+        assert!(!is_book_usable(&b));
+    }
+
+    #[test]
+    fn btc_book_accepted_at_20bps_spread() {
+        let mut b = make_book(
+            "honest",
+            &[(50_000.0, 1.0), (49_999.0, 1.0), (49_998.0, 1.0)],
+            &[(50_100.0, 1.0), (50_101.0, 1.0), (50_102.0, 1.0)],
+        );
+        b.base_asset = "BTC".to_string();
+        // (50100-50000)/50050 ≈ 20 bps — under the 30 bps cap.
+        assert!(is_book_usable(&b));
+    }
+
+    #[test]
+    fn unknown_base_falls_back_to_500bps_default() {
+        // 200 bps would be rejected for BTC but accepted for an unknown base.
+        let mut b = make_book(
+            "wat",
+            &[(100.0, 1.0), (99.5, 1.0), (99.0, 1.0)],
+            &[(102.0, 1.0), (102.5, 1.0), (103.0, 1.0)],
+        );
+        b.base_asset = "ZZZZ".to_string();
+        // (102-100)/101 ≈ 198 bps.
+        assert!(is_book_usable(&b));
+    }
+
+    #[test]
     fn test_accept_healthy_book() {
         let b = book_with_depth("good", 5);
         assert!(is_book_usable(&b));
@@ -504,10 +647,24 @@ mod tests {
     }
 
     #[test]
-    fn symbol_filter_btc_matches_bitfinex_tbtcusd() {
-        // Bitfinex prefixes pairs with `t` (e.g. tBTCUSD); extract_base_asset
-        // strips the leading lowercase t before normalising.
-        assert_eq!(extract_base_asset("tBTCUSD"), "BTC");
+    fn symbol_filter_does_not_t_strip_uppercase_tokens() {
+        // Audit C-1: tokens that legitimately begin with `T` MUST NOT
+        // collapse into their would-be base. Bitfinex's `tBTCUSD`-style
+        // pairs are normalised inside the bitfinex collector before
+        // reaching this function — see `strip_bitfinex_t_prefix`.
+        assert_ne!(extract_base_asset("TBTC/USDT"), "BTC");
+        assert_ne!(extract_base_asset("TBTCUSDT"), "BTC");
+        assert_ne!(extract_base_asset("TUSDC/USDT"), "USDC");
+        assert_ne!(extract_base_asset("TUSDCUSDT"), "USDC");
+        assert_ne!(extract_base_asset("TUSDUSDT"), "USD");
+    }
+
+    #[test]
+    fn symbol_filter_normalised_bitfinex_pair_matches_base() {
+        // After bitfinex collector strips the lowercase `t`, the symbol
+        // that lands in cob_state is `BTCUSD` — and that DOES resolve.
+        assert_eq!(extract_base_asset("BTCUSD"), "BTC");
+        assert_eq!(extract_base_asset("ETHUSD"), "ETH");
     }
 
     #[test]
@@ -593,5 +750,70 @@ mod tests {
         assert!((tick_size_for("bybit", "XYZ") - 0.00001).abs() < 1e-12);
         // truly unknown venue + unknown base -> 1e-6
         assert!((tick_size_for("noname", "XYZ") - 0.000001).abs() < 1e-12);
+    }
+
+    use crate::cob_common::{OrderBookData, PriceLevel};
+    use crate::cob_state::{insert, new_shared};
+
+    fn usdc_book(ex: &str, mid: f64) -> OrderBookData {
+        let now = chrono::Utc::now().timestamp_millis();
+        // Five levels deep on each side, 1 bp spread either way around `mid`.
+        let bid_base = mid * 0.99995;
+        let ask_base = mid * 1.00005;
+        let bids = (0..5)
+            .map(|i| PriceLevel {
+                price: bid_base - (i as f64) * 1e-4,
+                quantity: 1000.0,
+            })
+            .collect();
+        let asks = (0..5)
+            .map(|i| PriceLevel {
+                price: ask_base + (i as f64) * 1e-4,
+                quantity: 1000.0,
+            })
+            .collect();
+        OrderBookData {
+            exchange_id: ex.into(),
+            symbol: "USDCUSDT".into(),
+            exchange_timestamp: now,
+            received_timestamp: now,
+            latency: 0,
+            bids,
+            asks,
+            node_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn usdt_peg_ok_when_usdc_pegs() {
+        let state = new_shared();
+        for ex in ["binance", "okx", "bybit"] {
+            insert(&state, usdc_book(ex, 1.0001)).await;
+        }
+        match usdt_peg_ok(&state, 3).await {
+            Some(Ok(mid)) => assert!((mid - 1.0001).abs() < 0.001, "got {mid}"),
+            other => panic!("expected Ok(~1.0001), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn usdt_peg_breaks_when_usdc_depegs_down() {
+        // USDT pumps → USDC priced cheap against it. 200 bps drift > 50 bps cap.
+        let state = new_shared();
+        for ex in ["binance", "okx", "bybit"] {
+            insert(&state, usdc_book(ex, 0.98)).await;
+        }
+        match usdt_peg_ok(&state, 3).await {
+            Some(Err(mid)) => assert!((mid - 0.98).abs() < 0.001, "got {mid}"),
+            other => panic!("expected Err(~0.98), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn usdt_peg_returns_none_below_min_sources() {
+        let state = new_shared();
+        insert(&state, usdc_book("binance", 1.0)).await;
+        // Only 1 source — below the min of 3.
+        assert!(usdt_peg_ok(&state, 3).await.is_none());
     }
 }

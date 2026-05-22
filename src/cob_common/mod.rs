@@ -92,6 +92,16 @@ impl LatencyTracker {
     }
 }
 
+/// Exchange config. Tick sizes are owned by `cob::tick_size_for` (a
+/// hardcoded matrix per (venue, base)); adding a new venue means a code
+/// change there, not a JSON edit. Older revisions of this file carried
+/// `tick_size` + `tick_overrides` fields, but they were never read by
+/// the COB layer — kept-but-unused config is worse than no config
+/// (operator thinks they can change behaviour from JSON, can't). Audit M-2.
+///
+/// `#[serde(default)]` + `#[serde(deny_unknown_fields)]` is intentionally
+/// NOT set: legacy `exchanges.json` blobs with `tick_size` / `tick_overrides`
+/// fields still parse — those fields are silently ignored.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExchangeConfig {
     pub name: String,
@@ -102,34 +112,12 @@ pub struct ExchangeConfig {
     pub pairs: Vec<String>,
     #[serde(default)]
     pub extra_params: HashMap<String, String>,
-    #[serde(default = "default_tick_size")]
-    pub tick_size: f64,
-    #[serde(default)]
-    pub tick_overrides: HashMap<String, f64>,
-}
-
-fn default_tick_size() -> f64 {
-    0.000001
 }
 
 impl ExchangeConfig {
     pub fn validate(&self) -> Result<(), String> {
-        if !self.tick_size.is_finite() || self.tick_size <= 0.0 {
-            return Err(format!(
-                "Exchange '{}': invalid tick_size {} (must be finite and > 0)",
-                self.name, self.tick_size
-            ));
-        }
         if self.name.is_empty() {
             return Err("Exchange config has empty name".to_string());
-        }
-        for (base, tick) in &self.tick_overrides {
-            if !tick.is_finite() || *tick <= 0.0 {
-                return Err(format!(
-                    "Exchange '{}': invalid tick_overrides[{}] = {} (must be finite and > 0)",
-                    self.name, base, tick
-                ));
-            }
         }
         Ok(())
     }
@@ -215,13 +203,14 @@ pub enum CollectorMessage {
 
 /// Extract the base asset from any exchange symbol format.
 /// "BTC/USD" -> "BTC", "KAS_USDT" -> "KAS", "ETHUSDT" -> "ETH".
+///
+/// NB: bitfinex prefixes spot pairs with lowercase `t` (e.g. `tBTCUSD`).
+/// Strip that in the bitfinex collector before forwarding the symbol —
+/// do NOT do it here, otherwise tokens that legitimately begin with `T`
+/// collide with their base (TBTC = Threshold-BTC mutates to BTC, TUSDC
+/// collapses into USDC, TUSD into USD). Audit C-1.
 pub fn extract_base_asset(symbol: &str) -> String {
     let s = symbol.to_uppercase();
-    let s = if s.starts_with('T') && s.len() > 1 && s.as_bytes()[1].is_ascii_uppercase() {
-        s[1..].to_string()
-    } else {
-        s
-    };
     for sep in ['/', '_', '-', ':'] {
         if let Some(pos) = s.find(sep) {
             return s[..pos].to_string();

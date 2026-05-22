@@ -374,8 +374,6 @@ mod tests {
             ws_url: "wss://stream.binance.com:9443".into(),
             pairs: vec!["BTCUSDT".into(), "ETHUSDT".into()],
             extra_params: Default::default(),
-            tick_size: 0.01,
-            tick_overrides: Default::default(),
         };
         let b = Binance::new(cfg);
         let url = b.ws_url();

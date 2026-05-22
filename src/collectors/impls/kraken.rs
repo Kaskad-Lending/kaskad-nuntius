@@ -102,6 +102,9 @@ impl Kraken {
 
                     let bids = parse_dict_levels(data.get("bids"));
                     let asks = parse_dict_levels(data.get("asks"));
+                    // Audit M-3: Kraken v2 ships an ISO-8601 `timestamp` per
+                    // data entry; without this we'd fall back to host clock.
+                    let exch_ts_ms = parse_rfc3339_ms(data.get("timestamp")).unwrap_or(0);
 
                     tick = tick.wrapping_add(1);
                     match mtype {
@@ -117,7 +120,7 @@ impl Kraken {
                         _ => continue,
                     }
                     if !book.is_crossed() {
-                        sink.emit(book.to_orderbook_data(0, received_at));
+                        sink.emit(book.to_orderbook_data(exch_ts_ms, received_at));
                     }
                 }
                 Some(Ok(Message::Ping(p))) => {
@@ -143,6 +146,14 @@ impl Collector for Kraken {
         sink.status("kraken", crate::cob_common::ServiceStatus::Connected);
         self.run_session(&sink).await
     }
+}
+
+/// Pull an ISO-8601 timestamp out of a Kraken `data[0].timestamp` value
+/// and return it as unix-ms. Audit M-3.
+fn parse_rfc3339_ms(v: Option<&Value>) -> Option<i64> {
+    let s = v?.as_str()?;
+    let dt = chrono::DateTime::parse_from_rfc3339(s).ok()?;
+    Some(dt.timestamp_millis())
 }
 
 /// Parse `[{"price":N,"qty":N}, ...]` (Kraken-specific dict shape).
@@ -177,5 +188,12 @@ mod tests {
         let v: Value = serde_json::from_str(s).unwrap();
         let data = v.get("data").unwrap().as_array().unwrap().first().unwrap();
         assert_eq!(data.get("symbol").unwrap().as_str().unwrap(), "BTC/USD");
+    }
+
+    #[test]
+    fn extracts_timestamp_from_update() {
+        let s = r#"{"timestamp":"2024-01-02T03:04:05.123456Z"}"#;
+        let v: Value = serde_json::from_str(s).unwrap();
+        assert_eq!(parse_rfc3339_ms(v.get("timestamp")), Some(1704164645123));
     }
 }

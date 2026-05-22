@@ -387,9 +387,53 @@ async fn main() -> Result<()> {
         "Starting oracle loop"
     );
 
+    // Min USDC books before we trust the peg gate. Three matches the
+    // USDC min_sources baked into config/assets.json — keep them in step.
+    const USDT_PEG_MIN_SOURCES: usize = 2;
+
     // Main oracle loop: fetch → aggregate → sign → store
     loop {
+        // USDT-peg gate (audit C-2): every feed is USDT-quoted, so we
+        // compute USDC/USDT once per cycle as a USDT/USD proxy. If it
+        // strays from $1 beyond the tolerance, refuse to publish any
+        // USD-named asset OTHER than USDC itself (USDC still ships so
+        // consumers can see the depeg through the oracle).
+        let usdt_peg = cob::usdt_peg_ok(&book_state, USDT_PEG_MIN_SOURCES).await;
+        let usdt_peg_ok = match usdt_peg {
+            Some(Ok(mid)) => {
+                info!(usdc_mid = format!("{:.6}", mid), "USDT peg gate OK");
+                true
+            }
+            Some(Err(mid)) => {
+                warn!(
+                    usdc_mid = format!("{:.6}", mid),
+                    max_drift_bps = cob::MAX_USDT_DEPEG_BPS,
+                    "USDT peg broken; non-USDC USD-named feeds will be skipped this cycle"
+                );
+                false
+            }
+            None => {
+                // Cold start / WS gap: too few USDC books to read the peg.
+                // Fail-closed for non-USDC publishes — better to stall
+                // updates than to ship USD-named prices we can't validate.
+                warn!(
+                    min_required = USDT_PEG_MIN_SOURCES,
+                    "USDT peg unknown (not enough USDC books); non-USDC USD-named feeds will be skipped"
+                );
+                false
+            }
+        };
+
         for asset in &config.assets {
+            // USDC itself bypasses the gate — it IS the peg sensor.
+            let asset_bypasses_peg_gate = asset.symbol == "USDC/USD";
+            if !usdt_peg_ok && !asset_bypasses_peg_gate {
+                warn!(
+                    asset = %asset.symbol,
+                    "skipping update — USDT peg gate failed this cycle"
+                );
+                continue;
+            }
             if cob::is_cob_asset(asset) {
                 let books = cob::read_books_from_state(asset, &book_state).await;
                 if books.len() < asset.min_sources {
@@ -410,25 +454,14 @@ async fn main() -> Result<()> {
                 };
 
                 // Cycle timestamp: median exchange_timestamp_ms, never the
-                // host wall clock (audit C-3/H-9).
+                // host wall clock (audit C-3 / H-9 / M-1). `read_books_from_state`
+                // attaches the venue's own ts to each snapshot already, so we
+                // compute the median in O(N) over a deterministic sorted-by-
+                // source list — no HashMap lookups, no iteration-order ambiguity.
                 let cob_signed_ts: u64 = {
-                    let guard = book_state.read().await;
                     let mut ts_ms: Vec<i64> = books
                         .iter()
-                        .filter_map(|b| {
-                            guard.values().find(|book| {
-                                book.exchange_id == b.source
-                                    && cob_common::extract_base_asset(&book.symbol)
-                                        == cob::asset_to_collector_symbol(asset)
-                            })
-                        })
-                        .map(|book| {
-                            if book.exchange_timestamp > 0 {
-                                book.exchange_timestamp
-                            } else {
-                                book.received_timestamp
-                            }
-                        })
+                        .map(|s| s.exchange_timestamp_ms)
                         .filter(|t| *t > 0)
                         .collect();
                     if ts_ms.is_empty() {

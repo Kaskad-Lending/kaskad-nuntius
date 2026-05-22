@@ -97,6 +97,10 @@ impl Coinbase {
                     if v.get("channel").and_then(|c| c.as_str()) != Some("l2_data") {
                         continue;
                     }
+                    // Audit M-3: outer `timestamp` is ISO-8601 from Coinbase
+                    // and is the exchange-side time for this batch. Median
+                    // of these across venues seeds the COB cycle stamp.
+                    let exch_ts_ms = parse_rfc3339_ms(v.get("timestamp")).unwrap_or(0);
                     let Some(events) = v.get("events").and_then(|e| e.as_array()) else {
                         continue;
                     };
@@ -129,7 +133,7 @@ impl Coinbase {
                             _ => continue,
                         }
                         if !book.is_crossed() {
-                            sink.emit(book.to_orderbook_data(0, received_at));
+                            sink.emit(book.to_orderbook_data(exch_ts_ms, received_at));
                         }
                     }
                 }
@@ -156,6 +160,16 @@ impl Collector for Coinbase {
         sink.status("coinbase", crate::cob_common::ServiceStatus::Connected);
         self.run_session(&sink).await
     }
+}
+
+/// Parse a Coinbase ISO-8601 timestamp value (`"2026-05-21T13:42:01.123456Z"`)
+/// into unix-ms. Returns `None` for missing / non-string / invalid input;
+/// callers fall back to host receive-time, which trips the COB cycle into
+/// host-clock-based timestamping — see audit M-3.
+fn parse_rfc3339_ms(v: Option<&Value>) -> Option<i64> {
+    let s = v?.as_str()?;
+    let dt = chrono::DateTime::parse_from_rfc3339(s).ok()?;
+    Some(dt.timestamp_millis())
 }
 
 /// Split `updates` into `(bids, asks)` of `(price, qty)`. `new_quantity == 0` deletes.
@@ -202,5 +216,24 @@ mod tests {
     fn channel_filter_is_l2_data_not_level2() {
         let v: Value = serde_json::from_str(r#"{"channel":"l2_data"}"#).unwrap();
         assert_eq!(v.get("channel").unwrap().as_str().unwrap(), "l2_data");
+    }
+
+    #[test]
+    fn parse_rfc3339_extracts_unix_ms() {
+        // Real-shape Coinbase l2_data envelope.
+        let v: Value =
+            serde_json::from_str(r#"{"timestamp":"2024-01-02T03:04:05.123456Z"}"#).unwrap();
+        let ts = parse_rfc3339_ms(v.get("timestamp")).expect("parses");
+        // 2024-01-02T03:04:05.123Z → 1704164645123 ms.
+        assert_eq!(ts, 1704164645123);
+    }
+
+    #[test]
+    fn parse_rfc3339_rejects_garbage_and_missing() {
+        assert!(parse_rfc3339_ms(None).is_none());
+        let v: Value = serde_json::from_str(r#"{"timestamp":"not a date"}"#).unwrap();
+        assert!(parse_rfc3339_ms(v.get("timestamp")).is_none());
+        let v: Value = serde_json::from_str(r#"{"timestamp":42}"#).unwrap();
+        assert!(parse_rfc3339_ms(v.get("timestamp")).is_none());
     }
 }

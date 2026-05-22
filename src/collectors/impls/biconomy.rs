@@ -85,6 +85,18 @@ impl Biconomy {
                             let Some(book) = books.get_mut(&symbol) else { continue };
                             let bids = parse_levels(data.get("bids"));
                             let asks = parse_levels(data.get("asks"));
+                            // Audit M-3: Biconomy includes a `time` or `ts`
+                            // field on depth pushes (seconds OR ms depending
+                            // on instrument). `LatencyTracker::process` up-
+                            // scales seconds-resolution values to ms.
+                            let exch_ts_ms = data
+                                .get("time")
+                                .or_else(|| data.get("ts"))
+                                .and_then(|t| {
+                                    t.as_i64()
+                                        .or_else(|| t.as_str().and_then(|s| s.parse().ok()))
+                                })
+                                .unwrap_or(0);
                             tick = tick.wrapping_add(1);
                             if is_full {
                                 book.apply_snapshot(bids, asks, Some(tick));
@@ -92,7 +104,7 @@ impl Biconomy {
                                 book.apply_deltas(bids, asks, Some(tick));
                             }
                             if !book.is_crossed() && book.is_ready() {
-                                sink.emit(book.to_orderbook_data(0, received_at));
+                                sink.emit(book.to_orderbook_data(exch_ts_ms, received_at));
                             }
                         }
                         Some(Ok(Message::Ping(p))) => { let _ = write.send(Message::Pong(p)).await; }

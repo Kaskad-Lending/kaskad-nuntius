@@ -91,10 +91,13 @@ impl Lbank {
                             let Some(book) = books.get_mut(&pair) else { continue };
                             let bids = parse_levels(d.get("bids"));
                             let asks = parse_levels(d.get("asks"));
+                            // Audit M-3: LBank includes a `TS` field
+                            // (naive UTC ISO-ish), e.g. "2019-06-28T17:49:22.722".
+                            let exch_ts_ms = parse_lbank_ts_ms(v.get("TS")).unwrap_or(0);
                             tick = tick.wrapping_add(1);
                             book.apply_snapshot(bids, asks, Some(tick));
                             if !book.is_crossed() {
-                                sink.emit(book.to_orderbook_data(0, received_at));
+                                sink.emit(book.to_orderbook_data(exch_ts_ms, received_at));
                             }
                         }
                         Some(Ok(Message::Ping(p))) => { let _ = write.send(Message::Pong(p)).await; }
@@ -127,6 +130,16 @@ impl Collector for Lbank {
     }
 }
 
+/// LBank ships server time as a TZ-less ISO-like string in `TS`, e.g.
+/// `"2019-06-28T17:49:22.722"`. Parse it as naive UTC. Returns `None` for
+/// missing / non-string / unparseable input — caller falls back to host
+/// receive-time (audit M-3).
+fn parse_lbank_ts_ms(v: Option<&Value>) -> Option<i64> {
+    let s = v?.as_str()?;
+    let dt = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").ok()?;
+    Some(dt.and_utc().timestamp_millis())
+}
+
 fn parse_levels(v: Option<&Value>) -> Vec<(f64, f64)> {
     let Some(arr) = v.and_then(|x| x.as_array()) else {
         return Vec::new();
@@ -150,5 +163,18 @@ mod tests {
         assert_eq!(v.get("pair").unwrap().as_str().unwrap(), "btc_usdt");
         let d = v.get("depth").unwrap();
         assert_eq!(parse_levels(d.get("bids")), vec![(76810.0, 2.5)]);
+    }
+
+    #[test]
+    fn parse_ts_field_handles_naive_utc() {
+        let v: Value = serde_json::from_str(r#"{"TS":"2024-01-02T03:04:05.123"}"#).unwrap();
+        assert_eq!(parse_lbank_ts_ms(v.get("TS")), Some(1704164645123));
+    }
+
+    #[test]
+    fn parse_ts_field_rejects_garbage() {
+        assert!(parse_lbank_ts_ms(None).is_none());
+        let v: Value = serde_json::from_str(r#"{"TS":"junk"}"#).unwrap();
+        assert!(parse_lbank_ts_ms(v.get("TS")).is_none());
     }
 }

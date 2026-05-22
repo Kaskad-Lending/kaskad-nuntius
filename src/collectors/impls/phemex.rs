@@ -15,7 +15,7 @@ use crate::cob_common::ExchangeConfig;
 use crate::collectors::book::LocalBook;
 use crate::collectors::collector::Collector;
 use crate::collectors::sink::BookSink;
-use crate::collectors::util::{now_ms, parse_u64, ws_connect};
+use crate::collectors::util::{now_ms, parse_i64, ws_connect};
 use async_trait::async_trait;
 use eyre::{eyre, Result};
 use futures::{SinkExt, StreamExt};
@@ -84,9 +84,16 @@ impl Phemex {
                             let Some(book) = books.get_mut(&symbol) else { continue };
 
                             let mtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("snapshot");
-                            let seq = v.get("sequence").and_then(parse_u64).unwrap_or(0);
                             let bids = parse_scaled(data.get("bids"));
                             let asks = parse_scaled(data.get("asks"));
+                            // Audit M-3: Phemex emits `timestamp` in nanoseconds.
+                            // Convert to ms here; LatencyTracker is happy with
+                            // ms-scale values via `normalize_timestamp_ms`.
+                            let exch_ts_ms = v
+                                .get("timestamp")
+                                .and_then(parse_i64)
+                                .map(|ns| ns / 1_000_000)
+                                .unwrap_or(0);
 
                             tick = tick.wrapping_add(1);
                             if mtype != "incremental" {
@@ -98,8 +105,7 @@ impl Phemex {
                             }
 
                             if !book.is_crossed() && book.is_ready() {
-                                let _ = seq;
-                                sink.emit(book.to_orderbook_data(0, received_at));
+                                sink.emit(book.to_orderbook_data(exch_ts_ms, received_at));
                             }
                         }
                         Some(Ok(Message::Ping(p))) => { let _ = write.send(Message::Pong(p)).await; }
@@ -167,5 +173,15 @@ mod tests {
         let v: Value = serde_json::from_str(s).unwrap();
         assert_eq!(v.get("symbol").unwrap().as_str().unwrap(), "sBTCUSDT");
         assert_eq!(v.get("type").unwrap().as_str().unwrap(), "snapshot");
+    }
+
+    #[test]
+    fn timestamp_field_is_nanoseconds() {
+        // Phemex emits unix ns. Confirm the JSON parses as i64 and the
+        // /1_000_000 reduction lands in ms range.
+        let s = r#"{"timestamp":1704164645123000000}"#;
+        let v: Value = serde_json::from_str(s).unwrap();
+        let ns = v.get("timestamp").and_then(parse_i64).unwrap();
+        assert_eq!(ns / 1_000_000, 1704164645123);
     }
 }
