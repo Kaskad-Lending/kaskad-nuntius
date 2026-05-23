@@ -1,0 +1,174 @@
+[
+  {
+    "name": "binance",
+    "enabled": true,
+    "ws_url": "wss://stream.binance.com:9443",
+    "pairs": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "USDCUSDT",
+      "KASUSDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "bingx",
+    "enabled": true,
+    "ws_url": "wss://open-api-ws.bingx.com/market",
+    "pairs": [
+      "BTC-USDT",
+      "ETH-USDT",
+      "USDC-USDT",
+      "KAS-USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "bitget",
+    "enabled": true,
+    "ws_url": "wss://ws.bitget.com/v2/ws/public",
+    "pairs": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "KASUSDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "bitmart",
+    "enabled": true,
+    "ws_url": "wss://ws-manager-compress.bitmart.com/api?protocol=1.1",
+    "pairs": [
+      "BTC_USDT",
+      "ETH_USDT",
+      "KAS_USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "bybit",
+    "enabled": true,
+    "ws_url": "wss://stream.bybit.com/v5/public/spot",
+    "pairs": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "USDCUSDT",
+      "KASUSDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "coinbase",
+    "enabled": true,
+    "ws_url": "wss://advanced-trade-ws.coinbase.com",
+    "pairs": [
+      "BTC-USDT",
+      "ETH-USDT",
+      "USDC-USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "cryptocom",
+    "enabled": true,
+    "ws_url": "wss://stream.crypto.com/exchange/v1/market",
+    "pairs": [
+      "BTC_USDT",
+      "ETH_USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "gate",
+    "enabled": true,
+    "ws_url": "wss://api.gateio.ws/ws/v4/",
+    "pairs": [
+      "BTC_USDT",
+      "ETH_USDT",
+      "USDC_USDT",
+      "KAS_USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "htx",
+    "enabled": true,
+    "ws_url": "wss://api.huobi.pro/ws",
+    "pairs": [
+      "btcusdt",
+      "ethusdt",
+      "kasusdt"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "kraken",
+    "enabled": true,
+    "ws_url": "wss://ws.kraken.com/v2",
+    "pairs": [
+      "BTC/USDT",
+      "ETH/USDT",
+      "USDC/USDT",
+      "KAS/USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "kucoin",
+    "enabled": true,
+    "ws_url": "wss://ws-api-spot.kucoin.com",
+    "pairs": [
+      "BTC-USDT",
+      "ETH-USDT",
+      "KAS-USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "lbank",
+    "enabled": true,
+    "ws_url": "wss://api.lbkex.com/ws/V2/",
+    "pairs": [
+      "btc_usdt",
+      "eth_usdt",
+      "usdc_usdt",
+      "kas_usdt"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "mexc",
+    "enabled": true,
+    "ws_url": "wss://wbs-api.mexc.com/ws",
+    "pairs": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "USDCUSDT",
+      "KASUSDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "okx",
+    "enabled": true,
+    "ws_url": "wss://ws.okx.com:8443/ws/v5/public",
+    "pairs": [
+      "BTC-USDT",
+      "ETH-USDT",
+      "USDC-USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "xt",
+    "enabled": true,
+    "ws_url": "wss://stream.xt.com/public",
+    "pairs": [
+      "btc_usdt",
+      "eth_usdt",
+      "usdc_usdt",
+      "kas_usdt"
+    ],
+    "extra_params": {}
+  }
+]

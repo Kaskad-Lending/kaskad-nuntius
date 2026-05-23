@@ -24,7 +24,6 @@
       "min_sources": 3,
       "deviation_threshold_bps": 50,
       "heartbeat_seconds": 3600,
-      "require_volume_weight": true,
       "sources": {
         "binance":    "ETHUSDT",
         "okx":        "ETH-USDT",
@@ -47,7 +46,6 @@
       "min_sources": 3,
       "deviation_threshold_bps": 50,
       "heartbeat_seconds": 3600,
-      "require_volume_weight": true,
       "sources": {
         "binance":    "BTCUSDT",
         "okx":        "BTC-USDT",
