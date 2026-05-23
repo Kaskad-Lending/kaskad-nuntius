@@ -21,58 +21,16 @@ use tracing::{error, info, warn};
 
 use signer::{MockSigner, OracleSigner};
 use sources::PriceSource;
-use types::{load_assets, AssetConfig, CachedPrice, PricePoint};
+use types::{load_assets, CachedPrice, PricePoint};
 
 const ORACLE_DECIMALS: u8 = 8;
-const FETCH_INTERVAL_SECS: u64 = 30;
+const FETCH_INTERVAL_SECS: u64 = 5;
 
 /// Shared state: latest aggregated prices (unsigned). Signature is created on-demand.
 pub type PriceStore = Arc<RwLock<HashMap<String, CachedPrice>>>;
 
 /// Shared signer, accessible by the price server for on-demand signing.
 pub type SharedSigner = Arc<dyn signer::OracleSigner>;
-
-/// Tracks the last pushed price and enclave-signed timestamp per asset.
-/// The timestamp used here is ALWAYS the median(server_time) from the last
-/// successful cycle — never `SystemTime::now()` (audit C-3/H-9). Subtraction
-/// is saturating so a median rewind cannot wrap to a huge diff and force a
-/// spurious heartbeat.
-struct OracleState {
-    // key = asset symbol (stable across config reloads).
-    last_prices: HashMap<String, (f64, u64)>,
-}
-
-impl OracleState {
-    fn new() -> Self {
-        Self {
-            last_prices: HashMap::new(),
-        }
-    }
-
-    /// `current_ts` must be the median(server_time) computed for the
-    /// current cycle's surviving sources. Never a host-clock read.
-    fn should_update(&self, asset: &AssetConfig, new_price: f64, current_ts: u64) -> bool {
-        match self.last_prices.get(&asset.symbol) {
-            None => true,
-            Some((last_price, last_ts)) => {
-                let elapsed = current_ts.saturating_sub(*last_ts);
-                if elapsed >= asset.heartbeat_seconds {
-                    return true;
-                }
-                let deviation_bps = ((new_price - last_price) / last_price * 10000.0).abs() as u16;
-                if deviation_bps >= asset.deviation_threshold_bps {
-                    return true;
-                }
-                false
-            }
-        }
-    }
-
-    fn record_update(&mut self, symbol: &str, price: f64, signed_ts: u64) {
-        self.last_prices
-            .insert(symbol.to_string(), (price, signed_ts));
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -379,7 +337,6 @@ async fn main() -> Result<()> {
     }
 
     let single_run = std::env::var("SINGLE_RUN").is_ok();
-    let mut state = OracleState::new();
 
     info!(
         assets = ?config.assets.iter().map(|a| a.symbol.as_str()).collect::<Vec<_>>(),
@@ -473,16 +430,6 @@ async fn main() -> Result<()> {
                     (mid / 1000).max(0) as u64
                 };
 
-                if !state.should_update(asset, fair.price, cob_signed_ts) {
-                    info!(
-                        asset = %asset.symbol,
-                        price = format!("{:.8}", fair.price),
-                        spread_bps = format!("{:.1}", fair.spread_bps),
-                        "COB price within threshold, skipping"
-                    );
-                    continue;
-                }
-
                 let hash_points: Vec<PricePoint> = books
                     .iter()
                     .map(|b| PricePoint {
@@ -524,8 +471,6 @@ async fn main() -> Result<()> {
                     num_sources = fair.num_sources,
                     "cached COB price (signature on-demand)"
                 );
-
-                state.record_update(&asset.symbol, fair.price, cob_signed_ts);
                 continue;
             }
 
@@ -604,8 +549,7 @@ async fn main() -> Result<()> {
                 continue;
             }
 
-            // 3. Compute weighted median price.
-            let (median, mode) = match aggregator::weighted_median(&prices) {
+            let (median, _mode) = match aggregator::weighted_median(&prices) {
                 Some(m) => m,
                 None => {
                     warn!(asset = %asset.symbol, "no prices after filtering");
@@ -613,30 +557,6 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Strict-policy assets (e.g. BTC/USD, ETH/USD) refuse to publish
-            // when the aggregator fell back to equal weighting — EXPLOIT-3.
-            // Better to serve a stale price (consumers' staleness guard
-            // kicks in) than a depth-blind one.
-            if asset.require_volume_weight && mode == aggregator::WeightingMode::EqualFallback {
-                warn!(
-                    asset = %asset.symbol,
-                    "require_volume_weight: volume quorum not met, skipping publication (fail-closed)"
-                );
-                continue;
-            }
-
-            // 4. Deviation / heartbeat — both keyed on enclave-authoritative
-            //    `signed_ts`, never the host clock (audit C-3/H-9).
-            if !state.should_update(asset, median, signed_ts) {
-                info!(
-                    asset = %asset.symbol,
-                    price = format!("{:.6}", median),
-                    "price within threshold, skipping"
-                );
-                continue;
-            }
-
-            // 5. Cache aggregated price — signature will be created on-demand by price_server
             let price_fixed = match aggregator::to_fixed_point(median, ORACLE_DECIMALS) {
                 Ok(p) => p,
                 Err(e) => {
@@ -673,9 +593,6 @@ async fn main() -> Result<()> {
                 num_sources = prices.len(),
                 "cached price (signature on-demand)"
             );
-
-            // 6. Record update locally (keyed on enclave-authoritative ts).
-            state.record_update(&asset.symbol, median, signed_ts);
         }
 
         if single_run {
