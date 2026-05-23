@@ -10,8 +10,9 @@ FROM rust:1.91.1-alpine3.20@sha256:1f1428db130caff5a0ae90d268a9dda7ba5fd6dad6979
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconf
 
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ ./src/
+COPY proto/ ./proto/
 # `include_str!("../config/assets.json")` means the file must be present at
 # compile time. Baking it into the EIF puts its bytes into PCR0.
 COPY config/ ./config/
