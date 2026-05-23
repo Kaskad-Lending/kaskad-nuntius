@@ -350,131 +350,87 @@ async fn main() -> Result<()> {
 
     // Main oracle loop: fetch → aggregate → sign → store
     loop {
-        // USDT-peg gate (audit C-2): every feed is USDT-quoted, so we
-        // compute USDC/USDT once per cycle as a USDT/USD proxy. If it
-        // strays from $1 beyond the tolerance, refuse to publish any
-        // USD-named asset OTHER than USDC itself (USDC still ships so
-        // consumers can see the depeg through the oracle).
-        let usdt_peg = cob::usdt_peg_ok(&book_state, USDT_PEG_MIN_SOURCES).await;
-        let usdt_peg_ok = match usdt_peg {
-            Some(Ok(mid)) => {
-                info!(usdc_mid = format!("{:.6}", mid), "USDT peg gate OK");
-                true
-            }
-            Some(Err(mid)) => {
-                warn!(
+        // Optional USDT-peg sentinel: log-only. We no longer fail-closed on
+        // depeg — the gate previously froze the cache for all non-USDC USD
+        // feeds whenever USDC WS books were unavailable, which is the
+        // overwhelmingly common state under our current proxy setup.
+        if let Some(res) = cob::usdt_peg_ok(&book_state, USDT_PEG_MIN_SOURCES).await {
+            match res {
+                Ok(mid) => info!(usdc_mid = format!("{:.6}", mid), "USDT peg observed"),
+                Err(mid) => warn!(
                     usdc_mid = format!("{:.6}", mid),
                     max_drift_bps = cob::MAX_USDT_DEPEG_BPS,
-                    "USDT peg broken; non-USDC USD-named feeds will be skipped this cycle"
-                );
-                false
+                    "USDT peg drifted past tolerance (informational, not gating publishes)"
+                ),
             }
-            None => {
-                // Cold start / WS gap: too few USDC books to read the peg.
-                // Fail-closed for non-USDC publishes — better to stall
-                // updates than to ship USD-named prices we can't validate.
-                warn!(
-                    min_required = USDT_PEG_MIN_SOURCES,
-                    "USDT peg unknown (not enough USDC books); non-USDC USD-named feeds will be skipped"
-                );
-                false
-            }
-        };
+        }
 
         for asset in &config.assets {
-            // USDC itself bypasses the gate — it IS the peg sensor.
-            let asset_bypasses_peg_gate = asset.symbol == "USDC/USD";
-            if !usdt_peg_ok && !asset_bypasses_peg_gate {
-                warn!(
-                    asset = %asset.symbol,
-                    "skipping update — USDT peg gate failed this cycle"
-                );
-                continue;
-            }
-            if cob::is_cob_asset(asset) {
+            // COB fast-path. Yields `Some(cached)` only if WS books made
+            // quorum AND produced a valid mid; otherwise falls through to
+            // the REST aggregator so a degraded WS layer never stalls
+            // publishes.
+            let cob_cached: Option<CachedPrice> = if cob::is_cob_asset(asset) {
                 let books = cob::read_books_from_state(asset, &book_state).await;
-                if books.len() < asset.min_sources {
-                    warn!(
-                        asset = %asset.symbol,
-                        num_sources = books.len(),
-                        min_required = asset.min_sources,
-                        "COB Quorum not met. Skipping."
-                    );
-                    continue;
-                }
-                let fair = match cob::consolidated_order_book(&books) {
-                    Some(fv) => fv,
-                    None => {
-                        warn!(asset = %asset.symbol, "COB returned no fair value");
-                        continue;
-                    }
-                };
-
-                // Cycle timestamp: median exchange_timestamp_ms, never the
-                // host wall clock (audit C-3 / H-9 / M-1). `read_books_from_state`
-                // attaches the venue's own ts to each snapshot already, so we
-                // compute the median in O(N) over a deterministic sorted-by-
-                // source list — no HashMap lookups, no iteration-order ambiguity.
-                let cob_signed_ts: u64 = {
+                let fair = (books.len() >= asset.min_sources)
+                    .then(|| cob::consolidated_order_book(&books))
+                    .flatten();
+                fair.and_then(|fair| {
                     let mut ts_ms: Vec<i64> = books
                         .iter()
                         .map(|s| s.exchange_timestamp_ms)
                         .filter(|t| *t > 0)
                         .collect();
                     if ts_ms.is_empty() {
-                        warn!(asset = %asset.symbol, "no usable book timestamps; skipping");
-                        continue;
+                        return None;
                     }
                     ts_ms.sort_unstable();
-                    let mid = ts_ms[ts_ms.len() / 2];
-                    (mid / 1000).max(0) as u64
-                };
-
-                let hash_points: Vec<PricePoint> = books
-                    .iter()
-                    .map(|b| PricePoint {
-                        price: b.bids.first().map(|l| l.price).unwrap_or(0.0),
-                        volume: 0.0,
-                        source: b.source.clone(),
-                        server_time: cob_signed_ts,
+                    let cob_signed_ts = (ts_ms[ts_ms.len() / 2] / 1000).max(0) as u64;
+                    let hash_points: Vec<PricePoint> = books
+                        .iter()
+                        .map(|b| PricePoint {
+                            price: b.bids.first().map(|l| l.price).unwrap_or(0.0),
+                            volume: 0.0,
+                            source: b.source.clone(),
+                            server_time: cob_signed_ts,
+                        })
+                        .collect();
+                    let price_fixed =
+                        aggregator::to_fixed_point(fair.price, ORACLE_DECIMALS).ok()?;
+                    Some(CachedPrice {
+                        asset_symbol: asset.symbol.clone(),
+                        asset_id: asset.id(),
+                        price_fixed,
+                        price_human: fair.price,
+                        num_sources: fair.num_sources as u8,
+                        sources_hash: aggregator::sources_hash(&hash_points),
+                        signed_timestamp: cob_signed_ts,
                     })
-                    .collect();
-                let price_fixed = match aggregator::to_fixed_point(fair.price, ORACLE_DECIMALS) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        warn!(asset = %asset.symbol, error = %e, "fixed-point conversion failed");
-                        continue;
-                    }
-                };
-                let sources_hash = aggregator::sources_hash(&hash_points);
+                })
+            } else {
+                None
+            };
 
-                let cached = CachedPrice {
-                    asset_symbol: asset.symbol.clone(),
-                    asset_id: asset.id(),
-                    price_fixed,
-                    price_human: fair.price,
-                    num_sources: fair.num_sources as u8,
-                    sources_hash,
-                    signed_timestamp: cob_signed_ts,
-                };
-
+            if let Some(cached) = cob_cached {
+                let symbol = cached.asset_symbol.clone();
+                let price_human = cached.price_human;
+                let price_fixed = cached.price_fixed;
+                let num_sources = cached.num_sources;
                 {
                     let mut store = price_store.write().await;
-                    store.insert(asset.symbol.clone(), cached);
+                    store.insert(symbol.clone(), cached);
                 }
-
                 info!(
-                    asset = %asset.symbol,
-                    price = format!("{:.8}", fair.price),
+                    asset = %symbol,
+                    price = format!("{:.8}", price_human),
                     price_fixed = %price_fixed,
-                    spread_bps = format!("{:.1}", fair.spread_bps),
-                    num_sources = fair.num_sources,
+                    num_sources = num_sources,
                     "cached COB price (signature on-demand)"
                 );
                 continue;
             }
 
-            // 1. Fetch from all sources
+            // REST fallback (and the only path for non-COB assets).
             let raw_prices = sources::fetch_all(&price_sources, asset).await;
 
             // 1a. Sanitise: drop NaN / ±Infinity / non-positive prices and
