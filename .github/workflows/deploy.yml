@@ -113,6 +113,7 @@ jobs:
               "export aws_region=us-east-1",
               "sudo dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel awscli docker git jq unzip",
               "sudo systemctl start docker",
+              "if ! swapon --show | grep -q /swapfile; then sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile; fi",
               "rm -rf /tmp/build && mkdir -p /tmp/build",
               "aws s3 cp s3://$eif_bucket/builds/$COMMIT/source.zip /tmp/source.zip",
               "unzip -q /tmp/source.zip -d /tmp/build/",
