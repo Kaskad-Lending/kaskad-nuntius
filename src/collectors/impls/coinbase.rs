@@ -133,7 +133,9 @@ impl Coinbase {
                             _ => continue,
                         }
                         if !book.is_crossed() {
-                            sink.emit(book.to_orderbook_data(exch_ts_ms, received_at));
+                            if let Some(d) = book.to_orderbook_data(exch_ts_ms, received_at) {
+                                sink.emit(d);
+                            }
                         }
                     }
                 }

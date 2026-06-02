@@ -91,8 +91,7 @@ mod tests {
         OrderBookData {
             exchange_id: ex.into(),
             symbol: sym.into(),
-            exchange_timestamp: 0,
-            received_timestamp: 0,
+            exchange_timestamp: 1_700_000_000_000,
             latency: 0,
             bids: vec![PriceLevel {
                 price: 100.0,

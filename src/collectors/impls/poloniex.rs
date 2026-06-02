@@ -84,7 +84,7 @@ impl Poloniex {
                                 let new_id = d.get("id").and_then(parse_u64);
                                 let bids = parse_levels(d.get("bids"));
                                 let asks = parse_levels(d.get("asks"));
-                                let ts = d.get("ts").and_then(parse_u64).map(|x| x as i64).unwrap_or(received_at);
+                                let ts = d.get("ts").and_then(parse_u64).map(|x| x as i64).unwrap_or(0);
 
                                 match action {
                                     "snapshot" => {
@@ -102,7 +102,9 @@ impl Poloniex {
                                     _ => continue,
                                 }
                                 if !book.is_crossed() && book.is_ready() {
-                                    sink.emit(book.to_orderbook_data(ts, received_at));
+                                    if let Some(d) = book.to_orderbook_data(ts, received_at) {
+                                        sink.emit(d);
+                                    }
                                 }
                             }
                         }

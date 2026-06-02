@@ -192,7 +192,9 @@ impl Orangex {
                             }
                             book.apply_deltas(d.bids, d.asks, Some(d.change_id));
                             if !book.is_crossed() {
-                                sink.emit(book.to_orderbook_data(d.timestamp, received_at));
+                                if let Some(d) = book.to_orderbook_data(d.timestamp, received_at) {
+                                    sink.emit(d);
+                                }
                             }
                         }
                         Some(Ok(Message::Ping(p))) => { let _ = write.send(Message::Pong(p)).await; }

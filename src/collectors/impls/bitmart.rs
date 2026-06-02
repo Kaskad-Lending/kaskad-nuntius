@@ -96,7 +96,7 @@ impl Bitmart {
                                 let Some(book) = books.get_mut(&symbol) else { continue };
                                 let typ = d.get("type").and_then(|t| t.as_str()).unwrap_or("");
                                 let Some(version) = d.get("version").and_then(parse_u64) else { continue };
-                                let ts = d.get("ms_t").and_then(parse_u64).map(|x| x as i64).unwrap_or(received_at);
+                                let ts = d.get("ms_t").and_then(parse_u64).map(|x| x as i64).unwrap_or(0);
                                 let bids = parse_levels(d.get("bids"));
                                 let asks = parse_levels(d.get("asks"));
 
@@ -136,7 +136,9 @@ impl Bitmart {
                                     _ => continue,
                                 }
                                 if !book.is_crossed() && book.is_ready() {
-                                    sink.emit(book.to_orderbook_data(ts, received_at));
+                                    if let Some(d) = book.to_orderbook_data(ts, received_at) {
+                                        sink.emit(d);
+                                    }
                                 }
                             }
                         }

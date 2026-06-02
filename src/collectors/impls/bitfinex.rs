@@ -152,7 +152,9 @@ impl Bitfinex {
                         book.apply_deltas(bids, asks, Some(tick));
                     }
                     if !book.is_crossed() && book.is_ready() {
-                        sink.emit(book.to_orderbook_data(0, received_at));
+                        if let Some(d) = book.to_orderbook_data(0, received_at) {
+                            sink.emit(d);
+                        }
                     }
                 }
                 Some(Ok(Message::Ping(p))) => {

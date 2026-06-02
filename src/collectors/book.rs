@@ -143,21 +143,43 @@ impl LocalBook {
     }
 
     /// Build a snapshot suitable for the data bus.
-    /// `exchange_ts_ms` is the exchange-side timestamp for this update (or 0 if absent),
-    /// `received_at_ms` is local wall clock.
-    pub fn to_orderbook_data(&self, exchange_ts_ms: i64, received_at_ms: i64) -> OrderBookData {
+    ///
+    /// `exchange_ts_ms` is the exchange-side timestamp for this update;
+    /// `received_at_ms` is used only as the latency-tracker's local
+    /// reference for the `latency` field — it is NEVER copied into the
+    /// resulting `exchange_timestamp`.
+    ///
+    /// Returns `None` when the venue did not provide a usable
+    /// timestamp (`exchange_ts_ms <= 0` after [`LatencyTracker::normalize_timestamp_ms`]).
+    /// The host wall clock MUST NOT be substituted — a missing exchange
+    /// timestamp means we drop the book.
+    pub fn to_orderbook_data(
+        &self,
+        exchange_ts_ms: i64,
+        received_at_ms: i64,
+    ) -> Option<OrderBookData> {
+        let (norm_ts, latency) = match self.latency.process(exchange_ts_ms, received_at_ms) {
+            Some(x) => x,
+            None => {
+                tracing::debug!(
+                    exchange = self.exchange_id.as_str(),
+                    symbol = self.symbol.as_str(),
+                    raw_ts = exchange_ts_ms,
+                    "dropping book: venue did not supply a usable exchange timestamp"
+                );
+                return None;
+            }
+        };
         let (bids, asks) = self.top_n(TOP_N);
-        let (norm_ts, latency) = self.latency.process(exchange_ts_ms, received_at_ms);
-        OrderBookData {
+        Some(OrderBookData {
             exchange_id: self.exchange_id.clone(),
             symbol: self.symbol.clone(),
             exchange_timestamp: norm_ts,
-            received_timestamp: received_at_ms,
             latency,
             bids,
             asks,
             node_id: None,
-        }
+        })
     }
 }
 

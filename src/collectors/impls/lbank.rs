@@ -97,7 +97,9 @@ impl Lbank {
                             tick = tick.wrapping_add(1);
                             book.apply_snapshot(bids, asks, Some(tick));
                             if !book.is_crossed() {
-                                sink.emit(book.to_orderbook_data(exch_ts_ms, received_at));
+                                if let Some(d) = book.to_orderbook_data(exch_ts_ms, received_at) {
+                                    sink.emit(d);
+                                }
                             }
                         }
                         Some(Ok(Message::Ping(p))) => { let _ = write.send(Message::Pong(p)).await; }

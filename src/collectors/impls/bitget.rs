@@ -93,7 +93,7 @@ impl Bitget {
                             let seq = match data.get("seq").and_then(parse_u64) {
                                 Some(s) => s, None => continue,
                             };
-                            let ts = data.get("ts").and_then(parse_u64).map(|x| x as i64).unwrap_or(received_at);
+                            let ts = data.get("ts").and_then(parse_u64).map(|x| x as i64).unwrap_or(0);
                             let bids = parse_levels(data.get("bids"));
                             let asks = parse_levels(data.get("asks"));
 
@@ -111,7 +111,9 @@ impl Bitget {
                                 _ => continue,
                             }
                             if !book.is_crossed() {
-                                sink.emit(book.to_orderbook_data(ts, received_at));
+                                if let Some(d) = book.to_orderbook_data(ts, received_at) {
+                                    sink.emit(d);
+                                }
                             }
                         }
                         Some(Ok(Message::Ping(p))) => { let _ = write.send(Message::Pong(p)).await; }

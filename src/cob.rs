@@ -170,6 +170,11 @@ fn compute_common_grid(books: &[OrderBookSnapshot]) -> f64 {
 /// 2. Project all bids/asks onto the grid, summing quantities per level.
 /// 3. Clear crossing volume until no overlap remains (arbitrage simulation).
 /// 4. Return fair mid-price = (best_bid + best_ask) / 2.
+///
+/// NB: this is the RAW consolidation step — it has no per-source
+/// outlier protection. Callers in the signing path MUST use
+/// [`gated_consolidated_order_book`] instead so a single venue with a
+/// manipulated book cannot pull the fair value.
 pub fn consolidated_order_book(books: &[OrderBookSnapshot]) -> Option<FairValue> {
     if books.is_empty() {
         return None;
@@ -243,6 +248,99 @@ pub fn consolidated_order_book(books: &[OrderBookSnapshot]) -> Option<FairValue>
         spread_bps,
         num_sources: books.len(),
     })
+}
+
+/// Sigma threshold for MAD-based per-source mid rejection on the COB
+/// path. Mirrors the REST aggregator's hardcoded `3.0` so the two
+/// paths have the same outlier tolerance.
+const COB_MID_OUTLIER_SIGMA: f64 = 3.0;
+
+/// Consolidate after running the per-source mid prices through the
+/// aggregator's protections, so the COB path no longer bypasses the
+/// safeguards the REST path enforces.
+///
+/// Pipeline:
+/// 1. Derive per-source mid from each book's top-of-book.
+/// 2. `aggregator::sanitize` — drops NaN/Inf/non-positive mid samples.
+/// 3. `aggregator::reject_outliers` — MAD-based rejection of per-source
+///    mid prices, so one venue with a manipulated book cannot pull the
+///    consolidated fair value.
+/// 4. Re-check `min_sources` on the surviving sample.
+/// 5. Filter the original `books` to only the surviving sources.
+/// 6. Hand off to [`consolidated_order_book`] for the actual COB clearing.
+///
+/// Time-drift filtering is already enforced upstream in
+/// [`read_books_filtered`] via the median-anchored exchange-timestamp
+/// window, so we do NOT run `reject_time_outliers` here — its
+/// second-resolution 5-minute window would be coarser than the
+/// 5-second ms-anchored gate the caller already applied, and
+/// re-applying it would be a confusing no-op.
+///
+/// Volume-weight capping is not applicable: the COB clears arbitrage
+/// against per-level depth, it never weights a source's contribution
+/// by its self-reported 24h volume the way `weighted_median` does.
+///
+/// Returns `None` if (a) input quorum fails, (b) MAD rejection drops
+/// the surviving sample below `min_sources`, or (c) the consolidator
+/// itself can't produce a fair value.
+pub fn gated_consolidated_order_book(
+    books: &[OrderBookSnapshot],
+    min_sources: usize,
+) -> Option<FairValue> {
+    if books.len() < min_sources {
+        return None;
+    }
+
+    // Per-source mids wrapped as PricePoints so we can reuse the
+    // aggregator's hardened filters verbatim.
+    let mids: Vec<crate::types::PricePoint> = books
+        .iter()
+        .filter_map(|b| {
+            let bid = b.bids.first()?.price;
+            let ask = b.asks.first()?.price;
+            Some(crate::types::PricePoint {
+                price: (bid + ask) / 2.0,
+                volume: 0.0,
+                source: b.source.clone(),
+                // `aggregator::sanitize` drops `server_time == 0`, so
+                // a book whose `exchange_timestamp_ms` is below 1000 ms
+                // (i.e. before the epoch+1s) self-excludes here too.
+                server_time: (b.exchange_timestamp_ms / 1000).max(0) as u64,
+            })
+        })
+        .collect();
+
+    let mut cleaned = crate::aggregator::sanitize(mids);
+    let after_sanitize = cleaned.len();
+    crate::aggregator::reject_outliers(&mut cleaned, COB_MID_OUTLIER_SIGMA);
+
+    if cleaned.len() < after_sanitize {
+        warn!(
+            removed = after_sanitize - cleaned.len(),
+            kept = cleaned.len(),
+            sigma = COB_MID_OUTLIER_SIGMA,
+            "COB: rejected per-source mid outliers before consolidation"
+        );
+    }
+
+    if cleaned.len() < min_sources {
+        warn!(
+            kept = cleaned.len(),
+            min_required = min_sources,
+            "COB: quorum lost after per-source mid filtering — falling through"
+        );
+        return None;
+    }
+
+    let surviving: std::collections::HashSet<&str> =
+        cleaned.iter().map(|p| p.source.as_str()).collect();
+    let kept: Vec<OrderBookSnapshot> = books
+        .iter()
+        .filter(|b| surviving.contains(b.source.as_str()))
+        .cloned()
+        .collect();
+
+    consolidated_order_book(&kept)
 }
 
 // ---------------------------------------------------------------------------
@@ -319,14 +417,39 @@ use crate::cob_common::{extract_base_asset, OrderBookData};
 use crate::cob_state::SharedBookState;
 use crate::types::AssetConfig;
 
-/// Max age (ms) for a book to count toward COB quorum.
-const MAX_BOOK_AGE_MS: i64 = 5_000;
+/// Max age (ms) a book may lag behind the reference clock and still
+/// count toward COB quorum.
+pub(crate) const MAX_BOOK_AGE_MS: i64 = 5_000;
 
-/// Closed range `[0, MAX_BOOK_AGE_MS]` so clock-skewed future timestamps
-/// don't pass a naive `now - ts <= max` check.
-fn fresh_book_age_ms(now_ms: i64, received_ts_ms: i64) -> bool {
-    let age = now_ms - received_ts_ms;
-    (0..=MAX_BOOK_AGE_MS).contains(&age)
+/// Reference "now" derived purely from the venue-attested timestamps
+/// already in the candidate set — no host wall clock.
+///
+/// Median is chosen over `max` so a single malicious venue cannot
+/// shift the reference (and therefore cannot cause every other venue's
+/// fresh book to be filtered out as stale, or force its own
+/// future-dated book to dominate). With ≥ `min_sources` honest venues,
+/// the median sits inside the honest pool.
+///
+/// Returns `None` only for an empty input.
+fn reference_now_ms(timestamps: &[i64]) -> Option<i64> {
+    if timestamps.is_empty() {
+        return None;
+    }
+    let mut v: Vec<i64> = timestamps.iter().copied().filter(|t| *t > 0).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_unstable();
+    Some(v[v.len() / 2])
+}
+
+/// True iff `book_ts_ms` sits inside `[reference - MAX_BOOK_AGE_MS,
+/// reference + MAX_BOOK_AGE_MS]`. Bounded on both sides so a malicious
+/// venue's future-dated book is also rejected (it self-excludes once
+/// the median is computed across the rest of the pool).
+fn fresh_book_age_ms(reference_ms: i64, book_ts_ms: i64) -> bool {
+    let delta = reference_ms - book_ts_ms;
+    delta.abs() <= MAX_BOOK_AGE_MS
 }
 
 /// Read all currently-fresh OrderBookData for `asset` from the shared
@@ -350,26 +473,41 @@ async fn read_books_filtered(
     symbol_filter: &str,
     state: &SharedBookState,
 ) -> Vec<OrderBookSnapshot> {
-    let now_ms = chrono::Utc::now().timestamp_millis();
     let guard = state.read().await;
+
+    // Two-pass: (1) collect the venue-attested timestamps of every
+    // candidate book for this symbol, (2) derive a host-clock-free
+    // reference and filter by relative staleness. No `Utc::now()` —
+    // the only time source we trust is what the exchanges signed off
+    // on in their WS payloads.
+    let candidate_ts: Vec<i64> = guard
+        .values()
+        .filter(|book: &&OrderBookData| {
+            extract_base_asset(&book.symbol) == symbol_filter
+                && !book.bids.is_empty()
+                && !book.asks.is_empty()
+                && book.exchange_timestamp > 0
+        })
+        .map(|book| book.exchange_timestamp)
+        .collect();
+
+    let reference_ms = match reference_now_ms(&candidate_ts) {
+        Some(t) => t,
+        // No candidate books at all → nothing to filter, nothing to emit.
+        None => return Vec::new(),
+    };
+
     let mut snapshots: Vec<OrderBookSnapshot> = guard
         .values()
         .filter(|book: &&OrderBookData| {
             extract_base_asset(&book.symbol) == symbol_filter
-                && fresh_book_age_ms(now_ms, book.received_timestamp)
                 && !book.bids.is_empty()
                 && !book.asks.is_empty()
+                && book.exchange_timestamp > 0
+                && fresh_book_age_ms(reference_ms, book.exchange_timestamp)
         })
         .map(|book| {
             let base = extract_base_asset(&book.symbol);
-            // Prefer the exchange's own timestamp; fall back to the local
-            // receive time only when the venue didn't give us one. NEVER
-            // host wall clock — audit C-3.
-            let ts_ms = if book.exchange_timestamp > 0 {
-                book.exchange_timestamp
-            } else {
-                book.received_timestamp
-            };
             OrderBookSnapshot {
                 source: book.exchange_id.clone(),
                 tick_size: tick_size_for(&book.exchange_id, &base),
@@ -390,7 +528,7 @@ async fn read_books_filtered(
                         quantity: l.quantity,
                     })
                     .collect(),
-                exchange_timestamp_ms: ts_ms,
+                exchange_timestamp_ms: book.exchange_timestamp,
             }
         })
         .filter(is_book_usable)
@@ -459,6 +597,12 @@ pub async fn usdt_peg_ok(state: &SharedBookState, min_sources: usize) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fixed exchange-attested timestamp shared by every fixture book
+    /// in this test module. No `Utc::now()` — the tests must not need
+    /// host time, and the COB filter is anchored to the median of the
+    /// books' own timestamps.
+    const FIXTURE_TS_MS: i64 = 1_700_000_000_000;
 
     fn make_book(source: &str, bids: &[(f64, f64)], asks: &[(f64, f64)]) -> OrderBookSnapshot {
         OrderBookSnapshot {
@@ -680,16 +824,117 @@ mod tests {
     }
 
     #[test]
-    fn fresh_book_age_rejects_future_timestamp() {
+    fn fresh_book_age_rejects_far_future_timestamp() {
+        // A book whose exchange ts is more than `MAX_BOOK_AGE_MS`
+        // ahead of the reference is rejected from the other side
+        // of the symmetric closed range. A lone malicious venue
+        // can't simultaneously dominate the median AND survive the
+        // staleness filter — its own outlier ts excludes it.
         let now = 1_700_000_000_000_i64;
-        // received 1s in the future -> delta is negative -> reject.
-        assert!(!fresh_book_age_ms(now, now + 1_000));
+        assert!(!fresh_book_age_ms(now, now + MAX_BOOK_AGE_MS + 1));
+    }
+
+    #[test]
+    fn fresh_book_age_accepts_minor_skew_either_side() {
+        // Real exchanges drift a few hundred ms either way relative
+        // to each other; the symmetric window must not reject them.
+        let now = 1_700_000_000_000_i64;
+        assert!(fresh_book_age_ms(now, now + 1_000));
+        assert!(fresh_book_age_ms(now, now - 1_000));
     }
 
     #[test]
     fn fresh_book_age_rejects_stale() {
         let now = 1_700_000_000_000_i64;
         assert!(!fresh_book_age_ms(now, now - (MAX_BOOK_AGE_MS + 1)));
+    }
+
+    fn timestamped_book(source: &str, mid: f64, ts_ms: i64) -> OrderBookSnapshot {
+        let bid = mid * 0.99995;
+        let ask = mid * 1.00005;
+        OrderBookSnapshot {
+            source: source.into(),
+            base_asset: "KAS".into(),
+            bids: (0..5)
+                .map(|i| Level {
+                    price: bid - (i as f64) * 1e-5,
+                    quantity: 1_000.0,
+                })
+                .collect(),
+            asks: (0..5)
+                .map(|i| Level {
+                    price: ask + (i as f64) * 1e-5,
+                    quantity: 1_000.0,
+                })
+                .collect(),
+            tick_size: 0.00001,
+            exchange_timestamp_ms: ts_ms,
+        }
+    }
+
+    #[test]
+    fn gated_returns_none_below_min_sources() {
+        let books = vec![timestamped_book("binance", 0.031, FIXTURE_TS_MS)];
+        assert!(gated_consolidated_order_book(&books, 2).is_none());
+    }
+
+    #[test]
+    fn gated_passes_through_clean_input() {
+        let books = vec![
+            timestamped_book("binance", 0.031, FIXTURE_TS_MS),
+            timestamped_book("bybit", 0.0311, FIXTURE_TS_MS),
+            timestamped_book("okx", 0.0309, FIXTURE_TS_MS),
+            timestamped_book("kucoin", 0.03105, FIXTURE_TS_MS),
+            timestamped_book("mexc", 0.03095, FIXTURE_TS_MS),
+        ];
+        let fv = gated_consolidated_order_book(&books, 3)
+            .expect("clean 5-source input should consolidate");
+        // Honest consensus around 0.031 ± noise. The exact figure
+        // depends on COB clearing; just bound it.
+        assert!((0.0305..=0.0315).contains(&fv.price), "mid={}", fv.price);
+        assert_eq!(fv.num_sources, 5);
+    }
+
+    #[test]
+    fn gated_rejects_per_source_mid_outlier_before_consolidation() {
+        // 5 honest venues ~0.031, one attacker at 0.62 (20× away).
+        // MAD rejection must drop the attacker, and the resulting
+        // FairValue must reflect the honest cluster only.
+        let books = vec![
+            timestamped_book("binance", 0.031, FIXTURE_TS_MS),
+            timestamped_book("bybit", 0.0311, FIXTURE_TS_MS),
+            timestamped_book("okx", 0.0309, FIXTURE_TS_MS),
+            timestamped_book("kucoin", 0.03105, FIXTURE_TS_MS),
+            timestamped_book("mexc", 0.03095, FIXTURE_TS_MS),
+            timestamped_book("attacker", 0.62, FIXTURE_TS_MS),
+        ];
+        let fv = gated_consolidated_order_book(&books, 3)
+            .expect("five honest survivors clear the gate");
+        assert_eq!(
+            fv.num_sources, 5,
+            "attacker book must be excluded from consolidation"
+        );
+        assert!(fv.price < 0.05, "honest cluster must dominate, got {}", fv.price);
+    }
+
+    #[test]
+    fn gated_returns_none_when_mid_rejection_busts_quorum() {
+        // 3 books, two are wild outliers vs the third. MAD on a
+        // 3-sample set is a no-op (needs ≥3 to fire), but we set
+        // min_sources to 3 — the result must still be Some because
+        // MAD short-circuits at < 3 cleaned samples. To force the
+        // quorum-loss path we need a larger sample with most as
+        // attackers, e.g. 5 books, 4 at 1.0 and 1 at 0.031 with
+        // min_sources=5 → after MAD on a tight cluster the lone
+        // outlier drops, quorum (5) lost.
+        let books = vec![
+            timestamped_book("a", 1.000, FIXTURE_TS_MS),
+            timestamped_book("b", 1.001, FIXTURE_TS_MS),
+            timestamped_book("c", 0.999, FIXTURE_TS_MS),
+            timestamped_book("d", 1.0005, FIXTURE_TS_MS),
+            timestamped_book("attacker", 0.031, FIXTURE_TS_MS),
+        ];
+        assert!(gated_consolidated_order_book(&books, 5).is_none());
     }
 
     #[test]
@@ -756,7 +1001,6 @@ mod tests {
     use crate::cob_state::{insert, new_shared};
 
     fn usdc_book(ex: &str, mid: f64) -> OrderBookData {
-        let now = chrono::Utc::now().timestamp_millis();
         // Five levels deep on each side, 1 bp spread either way around `mid`.
         let bid_base = mid * 0.99995;
         let ask_base = mid * 1.00005;
@@ -775,8 +1019,7 @@ mod tests {
         OrderBookData {
             exchange_id: ex.into(),
             symbol: "USDCUSDT".into(),
-            exchange_timestamp: now,
-            received_timestamp: now,
+            exchange_timestamp: FIXTURE_TS_MS,
             latency: 0,
             bids,
             asks,

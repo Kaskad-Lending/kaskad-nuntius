@@ -96,7 +96,7 @@ impl Bybit {
                                 Some(u) => u,
                                 None => continue,
                             };
-                            let exch_ts = v.get("ts").and_then(parse_u64).map(|x| x as i64).unwrap_or(received_at);
+                            let exch_ts = v.get("ts").and_then(parse_u64).map(|x| x as i64).unwrap_or(0);
 
                             let bids = parse_pairs(data.get("b"));
                             let asks = parse_pairs(data.get("a"));
@@ -116,7 +116,9 @@ impl Bybit {
                                 _ => continue,
                             }
                             if !book.is_crossed() {
-                                sink.emit(book.to_orderbook_data(exch_ts, received_at));
+                                if let Some(d) = book.to_orderbook_data(exch_ts, received_at) {
+                                    sink.emit(d);
+                                }
                             }
                         }
                         Some(Ok(Message::Ping(p))) => { let _ = write.send(Message::Pong(p)).await; }
