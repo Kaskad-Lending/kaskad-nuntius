@@ -42,6 +42,24 @@ pub trait OracleSigner: Send + Sync {
 
     /// Get the attestation document (if available).
     fn attestation_doc(&self) -> Option<Vec<u8>>;
+
+    /// Whether `attestation_doc()` returning `None` must be treated as a
+    /// fail-closed condition for any operation that produces an
+    /// authoritative signed price.
+    ///
+    /// A Nitro-backed signer that can no longer produce a fresh
+    /// attestation doc has lost its proof of being inside the trust
+    /// envelope; continuing to sign would let a compromised host emit
+    /// "authoritative" prices that no consumer can distinguish from a
+    /// healthy enclave's output. The price server refuses to sign in
+    /// that state.
+    ///
+    /// Default `false` covers `MockSigner` and any future test/host
+    /// signer where attestation simply doesn't exist; production
+    /// signers (e.g. `EnclaveSigner`) MUST override this to `true`.
+    fn requires_attestation_for_signing(&self) -> bool {
+        false
+    }
 }
 
 /// Apply the EIP-191 wrapping (`"\x19Ethereum Signed Message:\n32" || digest`),
@@ -292,5 +310,12 @@ impl OracleSigner for EnclaveSigner {
                 None
             }
         }
+    }
+
+    /// Production policy: a Nitro-backed signer that can't produce a
+    /// fresh attestation doc has no proof of enclave health.
+    /// The price server gates `get_price` / `get_prices` on this.
+    fn requires_attestation_for_signing(&self) -> bool {
+        true
     }
 }
