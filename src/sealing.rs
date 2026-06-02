@@ -74,7 +74,11 @@ pub async fn try_unseal() -> Result<LoadOutcome> {
     };
 
     // Ephemeral RSA-2048 keypair lives only on this stack frame.
-    let mut rng = rsa::rand_core::OsRng;
+    // RNG is rooted in NSM hardware — `OsRng` would be `/dev/urandom`,
+    // seeded from host-supplied virtio-rng, which would let the host
+    // predict this key and decrypt KMS' `CiphertextForRecipient`.
+    let mut rng = crate::nsm_rng::NsmRng::new()
+        .map_err(|e| eyre!("NSM RNG init for ephemeral RSA: {}", e))?;
     let priv_key =
         RsaPrivateKey::new(&mut rng, 2048).map_err(|e| eyre!("RSA-2048 keygen: {}", e))?;
     let pub_key = RsaPublicKey::from(&priv_key);

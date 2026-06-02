@@ -5,6 +5,8 @@ mod cob_common;
 mod cob_state;
 mod collectors;
 mod http_client;
+#[cfg(target_os = "linux")]
+mod nsm_rng;
 mod price_server;
 #[cfg(target_os = "linux")]
 mod sealing;
