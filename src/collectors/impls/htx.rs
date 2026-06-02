@@ -213,7 +213,9 @@ impl Htx {
                         book.apply_snapshot(snap.bids, snap.asks, Some(snap.version));
                         continue;
                     }
-                    sink.emit(book.to_orderbook_data(delta.ts, received_at));
+                    if let Some(d) = book.to_orderbook_data(delta.ts, received_at) {
+                        sink.emit(d);
+                    }
                 }
                 Some(Ok(Message::Ping(p))) => {
                     let _ = write.send(Message::Pong(p)).await;

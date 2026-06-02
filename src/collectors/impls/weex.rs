@@ -103,7 +103,7 @@ impl Weex {
                         .get("E")
                         .and_then(parse_u64)
                         .map(|x| x as i64)
-                        .unwrap_or(received_at);
+                        .unwrap_or(0);
                     let bids = parse_levels(v.get("b"));
                     let asks = parse_levels(v.get("a"));
 
@@ -126,7 +126,9 @@ impl Weex {
                         _ => continue,
                     }
                     if !book.is_crossed() && book.is_ready() {
-                        sink.emit(book.to_orderbook_data(exch_ts, received_at));
+                        if let Some(d) = book.to_orderbook_data(exch_ts, received_at) {
+                            sink.emit(d);
+                        }
                     }
                 }
                 Some(Ok(Message::Ping(p))) => {

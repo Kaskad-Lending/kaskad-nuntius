@@ -224,7 +224,9 @@ impl Kucoin {
                             let exch_ts_ms = upd.time_ms;
                             book.apply_deltas(upd.bids, upd.asks, Some(upd.sequence_end));
                             if !book.is_crossed() {
-                                sink.emit(book.to_orderbook_data(exch_ts_ms, received_at));
+                                if let Some(d) = book.to_orderbook_data(exch_ts_ms, received_at) {
+                                    sink.emit(d);
+                                }
                             }
                         }
                         Some(Ok(Message::Close(_))) | None => return Err(eyre!("WS closed")),

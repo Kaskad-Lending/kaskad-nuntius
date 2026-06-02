@@ -232,8 +232,10 @@ impl Binance {
                             }
                             book.apply_deltas(ev.bids, ev.asks, Some(ev.final_id));
                             if !book.is_crossed() {
-                                let exch_ts = ev.event_time.unwrap_or(received_at);
-                                sink.emit(book.to_orderbook_data(exch_ts, received_at));
+                                let exch_ts = ev.event_time.unwrap_or(0);
+                                if let Some(d) = book.to_orderbook_data(exch_ts, received_at) {
+                                    sink.emit(d);
+                                }
                             }
                         }
                         Some(Ok(Message::Binary(_))) => {} // unused on binance

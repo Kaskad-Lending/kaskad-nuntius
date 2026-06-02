@@ -124,9 +124,11 @@ impl CryptoCom {
                                     .get("t")
                                     .and_then(parse_u64)
                                     .map(|x| x as i64)
-                                    .unwrap_or(received_at);
+                                    .unwrap_or(0);
                                 if !book.is_crossed() {
-                                    sink.emit(book.to_orderbook_data(ts, received_at));
+                                    if let Some(d) = book.to_orderbook_data(ts, received_at) {
+                                        sink.emit(d);
+                                    }
                                 }
                             }
                         }
@@ -151,9 +153,11 @@ impl CryptoCom {
                                     .get("t")
                                     .and_then(parse_u64)
                                     .map(|x| x as i64)
-                                    .unwrap_or(received_at);
+                                    .unwrap_or(0);
                                 if !book.is_crossed() {
-                                    sink.emit(book.to_orderbook_data(ts, received_at));
+                                    if let Some(d) = book.to_orderbook_data(ts, received_at) {
+                                        sink.emit(d);
+                                    }
                                 }
                             }
                         }

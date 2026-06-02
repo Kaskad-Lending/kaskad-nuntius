@@ -89,7 +89,7 @@ impl Gate {
                             let is_full = result.get("full").and_then(|f| f.as_bool()).unwrap_or(false);
                             let big_u = result.get("U").and_then(parse_u64);
                             let lit_u = result.get("u").and_then(parse_u64);
-                            let exch_ts = result.get("t").and_then(parse_u64).map(|x| x as i64).unwrap_or(received_at);
+                            let exch_ts = result.get("t").and_then(parse_u64).map(|x| x as i64).unwrap_or(0);
                             let bids = parse_levels(result.get("b"));
                             let asks = parse_levels(result.get("a"));
 
@@ -108,7 +108,9 @@ impl Gate {
                                 book.apply_deltas(bids, asks, Some(u));
                             }
                             if !book.is_crossed() {
-                                sink.emit(book.to_orderbook_data(exch_ts, received_at));
+                                if let Some(d) = book.to_orderbook_data(exch_ts, received_at) {
+                                    sink.emit(d);
+                                }
                             }
                         }
                         Some(Ok(Message::Ping(p))) => { let _ = write.send(Message::Pong(p)).await; }

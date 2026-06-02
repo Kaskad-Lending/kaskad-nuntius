@@ -92,7 +92,7 @@ impl Okx {
                                 Some(s) => s,
                                 None => continue,
                             };
-                            let exch_ts = data.get("ts").and_then(parse_u64).map(|x| x as i64).unwrap_or(received_at);
+                            let exch_ts = data.get("ts").and_then(parse_u64).map(|x| x as i64).unwrap_or(0);
                             let bids = parse_levels(data.get("bids"));
                             let asks = parse_levels(data.get("asks"));
 
@@ -132,7 +132,9 @@ impl Okx {
                                 _ => continue,
                             }
                             if !book.is_crossed() {
-                                sink.emit(book.to_orderbook_data(exch_ts, received_at));
+                                if let Some(d) = book.to_orderbook_data(exch_ts, received_at) {
+                                    sink.emit(d);
+                                }
                             }
                         }
                         Some(Ok(Message::Ping(p))) => { let _ = write.send(Message::Pong(p)).await; }

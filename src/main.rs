@@ -5,6 +5,8 @@ mod cob_common;
 mod cob_state;
 mod collectors;
 mod http_client;
+#[cfg(target_os = "linux")]
+mod nsm_rng;
 mod price_server;
 #[cfg(target_os = "linux")]
 mod sealing;
@@ -372,9 +374,11 @@ async fn main() -> Result<()> {
             // publishes.
             let cob_cached: Option<CachedPrice> = if cob::is_cob_asset(asset) {
                 let books = cob::read_books_from_state(asset, &book_state).await;
-                let fair = (books.len() >= asset.min_sources)
-                    .then(|| cob::consolidated_order_book(&books))
-                    .flatten();
+                // `gated_consolidated_order_book` reapplies the
+                // aggregator's sanitize + MAD-by-price gate per source
+                // before COB consolidation, so a single venue with a
+                // manipulated book cannot pull the fair value.
+                let fair = cob::gated_consolidated_order_book(&books, asset.min_sources);
                 fair.and_then(|fair| {
                     let mut ts_ms: Vec<i64> = books
                         .iter()

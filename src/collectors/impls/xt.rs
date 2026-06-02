@@ -179,7 +179,9 @@ impl Xt {
                     let exch_ts_ms = d.time_ms;
                     book.apply_deltas(d.bids, d.asks, Some(d.last_id));
                     if !book.is_crossed() {
-                        sink.emit(book.to_orderbook_data(exch_ts_ms, received_at));
+                        if let Some(d) = book.to_orderbook_data(exch_ts_ms, received_at) {
+                            sink.emit(d);
+                        }
                     }
                 }
                 Some(Ok(Message::Ping(p))) => {

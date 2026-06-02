@@ -84,11 +84,14 @@ impl LatencyTracker {
         }
     }
 
-    pub fn process(&self, raw_ts: i64, received_at_ms: i64) -> (i64, i64) {
-        match Self::normalize_timestamp_ms(raw_ts) {
-            Some(ts_ms) => (ts_ms, self.calculate(ts_ms, received_at_ms)),
-            None => (received_at_ms, -1),
-        }
+    /// Returns `(exchange_ts_ms, latency_ms)` ONLY when the venue's
+    /// own timestamp parses to a positive value. `None` propagates the
+    /// drop upward — the host wall clock MUST NOT be substituted as a
+    /// fallback, otherwise the COB staleness filter and every signed
+    /// price downstream silently anchors to host-controlled time.
+    pub fn process(&self, raw_ts: i64, received_at_ms: i64) -> Option<(i64, i64)> {
+        let ts_ms = Self::normalize_timestamp_ms(raw_ts)?;
+        Some((ts_ms, self.calculate(ts_ms, received_at_ms)))
     }
 }
 
@@ -156,12 +159,16 @@ pub struct PriceLevel {
     pub quantity: f64,
 }
 
+/// `exchange_timestamp` is the venue-attested timestamp (parsed from
+/// the WS payload, normalised by [`LatencyTracker::process`]). It is
+/// the ONLY time source the COB layer is permitted to consult — there
+/// is no host-clock fallback. Books that arrive without a usable
+/// exchange timestamp are dropped at the collector boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBookData {
     pub exchange_id: String,
     pub symbol: String,
     pub exchange_timestamp: i64,
-    pub received_timestamp: i64,
     pub latency: i64,
     pub bids: Vec<PriceLevel>,
     pub asks: Vec<PriceLevel>,

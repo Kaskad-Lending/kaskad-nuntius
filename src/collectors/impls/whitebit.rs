@@ -101,9 +101,11 @@ impl Whitebit {
                             let ts = data.get("timestamp")
                                 .and_then(|x| x.as_f64())
                                 .map(|s| (s * 1000.0) as i64)
-                                .unwrap_or(received_at);
+                                .unwrap_or(0);
                             if !book.is_crossed() {
-                                sink.emit(book.to_orderbook_data(ts, received_at));
+                                if let Some(d) = book.to_orderbook_data(ts, received_at) {
+                                    sink.emit(d);
+                                }
                             }
                         }
                         Some(Ok(Message::Ping(p))) => { let _ = write.send(Message::Pong(p)).await; }

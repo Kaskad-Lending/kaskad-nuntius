@@ -78,7 +78,9 @@ impl Bingx {
                         tick = tick.wrapping_add(1);
                         book.apply_snapshot(bids, asks, Some(tick));
                         if !book.is_crossed() {
-                            sink.emit(book.to_orderbook_data(ts, received_at));
+                            if let Some(d) = book.to_orderbook_data(ts, received_at) {
+                                sink.emit(d);
+                            }
                         }
                     }
                 }

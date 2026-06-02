@@ -196,7 +196,9 @@ impl Mexc {
                             }
                             book.apply_deltas(d.bids, d.asks, Some(d.to_version));
                             if !book.is_crossed() {
-                                sink.emit(book.to_orderbook_data(d.send_time, received_at));
+                                if let Some(d) = book.to_orderbook_data(d.send_time, received_at) {
+                                    sink.emit(d);
+                                }
                             }
                         }
                         Some(Ok(Message::Text(_))) => {} // PONG / acks

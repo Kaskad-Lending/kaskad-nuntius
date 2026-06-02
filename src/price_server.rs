@@ -77,6 +77,11 @@ struct PriceResponse {
     /// on ≥50 % of sources — treat as a security event.
     #[serde(skip_serializing_if = "Option::is_none")]
     equal_weight_fallbacks: Option<u64>,
+    /// `health` endpoint reports whether a fresh attestation doc is
+    /// currently retrievable (cache-hit OR successful re-fetch). When
+    /// `false`, `get_price` / `get_prices` fail closed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attestation_healthy: Option<bool>,
 }
 
 pub async fn run_price_server(
@@ -259,6 +264,43 @@ fn sign_cached(
     })
 }
 
+/// Fail-closed response for the case where a Nitro-backed signer's
+/// attestation cannot be produced. Returned in place of any
+/// signed-price payload — no signature, no signer field, no leakage of
+/// data that a downstream consumer could mistake for an authoritative
+/// result.
+fn attestation_unavailable_response() -> PriceResponse {
+    PriceResponse {
+        prices: None,
+        price: None,
+        error: Some(
+            "Attestation document unavailable — enclave health cannot \
+             be verified; refusing to sign"
+                .to_string(),
+        ),
+        status: None,
+        signer: None,
+        num_assets: None,
+        attestation_doc: None,
+        equal_weight_fallbacks: None,
+        attestation_healthy: Some(false),
+    }
+}
+
+/// Gate-check for price-signing methods: if the signer demands an
+/// attestation and we can't produce one (cache miss + NSM fresh-fetch
+/// also failed), refuse to sign. Returns `None` when signing should
+/// proceed, `Some(response)` when the caller should short-circuit.
+fn attestation_gate(signer: &dyn OracleSigner) -> Option<PriceResponse> {
+    if !signer.requires_attestation_for_signing() {
+        return None;
+    }
+    if cached_attestation(signer).is_some() {
+        return None;
+    }
+    Some(attestation_unavailable_response())
+}
+
 fn process_request(
     request: &PriceRequest,
     store: &PriceStore,
@@ -267,6 +309,9 @@ fn process_request(
 ) -> PriceResponse {
     match request.method.as_str() {
         "get_prices" => {
+            if let Some(refusal) = attestation_gate(signer.as_ref()) {
+                return refusal;
+            }
             let store = store.blocking_read();
             let mut signed = Vec::new();
             for cached in store.values() {
@@ -287,9 +332,13 @@ fn process_request(
                 num_assets: Some(count),
                 attestation_doc: None,
                 equal_weight_fallbacks: None,
+                attestation_healthy: None,
             }
         }
         "get_price" => {
+            if let Some(refusal) = attestation_gate(signer.as_ref()) {
+                return refusal;
+            }
             let asset = match &request.asset {
                 Some(a) => a.clone(),
                 None => {
@@ -302,6 +351,7 @@ fn process_request(
                         num_assets: None,
                         attestation_doc: None,
                         equal_weight_fallbacks: None,
+                        attestation_healthy: None,
                     }
                 }
             };
@@ -317,6 +367,7 @@ fn process_request(
                         num_assets: None,
                         attestation_doc: None,
                         equal_weight_fallbacks: None,
+                attestation_healthy: None,
                     },
                     Err(e) => PriceResponse {
                         prices: None,
@@ -327,6 +378,7 @@ fn process_request(
                         num_assets: None,
                         attestation_doc: None,
                         equal_weight_fallbacks: None,
+                attestation_healthy: None,
                     },
                 },
                 None => PriceResponse {
@@ -338,6 +390,7 @@ fn process_request(
                     num_assets: None,
                     attestation_doc: None,
                     equal_weight_fallbacks: None,
+                attestation_healthy: None,
                 },
             }
         }
@@ -360,10 +413,22 @@ fn process_request(
                 num_assets: None,
                 attestation_doc: doc.as_ref().map(hex::encode),
                 equal_weight_fallbacks: None,
+                attestation_healthy: None,
             }
         }
         "health" => {
             let store = store.blocking_read();
+            // Probe attestation independently of the price-signing
+            // gate so an operator monitoring `/health` sees the actual
+            // NSM-reachability state, not just whether anyone has hit
+            // a signing endpoint recently. Skip the probe when the
+            // signer doesn't require attestation (host/mock mode) —
+            // `None` then means "not applicable" rather than "unknown".
+            let attestation_healthy = if signer.requires_attestation_for_signing() {
+                Some(cached_attestation(signer.as_ref()).is_some())
+            } else {
+                None
+            };
             PriceResponse {
                 prices: None,
                 price: None,
@@ -376,6 +441,7 @@ fn process_request(
                 // so off-chain monitors can alert on a climb without
                 // parsing enclave console logs (audit EXPLOIT-3).
                 equal_weight_fallbacks: Some(crate::aggregator::equal_weight_fallback_count()),
+                attestation_healthy,
             }
         }
         _ => PriceResponse {
@@ -387,6 +453,7 @@ fn process_request(
             num_assets: None,
             attestation_doc: None,
             equal_weight_fallbacks: None,
+                attestation_healthy: None,
         },
     }
 }
@@ -495,4 +562,153 @@ fn accept_connection(listener: &std::net::TcpListener) -> Result<(std::net::TcpS
 fn accept_connection(listener: &std::net::TcpListener) -> Result<(std::net::TcpStream, ())> {
     let (stream, _) = listener.accept()?;
     Ok((stream, ()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signer::OracleSigner;
+    use crate::types::CachedPrice;
+    use alloy_primitives::{B256, U256};
+    use std::collections::HashMap;
+    use tokio::sync::RwLock;
+
+    /// Stub signer that mimics `EnclaveSigner`'s policy
+    /// (`requires_attestation_for_signing == true`) but whose
+    /// `attestation_doc` always returns `None`. Exactly the state the
+    /// audit complained about — production code MUST refuse to sign here.
+    struct StubEnclaveSignerNoAttestation;
+
+    impl OracleSigner for StubEnclaveSignerNoAttestation {
+        fn sign_digest(&self, _: [u8; 32]) -> Result<(Vec<u8>, [u8; 20])> {
+            // If we ever sign, that's the regression — return a
+            // recognisable sentinel so the test panic message is clear.
+            Ok((vec![0xab; 65], [0xcd; 20]))
+        }
+        fn address(&self) -> [u8; 20] {
+            [0xcd; 20]
+        }
+        fn attestation_doc(&self) -> Option<Vec<u8>> {
+            None
+        }
+        fn requires_attestation_for_signing(&self) -> bool {
+            true
+        }
+    }
+
+    fn empty_store() -> PriceStore {
+        Arc::new(RwLock::new(HashMap::new()))
+    }
+
+    fn fake_price() -> CachedPrice {
+        CachedPrice {
+            asset_symbol: "ETH/USD".into(),
+            asset_id: B256::repeat_byte(0x01),
+            price_fixed: U256::from(200_000_000_000_u64),
+            price_human: 2_000.0,
+            num_sources: 5,
+            sources_hash: B256::repeat_byte(0x02),
+            signed_timestamp: 1_710_000_000,
+        }
+    }
+
+    fn clear_attestation_cache() {
+        if let Ok(mut g) = ATTESTATION_CACHE.lock() {
+            *g = None;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_prices_fails_closed_when_attestation_unavailable() {
+        clear_attestation_cache();
+        let store = empty_store();
+        store
+            .write()
+            .await
+            .insert("ETH/USD".into(), fake_price());
+        let signer: SharedSigner = Arc::new(StubEnclaveSignerNoAttestation);
+        let req = PriceRequest {
+            method: "get_prices".into(),
+            asset: None,
+        };
+        let resp = tokio::task::block_in_place(|| process_request(&req, &store, &signer, "0xcd"));
+        assert!(resp.prices.is_none(), "must NOT return any prices");
+        assert!(
+            resp.error
+                .as_ref()
+                .map(|e| e.contains("Attestation"))
+                .unwrap_or(false),
+            "error must mention attestation: {:?}",
+            resp.error
+        );
+        assert_eq!(resp.attestation_healthy, Some(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_price_fails_closed_when_attestation_unavailable() {
+        clear_attestation_cache();
+        let store = empty_store();
+        store
+            .write()
+            .await
+            .insert("ETH/USD".into(), fake_price());
+        let signer: SharedSigner = Arc::new(StubEnclaveSignerNoAttestation);
+        let req = PriceRequest {
+            method: "get_price".into(),
+            asset: Some("ETH/USD".into()),
+        };
+        let resp = tokio::task::block_in_place(|| process_request(&req, &store, &signer, "0xcd"));
+        assert!(resp.price.is_none(), "must NOT return a signed price");
+        assert!(
+            resp.error
+                .as_ref()
+                .map(|e| e.contains("Attestation"))
+                .unwrap_or(false),
+            "error must mention attestation: {:?}",
+            resp.error
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn health_reports_attestation_unhealthy_when_signer_requires_and_nsm_fails() {
+        clear_attestation_cache();
+        let store = empty_store();
+        let signer: SharedSigner = Arc::new(StubEnclaveSignerNoAttestation);
+        let req = PriceRequest {
+            method: "health".into(),
+            asset: None,
+        };
+        let resp = tokio::task::block_in_place(|| process_request(&req, &store, &signer, "0xcd"));
+        assert_eq!(resp.status.as_deref(), Some("ok"));
+        assert_eq!(
+            resp.attestation_healthy,
+            Some(false),
+            "health must surface attestation_unhealthy for a Nitro signer with no NSM"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mock_signer_path_does_not_gate_on_attestation() {
+        // Sanity check for the host-mode path: `MockSigner`-style
+        // signers (default `requires_attestation_for_signing == false`)
+        // serve prices normally. Without this, host integration tests
+        // would all start failing.
+        clear_attestation_cache();
+        let store = empty_store();
+        store
+            .write()
+            .await
+            .insert("ETH/USD".into(), fake_price());
+        let signer: SharedSigner = Arc::new(crate::signer::MockSigner::random());
+        let req = PriceRequest {
+            method: "get_price".into(),
+            asset: Some("ETH/USD".into()),
+        };
+        let resp = tokio::task::block_in_place(|| process_request(&req, &store, &signer, "0xab"));
+        assert!(
+            resp.price.is_some(),
+            "mock signer must NOT be gated by attestation: {:?}",
+            resp.error
+        );
+    }
 }
