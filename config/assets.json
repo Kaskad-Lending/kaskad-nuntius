@@ -115,6 +115,16 @@
         "igralabs":  "IGRA",
         "coingecko": "igra"
       }
+    },
+    {
+      "symbol": "TIBBIR/USD",
+      "min_sources": 2,
+      "deviation_threshold_bps": 1000,
+      "heartbeat_seconds": 1800,
+      "sources": {
+        "mexc":      "TIBBIRUSDT",
+        "coingecko": "ribbita-by-virtuals"
+      }
     }
   ]
 }
