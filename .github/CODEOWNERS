@@ -1,0 +1,8 @@
+# Security-sensitive paths require review from a core maintainer.
+# Any one listed owner can approve. Last match wins.
+
+/.github/             @OxideDall @KaiReytsu @Kokonutz19 @mariusortiz
+/.github/workflows/   @OxideDall @KaiReytsu @Kokonutz19 @mariusortiz
+/enclave/             @OxideDall @KaiReytsu @Kokonutz19 @mariusortiz
+/infra/               @OxideDall @KaiReytsu @Kokonutz19 @mariusortiz
+/Dockerfile           @OxideDall @KaiReytsu @Kokonutz19 @mariusortiz
