@@ -6,8 +6,7 @@
     "pairs": [
       "BTCUSDT",
       "ETHUSDT",
-      "USDCUSDT",
-      "KASUSDT"
+      "USDCUSDT"
     ],
     "extra_params": {}
   },
