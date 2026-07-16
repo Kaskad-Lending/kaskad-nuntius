@@ -117,6 +117,19 @@
       }
     },
     {
+      "symbol": "TAO/USD",
+      "min_sources": 3,
+      "deviation_threshold_bps": 200,
+      "heartbeat_seconds": 1800,
+      "sources": {
+        "binance":   "TAOUSDT",
+        "mexc":      "TAOUSDT",
+        "kucoin":    "TAO-USDT",
+        "gateio":    "TAO_USDT",
+        "coingecko": "bittensor"
+      }
+    },
+    {
       "symbol": "TIBBIR/USD",
       "min_sources": 2,
       "deviation_threshold_bps": 1000,

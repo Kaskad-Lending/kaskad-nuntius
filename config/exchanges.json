@@ -6,7 +6,8 @@
     "pairs": [
       "BTCUSDT",
       "ETHUSDT",
-      "USDCUSDT"
+      "USDCUSDT",
+      "TAOUSDT"
     ],
     "extra_params": {}
   },
@@ -40,7 +41,8 @@
     "pairs": [
       "BTC_USDT",
       "ETH_USDT",
-      "KAS_USDT"
+      "KAS_USDT",
+      "TAO_USDT"
     ],
     "extra_params": {}
   },
@@ -85,7 +87,8 @@
       "BTC_USDT",
       "ETH_USDT",
       "USDC_USDT",
-      "KAS_USDT"
+      "KAS_USDT",
+      "TAO_USDT"
     ],
     "extra_params": {}
   },
@@ -119,7 +122,8 @@
     "pairs": [
       "BTC-USDT",
       "ETH-USDT",
-      "KAS-USDT"
+      "KAS-USDT",
+      "TAO-USDT"
     ],
     "extra_params": {}
   },
@@ -131,7 +135,8 @@
       "btc_usdt",
       "eth_usdt",
       "usdc_usdt",
-      "kas_usdt"
+      "kas_usdt",
+      "tao_usdt"
     ],
     "extra_params": {}
   },
@@ -143,7 +148,8 @@
       "BTCUSDT",
       "ETHUSDT",
       "USDCUSDT",
-      "KASUSDT"
+      "KASUSDT",
+      "TAOUSDT"
     ],
     "extra_params": {}
   },
@@ -166,7 +172,8 @@
       "btc_usdt",
       "eth_usdt",
       "usdc_usdt",
-      "kas_usdt"
+      "kas_usdt",
+      "tao_usdt"
     ],
     "extra_params": {}
   }
