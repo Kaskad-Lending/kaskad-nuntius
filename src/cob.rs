@@ -109,10 +109,10 @@ fn tick_size_for(source: &str, base_asset: &str) -> f64 {
             | "cryptocom" => 0.0001,
             _ => 0.0001,
         },
-        // TAO trades near $200; venue tick sizes verified 2026-07-15
+        // TAO trades near $200; venue tick sizes verified 2026-07-15/16
         // against each exchange's symbol-info endpoint.
         "TAO" => match source {
-            "binance" | "gate" | "gateio" | "xt" | "lbank" => 0.1,
+            "binance" | "gate" | "gateio" | "xt" | "lbank" | "whitebit" => 0.1,
             "kucoin" | "mexc" | "bitmart" => 0.01,
             _ => 0.01,
         },
@@ -1002,7 +1002,7 @@ mod tests {
 
     #[test]
     fn tick_tao_matches_venue_precision() {
-        for ex in ["binance", "gate", "xt", "lbank"] {
+        for ex in ["binance", "gate", "xt", "lbank", "whitebit"] {
             let t = tick_size_for(ex, "TAO");
             assert!(
                 (t - 0.1).abs() < 1e-12,

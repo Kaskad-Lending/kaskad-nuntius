@@ -165,6 +165,18 @@
     "extra_params": {}
   },
   {
+    "name": "whitebit",
+    "enabled": true,
+    "ws_url": "wss://api.whitebit.com/ws",
+    "pairs": [
+      "BTC_USDT",
+      "ETH_USDT",
+      "USDC_USDT",
+      "TAO_USDT"
+    ],
+    "extra_params": {}
+  },
+  {
     "name": "xt",
     "enabled": true,
     "ws_url": "wss://stream.xt.com/public",
