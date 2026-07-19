@@ -70,6 +70,18 @@
     "extra_params": {}
   },
   {
+    "name": "coinw",
+    "enabled": true,
+    "ws_url": "wss://ws.futurescw.com",
+    "pairs": [
+      "BTC_USDT",
+      "ETH_USDT",
+      "USDC_USDT",
+      "TAO_USDT"
+    ],
+    "extra_params": {}
+  },
+  {
     "name": "cryptocom",
     "enabled": true,
     "ws_url": "wss://stream.crypto.com/exchange/v1/market",
