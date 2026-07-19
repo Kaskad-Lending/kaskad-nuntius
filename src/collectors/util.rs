@@ -60,7 +60,27 @@ fn ws_proxy_target() -> Option<String> {
 /// (the only outbound path available inside an AWS Nitro Enclave) and the
 /// TLS handshake is layered on top via `client_async_tls`.
 pub async fn ws_connect(url_str: &str) -> Result<WsStream> {
+    ws_connect_with_origin(url_str, None).await
+}
+
+/// [`ws_connect`] with an optional `Origin` header. Some venues (CoinW)
+/// sit behind a WAF that answers 403 to handshakes without a browser
+/// Origin (verified live 2026-07-19).
+pub async fn ws_connect_with_origin(url_str: &str, origin: Option<&str>) -> Result<WsStream> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http;
+
     let url = Url::parse(url_str).wrap_err_with(|| format!("parse URL {url_str}"))?;
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .wrap_err_with(|| format!("build WS request {url_str}"))?;
+    if let Some(o) = origin {
+        request.headers_mut().insert(
+            http::header::ORIGIN,
+            http::HeaderValue::from_str(o).wrap_err("invalid Origin header value")?,
+        );
+    }
     let config = WebSocketConfig {
         max_message_size: Some(MAX_MESSAGE_SIZE),
         max_frame_size: Some(MAX_FRAME_SIZE),
@@ -87,7 +107,7 @@ pub async fn ws_connect(url_str: &str) -> Result<WsStream> {
             // Use client_async_tls_with_config so the proxied path inherits the
             // same 1 MiB message / 256 KiB frame caps as the direct path.
             let (ws, _) = tokio_tungstenite::client_async_tls_with_config(
-                url.as_str(),
+                request,
                 tcp_inner,
                 Some(config_for_connect),
                 None,
@@ -102,7 +122,7 @@ pub async fn ws_connect(url_str: &str) -> Result<WsStream> {
         return Ok(ws);
     }
 
-    let fut = tokio_tungstenite::connect_async_with_config(url.as_str(), Some(config), false);
+    let fut = tokio_tungstenite::connect_async_with_config(request, Some(config), false);
     let (ws, _) = tokio::time::timeout(Duration::from_secs(10), fut)
         .await
         .wrap_err_with(|| format!("WS connect timeout: {url_str}"))?
