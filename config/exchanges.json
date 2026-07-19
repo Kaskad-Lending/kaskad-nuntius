@@ -47,6 +47,18 @@
     "extra_params": {}
   },
   {
+    "name": "bitrue",
+    "enabled": true,
+    "ws_url": "wss://ws.bitrue.com/market/ws",
+    "pairs": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "USDCUSDT",
+      "TAOUSDT"
+    ],
+    "extra_params": {}
+  },
+  {
     "name": "bybit",
     "enabled": true,
     "ws_url": "wss://stream.bybit.com/v5/public/spot",

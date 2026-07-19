@@ -90,6 +90,7 @@ fn tick_size_for(source: &str, base_asset: &str) -> f64 {
             | "biconomy"
             | "coinstore"
             | "coinw"
+            | "bitrue"
     );
 
     match base_asset {
@@ -115,7 +116,7 @@ fn tick_size_for(source: &str, base_asset: &str) -> f64 {
         // 0.1 grid in live depth_snapshot books).
         "TAO" => match source {
             "binance" | "gate" | "gateio" | "xt" | "lbank" | "whitebit" | "coinw" => 0.1,
-            "kucoin" | "mexc" | "bitmart" => 0.01,
+            "kucoin" | "mexc" | "bitmart" | "bitrue" => 0.01,
             _ => 0.01,
         },
         _ => {
@@ -1011,7 +1012,7 @@ mod tests {
                 "TAO tick on {ex} should be 0.1, got {t}"
             );
         }
-        for ex in ["kucoin", "mexc", "bitmart"] {
+        for ex in ["kucoin", "mexc", "bitmart", "bitrue"] {
             let t = tick_size_for(ex, "TAO");
             assert!(
                 (t - 0.01).abs() < 1e-12,
