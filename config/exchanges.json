@@ -53,8 +53,7 @@
     "pairs": [
       "BTCUSDT",
       "ETHUSDT",
-      "USDCUSDT",
-      "TAOUSDT"
+      "USDCUSDT"
     ],
     "extra_params": {}
   },
@@ -111,8 +110,7 @@
       "BTC_USDT",
       "ETH_USDT",
       "USDC_USDT",
-      "KAS_USDT",
-      "TAO_USDT"
+      "KAS_USDT"
     ],
     "extra_params": {}
   },
@@ -208,8 +206,7 @@
       "btc_usdt",
       "eth_usdt",
       "usdc_usdt",
-      "kas_usdt",
-      "tao_usdt"
+      "kas_usdt"
     ],
     "extra_params": {}
   }
