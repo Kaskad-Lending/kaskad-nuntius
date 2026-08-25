@@ -35,3 +35,7 @@ jobs:
 
       - name: Rust tests
         run: cargo test
+
+      # ─── Enclave host-side Python ──────────────────
+      - name: Pull API tests
+        run: python3 -m unittest enclave.test_pull_api -v

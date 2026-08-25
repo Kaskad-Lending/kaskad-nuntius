@@ -25,7 +25,8 @@ import sys
 import time
 import threading
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from collections import defaultdict
+from collections import OrderedDict
+from enum import Enum
 
 # VSOCK constants
 AF_VSOCK = 40
@@ -35,6 +36,11 @@ VSOCK_PORT = 5001
 # Rate limiting
 RATE_LIMIT = 60        # requests per window
 RATE_WINDOW = 60       # seconds
+
+# Cap on distinct rate-limit keys kept in memory. Buckets idle for a full
+# window are dropped first — they have provably refilled to RATE_LIMIT and
+# carry no information — so the cap only bites under a key-flooding attack.
+MAX_TRACKED_KEYS = 50_000
 
 # Concurrency cap. `ThreadingHTTPServer` spawns a fresh thread per request
 # unbounded — one slowloris-style client can exhaust threads / FDs. This
@@ -46,13 +52,19 @@ _concurrency = threading.Semaphore(MAX_CONCURRENT)
 #
 # Direct connections to :8080 are blocked at the host security group —
 # only ALB inside the VPC can reach us — so when the TCP peer is in
-# `VPC_CIDR` we trust `X-Forwarded-For`. Anything from outside the VPC
+# `VPC_CIDR` we read `X-Forwarded-For`. Anything from outside the VPC
 # is a misconfiguration / direct hit; fall back to the peer address
 # verbatim (no spoof window).
 #
-# `VPC_CIDR` is set via systemd `Environment=` in kaskad-pull-api.service,
-# substituted from terraform's `var.vpc_cidr`. Default 10.0.0.0/16
-# matches the project's existing VPC config.
+# The ALB is publicly reachable, so `X-Forwarded-For` is attacker-authored
+# up to the entry the ALB itself appends. `TRUSTED_PROXIES` names the egress
+# addresses of our own front proxies; the chain is then walked right to left
+# past trusted and private hops, and the first remaining entry is the client.
+# Unset, that walk is impossible and we fall back to the legacy leftmost
+# entry, which any caller can forge — `main()` says so loudly at startup.
+#
+# `VPC_CIDR` and `TRUSTED_PROXIES` are set via systemd `Environment=` in
+# kaskad-pull-api.service, substituted from terraform.
 _VPC_CIDR_STR = os.environ.get("VPC_CIDR", "10.0.0.0/16")
 try:
     _VPC_CIDR = ipaddress.ip_network(_VPC_CIDR_STR)
@@ -62,10 +74,63 @@ except ValueError:
     _VPC_CIDR = ipaddress.ip_network("10.0.0.0/16")
 
 
+class TrustMode(str, Enum):
+    """How the client is picked out of the `X-Forwarded-For` chain."""
+
+    LEFTMOST = "leftmost"            # legacy, forgeable by any caller
+    TRUSTED_CHAIN = "trusted_chain"  # right to left past trusted hops
+
+
+def _parse_networks(raw):
+    """Parse a comma-separated list of IPs / CIDRs, skipping bad entries."""
+    nets = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(token, strict=False))
+        except ValueError:
+            print(f"[pull-api] WARN: ignoring invalid TRUSTED_PROXIES entry {token!r}",
+                  file=sys.stderr)
+    return tuple(nets)
+
+
+_TRUSTED_PROXIES = _parse_networks(os.environ.get("TRUSTED_PROXIES", ""))
+_TRUST_MODE = TrustMode.TRUSTED_CHAIN if _TRUSTED_PROXIES else TrustMode.LEFTMOST
+
+
+def _is_trusted(ip):
+    # `in` is False across address families, so mixed v4/v6 lists are fine.
+    return any(ip in net for net in _TRUSTED_PROXIES)
+
+
+def _xff_chain(handler):
+    """`X-Forwarded-For` entries left to right, unparseable ones dropped.
+    Repeated header lines are one chain, per RFC 9110."""
+    headers = handler.headers
+    get_all = getattr(headers, "get_all", None)
+    values = get_all("X-Forwarded-For") if get_all else None
+    if values is None:
+        single = headers.get("X-Forwarded-For", "")
+        values = [single] if single else []
+
+    chain = []
+    for value in values:
+        for token in value.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                chain.append(ipaddress.ip_address(token))
+            except ValueError:
+                continue
+    return chain
+
+
 def get_client_ip(handler):
-    """Return the real client IP. Trusts `X-Forwarded-For` only when the
-    immediate peer is inside the VPC (i.e. our ALB). For anything else
-    the peer address is returned as-is."""
+    """Rate-limit key for this request: the real client where we can prove
+    it, the closest unforgeable hop otherwise."""
     peer_str = handler.client_address[0]
     try:
         peer = ipaddress.ip_address(peer_str)
@@ -77,51 +142,70 @@ def get_client_ip(handler):
         # honour `X-Forwarded-For` (spoofable in this case).
         return str(peer)
 
-    xff = handler.headers.get("X-Forwarded-For", "").strip()
-    if not xff:
+    chain = _xff_chain(handler)
+    if not chain:
         return str(peer)
-    # AWS ALB format: "<client>, <proxy1>, <proxy2>". First entry is the
-    # original client. Trim + validate as IP; on malformed header, fall
-    # back to the peer (ALB) so we still rate-limit, just less precisely.
-    first = xff.split(",")[0].strip()
-    try:
-        ipaddress.ip_address(first)
-        return first
-    except ValueError:
-        return str(peer)
+
+    if _TRUST_MODE is TrustMode.LEFTMOST:
+        return str(chain[0])
+
+    # The ALB appends the true TCP peer, so the rightmost entry is authentic
+    # and every entry left of a trusted hop is only as trustworthy as that hop.
+    for ip in reversed(chain):
+        if _is_trusted(ip) or ip.is_private or ip.is_loopback:
+            continue
+        return str(ip)
+    return str(chain[-1])
+
 
 # ─── Rate Limiter ────────────────────────────────────────────
 
 class RateLimiter:
-    """Simple token-bucket rate limiter per IP."""
+    """Token bucket per key, with bounded state.
 
-    def __init__(self, limit=RATE_LIMIT, window=RATE_WINDOW):
+    Uses `time.monotonic()` so an NTP step cannot mint or withhold tokens.
+    """
+
+    def __init__(self, limit=RATE_LIMIT, window=RATE_WINDOW, max_keys=MAX_TRACKED_KEYS):
         self.limit = limit
         self.window = window
-        self.clients = defaultdict(lambda: {"tokens": limit, "last": time.time()})
+        self.max_keys = max_keys
+        # key -> (tokens, last_seen); ordered oldest-touched first.
+        self.clients = OrderedDict()
         self.lock = threading.Lock()
 
-    def is_allowed(self, ip):
+    def _tokens(self, key, now):
+        entry = self.clients.get(key)
+        if entry is None:
+            return float(self.limit)
+        tokens, last = entry
+        return min(self.limit, tokens + (now - last) * (self.limit / self.window))
+
+    def _evict(self, now):
+        cutoff = now - self.window
+        while self.clients:
+            _, (_, last) = next(iter(self.clients.items()))
+            # Idle for a full window ⇒ refilled to `limit` ⇒ nothing to remember.
+            # Past the cap we also drop live buckets, which hands that key a
+            # fresh allowance — the memory bound wins over per-key accuracy.
+            if last > cutoff and len(self.clients) <= self.max_keys:
+                break
+            self.clients.popitem(last=False)
+
+    def is_allowed(self, key):
         with self.lock:
-            now = time.time()
-            client = self.clients[ip]
+            now = time.monotonic()
+            tokens = self._tokens(key, now)
+            allowed = tokens >= 1
+            self.clients[key] = (tokens - 1 if allowed else tokens, now)
+            self.clients.move_to_end(key)
+            self._evict(now)
+            return allowed
 
-            # Refill tokens
-            elapsed = now - client["last"]
-            client["tokens"] = min(
-                self.limit,
-                client["tokens"] + elapsed * (self.limit / self.window)
-            )
-            client["last"] = now
-
-            if client["tokens"] >= 1:
-                client["tokens"] -= 1
-                return True
-            return False
-
-    def remaining(self, ip):
+    def remaining(self, key):
+        """Read-only — never creates a bucket."""
         with self.lock:
-            return int(self.clients[ip]["tokens"])
+            return int(self._tokens(key, time.monotonic()))
 
 
 rate_limiter = RateLimiter()
@@ -183,6 +267,9 @@ class PullAPIHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the pull API."""
 
     def do_GET(self):
+        # Resolved once so the limiter decision and the header agree.
+        self.client_ip = get_client_ip(self)
+
         # Concurrency gate: non-blocking acquire — if MAX_CONCURRENT
         # handlers are already in flight, shed load with 503 instead of
         # growing the thread pool unbounded.
@@ -196,8 +283,7 @@ class PullAPIHandler(BaseHTTPRequestHandler):
 
     def _handle_get(self):
         # Rate limit check — keyed on the real client IP, not the ALB.
-        client_ip = get_client_ip(self)
-        if not rate_limiter.is_allowed(client_ip):
+        if not rate_limiter.is_allowed(self.client_ip):
             self.send_json(429, {
                 "error": "rate limit exceeded",
                 "retry_after": RATE_WINDOW,
@@ -245,13 +331,13 @@ class PullAPIHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("X-RateLimit-Remaining", str(rate_limiter.remaining(get_client_ip(self))))
+        self.send_header("X-RateLimit-Remaining", str(rate_limiter.remaining(self.client_ip)))
         self.end_headers()
         self.wfile.write(body)
 
     def log_message(self, format, *args):
         """Override to use structured logging."""
-        print(f"[pull-api] {get_client_ip(self)} - {format % args}")
+        print(f"[pull-api] {getattr(self, 'client_ip', '-')} - {format % args}")
 
 
 # ─── Main ────────────────────────────────────────────────────
@@ -264,7 +350,14 @@ def main():
     # handlers that are themselves blocked on a slow VSOCK call.
     server.daemon_threads = True
     print(f"[pull-api] HTTP server listening on port {port}")
-    print(f"[pull-api] Rate limit: {RATE_LIMIT} req/{RATE_WINDOW}s per IP")
+    print(f"[pull-api] Rate limit: {RATE_LIMIT} req/{RATE_WINDOW}s per IP "
+          f"(max {MAX_TRACKED_KEYS} tracked keys)")
+    if _TRUST_MODE is TrustMode.LEFTMOST:
+        print("[pull-api] WARN: TRUSTED_PROXIES is unset — the rate-limit key is "
+              "the first X-Forwarded-For entry, which any caller can forge. "
+              "Set it to the front proxy egress addresses.", file=sys.stderr)
+    else:
+        print(f"[pull-api] Trusted proxies: {', '.join(str(n) for n in _TRUSTED_PROXIES)}")
     print(f"[pull-api] Max concurrent handlers: {MAX_CONCURRENT}")
     print(f"[pull-api] Enclave VSOCK: CID={ENCLAVE_CID} port={VSOCK_PORT}")
 

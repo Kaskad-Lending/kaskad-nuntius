@@ -58,6 +58,19 @@ variable "eif_bucket_name" {
   default     = "kaskad-oracle-eif"
 }
 
+variable "trusted_proxies" {
+  description = <<-EOT
+    Egress addresses (IP or CIDR) of front proxies allowed to attribute a
+    client via X-Forwarded-For. The ALB is public, so every XFF entry left of
+    the one the ALB appends is caller-authored; pull_api.py walks the chain
+    right to left past these and keys the rate limiter on the first entry
+    that remains. Empty leaves it keying on the leftmost entry, which any
+    caller can forge.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
 # ─── ALB / DNS ────────────────────────────────────────────────
 
 variable "domain_name" {
