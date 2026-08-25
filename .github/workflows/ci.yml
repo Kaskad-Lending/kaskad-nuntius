@@ -36,6 +36,13 @@ jobs:
       - name: Rust tests
         run: cargo test
 
-      # ─── Enclave host-side Python ──────────────────
+  # Own job: the host-side Python has no Rust dependency, and gating it behind
+  # `cargo fmt` means a formatting drift hides rate-limiter regressions.
+  pull-api:
+    name: Pull API (host-side)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Pull API tests
         run: python3 -m unittest enclave.test_pull_api -v
