@@ -13,12 +13,17 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ ./src/
 COPY proto/ ./proto/
-# `include_str!("../config/assets.json")` means the file must be present at
-# compile time. Baking it into the EIF puts its bytes into PCR0.
+# `include_str!` on config/assets.json AND config/exchanges.json means both
+# must be present at compile time. Baking them into the EIF puts their bytes
+# into PCR0 — the venue/pair set is attested, not host-supplied at runtime.
 COPY config/ ./config/
+# Workspace members must be present for cargo to resolve the workspace manifest;
+# the feature-OFF build compiles none of them, so PCR0 is unaffected.
+COPY crates/ ./crates/
 
-# Build static binary (musl target)
-RUN cargo build --release --target x86_64-unknown-linux-musl
+# Build static binary (musl target). --locked: the committed lock is authoritative,
+# so a rebuild fails loud on drift instead of silently shifting PCR0.
+RUN cargo build --release --locked --target x86_64-unknown-linux-musl
 
 # ── Stage 2: Minimal runtime image ───────────────────────────────────
 # Digest-pinned (audit S-1). Same rationale as the builder stage.

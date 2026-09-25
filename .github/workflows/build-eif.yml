@@ -1,0 +1,203 @@
+name: Build Keyex EIFs
+
+# Builds both keyex enclave images (oracle CID 16, pontifex CID 17) once on
+# the us-east-1 Nitro builder, extracts PCR0/1/2, signs the manifests with the
+# release KMS key and publishes them under oracle/ and pontifex/ in S3.
+# Build/sign/upload run ON the builder via host/build-eif.sh over SSM (the
+# builder is stopped by default and has no self-hosted runner — SSM is the
+# only channel; mirrors deploy.yml and ENCLAVE.md). No ASG refresh here.
+# Publishes measurements for slice 10 (on-chain registries). Idempotent:
+# a musl digest-pinned rebuild of the same commit yields the same PCRs.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "crates/**"
+      - "config/**"
+      - "proto/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "Dockerfile.oracle"
+      - "Dockerfile.pontifex"
+      - "host/build-eif.sh"
+      - "host/eif-config/**"
+      - ".github/workflows/build-eif.yml"
+
+permissions:
+  id-token: write # OIDC
+  contents: read
+
+env:
+  ACCOUNT_ID: "095931689333"
+  AWS_REGION: us-east-1
+  NAME_PREFIX: kaskad-nitro-us
+
+jobs:
+  build:
+    name: Build + sign + publish EIFs
+    runs-on: ubuntu-latest
+    outputs:
+      oracle_pcr0: ${{ steps.pcrs.outputs.oracle_pcr0 }}
+      oracle_pcr1: ${{ steps.pcrs.outputs.oracle_pcr1 }}
+      oracle_pcr2: ${{ steps.pcrs.outputs.oracle_pcr2 }}
+      pontifex_pcr0: ${{ steps.pcrs.outputs.pontifex_pcr0 }}
+      pontifex_pcr1: ${{ steps.pcrs.outputs.pontifex_pcr1 }}
+      pontifex_pcr2: ${{ steps.pcrs.outputs.pontifex_pcr2 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Resolve stack config
+        run: |
+          set -euo pipefail
+          {
+            echo "EIF_BUCKET=${NAME_PREFIX}-eif"
+            echo "OIDC_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/${NAME_PREFIX}-github-ci"
+            echo "KMS_RELEASE_ALIAS=alias/${NAME_PREFIX}-release"
+            echo "BUILDER_TAG=${NAME_PREFIX}-builder"
+          } >> "$GITHUB_ENV"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Start builder instance
+        id: builder
+        run: |
+          set -euo pipefail
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${BUILDER_TAG}" \
+                      "Name=instance-state-name,Values=running,stopped,stopping,pending" \
+            --query "Reservations[].Instances[0].InstanceId" --output text)
+          [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ] || { echo "no builder found for tag ${BUILDER_TAG}" >&2; exit 1; }
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+
+          STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+            --query "Reservations[].Instances[0].State.Name" --output text)
+          echo "Builder $INSTANCE_ID state: $STATE"
+          if [ "$STATE" = "stopping" ]; then
+            aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID"
+          fi
+          aws ec2 start-instances --instance-ids "$INSTANCE_ID"
+          aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+
+      - name: Wait for SSM agent
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            # -e off around the pipeline so a transient miss does not kill the loop.
+            set +e
+            STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=${{ steps.builder.outputs.instance_id }}" \
+              --query "InstanceInformationList[0].PingStatus" --output text 2>/dev/null)
+            set -e
+            if [ "$STATUS" = "Online" ]; then echo "SSM online"; exit 0; fi
+            echo "waiting for SSM... ($i/60)"; sleep 10
+          done
+          echo "SSM agent timeout" >&2; exit 1
+
+      - name: Zip source and upload to S3
+        run: |
+          set -euo pipefail
+          zip -rq source.zip . -x "*.git*" "target/*" "infra/.terraform/*"
+          aws s3 cp source.zip "s3://${EIF_BUCKET}/builds/${{ github.sha }}/source.zip"
+
+      - name: Build both EIFs via SSM
+        # Drives host/build-eif.sh on the builder: docker build (2-stage musl,
+        # digest-pinned) -> nitro-cli build-enclave -> PCR extract -> KMS sign
+        # -> S3 publish, for oracle + pontifex.
+        run: |
+          set -euo pipefail
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ steps.builder.outputs.instance_id }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "set -euxo pipefail",
+              "export COMMIT=${{ github.sha }}",
+              "export EIF_BUCKET='"${EIF_BUCKET}"'",
+              "export KMS_RELEASE_ALIAS='"${KMS_RELEASE_ALIAS}"'",
+              "export AWS_REGION='"${AWS_REGION}"'",
+              "sudo dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel awscli docker git jq unzip",
+              "sudo systemctl start docker",
+              "if ! swapon --show | grep -q /swapfile; then sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile; fi",
+              "rm -rf /tmp/build && mkdir -p /tmp/build",
+              "aws s3 cp s3://'"${EIF_BUCKET}"'/builds/${{ github.sha }}/source.zip /tmp/source.zip",
+              "unzip -q /tmp/source.zip -d /tmp/build/",
+              "chmod +x /tmp/build/host/build-eif.sh",
+              "cd /tmp/build && COMMIT=${{ github.sha }} EIF_BUCKET='"${EIF_BUCKET}"' KMS_RELEASE_ALIAS='"${KMS_RELEASE_ALIAS}"' AWS_REGION='"${AWS_REGION}"' host/build-eif.sh"
+            ]' \
+            --query "Command.CommandId" --output text)
+          echo "SSM command: $CMD_ID"
+
+          while :; do
+            set +e
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "${{ steps.builder.outputs.instance_id }}" \
+              --query "Status" --output text 2>/dev/null)
+            set -e
+            [ -z "$STATUS" ] && STATUS=Pending
+            echo "build status: $STATUS"
+            if [ "$STATUS" = "Success" ]; then break; fi
+            case "$STATUS" in
+              Failed|Cancelled|TimedOut)
+                aws ssm get-command-invocation \
+                  --command-id "$CMD_ID" \
+                  --instance-id "${{ steps.builder.outputs.instance_id }}" \
+                  --query "{Out:StandardOutputContent,Err:StandardErrorContent}" --output json
+                echo "SSM build failed: $STATUS" >&2; exit 1;;
+            esac
+            sleep 30
+          done
+        timeout-minutes: 40
+
+      - name: Stop builder instance
+        if: always()
+        run: |
+          set -euo pipefail
+          [ -n "${{ steps.builder.outputs.instance_id }}" ] && \
+            aws ec2 stop-instances --instance-ids "${{ steps.builder.outputs.instance_id }}" || true
+
+      - name: Collect PCR measurements
+        id: pcrs
+        run: |
+          set -euo pipefail
+          mkdir -p pcrs
+          for name in oracle pontifex; do
+            aws s3 cp "s3://${EIF_BUCKET}/staging/${{ github.sha }}/${name}.pcrs.json" "pcrs/${name}.pcrs.json"
+            for n in 0 1 2; do
+              v=$(jq -r ".PCR${n}" "pcrs/${name}.pcrs.json")
+              [[ "$v" =~ ^[0-9a-f]{96}$ ]] || { echo "bad ${name} PCR${n}: $v" >&2; exit 1; }
+              echo "${name}_pcr${n}=${v}" >> "$GITHUB_OUTPUT"
+            done
+          done
+
+      - name: Upload PCR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyex-pcrs
+          path: pcrs/*.pcrs.json
+
+      - name: Summary
+        run: |
+          set -euo pipefail
+          {
+            echo "## Keyex EIF measurements"
+            echo "Commit: \`${{ github.sha }}\`  Bucket: \`${EIF_BUCKET}\`"
+            echo ""
+            echo "| image | PCR | value |"
+            echo "|---|---|---|"
+            for name in oracle pontifex; do
+              for n in 0 1 2; do
+                v=$(jq -r ".PCR${n}" "pcrs/${name}.pcrs.json")
+                echo "| ${name} | PCR${n} | \`${v}\` |"
+              done
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

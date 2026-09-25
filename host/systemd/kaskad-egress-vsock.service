@@ -1,0 +1,15 @@
+[Unit]
+Description=Kaskad keyex egress VSOCK bridge (enclave VSOCK:5000 -> CONNECT proxy)
+After=network.target kaskad-egress-connect.service nitro-enclaves-allocator.service
+Requires=kaskad-egress-connect.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat VSOCK-LISTEN:5000,fork,reuseaddr TCP:127.0.0.1:8888
+Restart=always
+RestartSec=5
+StandardOutput=file:/var/log/kaskad-egress.log
+StandardError=file:/var/log/kaskad-egress.log
+
+[Install]
+WantedBy=multi-user.target

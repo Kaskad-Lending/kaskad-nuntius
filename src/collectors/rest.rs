@@ -1,6 +1,9 @@
 //! Shared `reqwest::Client` for REST snapshot bootstrap. When
 //! `ENCLAVE_MODE` is set the client routes through `REST_PROXY`
-//! (default `socks5h://127.0.0.1:5000`).
+//! (default `http://127.0.0.1:5000`). The in-enclave VSOCK bridge tunnels
+//! to a host-side HTTP CONNECT proxy — so this MUST be an `http://` proxy
+//! (reqwest issues CONNECT for https targets), not `socks5h://`, which the
+//! host proxy does not speak. Mirrors `http_client.rs`.
 
 use once_cell::sync::Lazy;
 use std::time::Duration;
@@ -10,7 +13,7 @@ fn enclave_mode() -> bool {
 }
 
 fn rest_proxy_url() -> String {
-    std::env::var("REST_PROXY").unwrap_or_else(|_| "socks5h://127.0.0.1:5000".to_string())
+    std::env::var("REST_PROXY").unwrap_or_else(|_| "http://127.0.0.1:5000".to_string())
 }
 
 fn build_client() -> reqwest::Client {
@@ -24,7 +27,7 @@ fn build_client() -> reqwest::Client {
         let url = rest_proxy_url();
         match reqwest::Proxy::all(&url) {
             Ok(p) => {
-                tracing::info!(proxy = %url, "REST HTTP client routed through SOCKS5 proxy (enclave mode)");
+                tracing::info!(proxy = %url, "REST HTTP client routed through HTTP CONNECT proxy (enclave mode)");
                 builder = builder.proxy(p);
             }
             Err(e) => {
@@ -66,7 +69,7 @@ mod tests {
     #[test]
     fn rest_proxy_default() {
         with_env("REST_PROXY", None, || {
-            assert_eq!(rest_proxy_url(), "socks5h://127.0.0.1:5000");
+            assert_eq!(rest_proxy_url(), "http://127.0.0.1:5000");
         });
     }
 

@@ -1,0 +1,20 @@
+[Unit]
+Description=Kaskad price pull API (HTTP:8080 -> VSOCK CID16:5001, on-demand oracle signing)
+After=network.target nitro-enclaves-allocator.service
+
+[Service]
+Type=simple
+# Public, non-secret runtime config (VPC_CIDR for the in-VPC client gate).
+# Written by user-data from terraform outputs.
+EnvironmentFile=/etc/kaskad/pull-api.env
+ExecStart=/usr/bin/python3 /opt/kaskad/pull_api.py 8080
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+StandardOutput=file:/var/log/kaskad-pull-api.log
+StandardError=file:/var/log/kaskad-pull-api.log
+
+[Install]
+WantedBy=multi-user.target

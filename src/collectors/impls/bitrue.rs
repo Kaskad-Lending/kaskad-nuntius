@@ -169,11 +169,25 @@ impl Collector for Bitrue {
     }
 }
 
+/// Cap on decompressed size of a single gzip frame — bounds a decompression
+/// bomb far below the 512 MiB enclave. The compressed side is capped at
+/// MAX_MESSAGE_SIZE (1 MiB) but gzip expands ~1000:1, so the output needs
+/// its own limit. Mirrors the bingx.rs / htx.rs idiom (audit 10 P2 / H-8).
+const MAX_DECOMPRESSED_BYTES: u64 = 4 * 1024 * 1024;
+
 fn decompress(bin: &[u8]) -> Option<String> {
-    let mut d = GzDecoder::new(bin);
-    let mut s = String::new();
-    d.read_to_string(&mut s).ok()?;
-    Some(s)
+    // .take(N+1) so overrun is detected and the frame dropped, rather than
+    // handing a silently-truncated payload to the JSON parser.
+    let mut limited = GzDecoder::new(bin).take(MAX_DECOMPRESSED_BYTES + 1);
+    let mut buf = Vec::with_capacity(64 * 1024);
+    limited.read_to_end(&mut buf).ok()?;
+    if buf.len() as u64 > MAX_DECOMPRESSED_BYTES {
+        warn!(
+            "[bitrue] decompressed payload exceeds {MAX_DECOMPRESSED_BYTES} bytes — dropping (possible decompression bomb)"
+        );
+        return None;
+    }
+    String::from_utf8(buf).ok()
 }
 
 /// `market_taousdt_simple_depth_step0` → `taousdt`.
@@ -214,6 +228,18 @@ mod tests {
         assert_eq!(decompress(&gzip(raw)).as_deref(), Some(raw));
         // Garbage is None, not a panic.
         assert!(decompress(&[0x1f, 0x8b, 0x00]).is_none());
+    }
+
+    #[test]
+    fn decompress_drops_bomb_over_limit() {
+        // 8 MiB of zeros compresses to a few KiB; decompression must be
+        // bounded and the over-limit frame dropped (None), never a 8 MiB
+        // allocation nor a truncated payload handed downstream.
+        let raw = "\0".repeat(8 * 1024 * 1024);
+        assert!(decompress(&gzip(&raw)).is_none());
+        // A frame exactly at the cap still decodes.
+        let ok = "a".repeat(MAX_DECOMPRESSED_BYTES as usize);
+        assert_eq!(decompress(&gzip(&ok)).as_deref(), Some(ok.as_str()));
     }
 
     #[test]
