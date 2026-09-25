@@ -7,9 +7,11 @@ pub mod bingx;
 pub mod bitfinex;
 pub mod bitget;
 pub mod bitmart;
+pub mod bitrue;
 pub mod bybit;
 pub mod coinbase;
 pub mod coinstore;
+pub mod coinw;
 pub mod cryptocom;
 pub mod gate;
 pub mod htx;
@@ -41,9 +43,11 @@ pub fn create_collector(name: &str, config: &ExchangeConfig) -> Option<Collector
         "bitfinex" => Some(Arc::new(bitfinex::Bitfinex::new(config.clone()))),
         "bitget" => Some(Arc::new(bitget::Bitget::new(config.clone()))),
         "bitmart" => Some(Arc::new(bitmart::Bitmart::new(config.clone()))),
+        "bitrue" => Some(Arc::new(bitrue::Bitrue::new(config.clone()))),
         "bybit" => Some(Arc::new(bybit::Bybit::new(config.clone()))),
         "coinbase" => Some(Arc::new(coinbase::Coinbase::new(config.clone()))),
         "coinstore" => Some(Arc::new(coinstore::Coinstore::new(config.clone()))),
+        "coinw" => Some(Arc::new(coinw::Coinw::new(config.clone()))),
         "cryptocom" | "crypto_com" => Some(Arc::new(cryptocom::CryptoCom::new(config.clone()))),
         "gate" | "gateio" => Some(Arc::new(gate::Gate::new(config.clone()))),
         "htx" => Some(Arc::new(htx::Htx::new(config.clone()))),
@@ -73,9 +77,11 @@ pub fn known_exchange_names() -> &'static [&'static str] {
         "bitfinex",
         "bitget",
         "bitmart",
+        "bitrue",
         "bybit",
         "coinbase",
         "coinstore",
+        "coinw",
         "cryptocom",
         "gate",
         "htx",

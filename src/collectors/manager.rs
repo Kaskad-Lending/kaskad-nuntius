@@ -31,21 +31,28 @@ impl CollectorManager {
     }
 
     pub fn load_config_from_file(&mut self) -> Result<()> {
-        // Enclaves have no filesystem. If EXCHANGES_CONFIG_INLINE is set,
-        // parse its value as the JSON config directly. Falls back to a
-        // filesystem read so host-mode dev experience is unchanged.
-        let content = match std::env::var("EXCHANGES_CONFIG_INLINE") {
-            Ok(inline) if !inline.is_empty() => {
-                info!(
-                    bytes = inline.len(),
-                    "Loading collector config from EXCHANGES_CONFIG_INLINE env"
-                );
-                inline
-            }
-            _ => {
-                info!("Loading collector config from {:?}", self.config_path);
-                std::fs::read_to_string(&self.config_path)
-                    .map_err(|e| eyre!("read config {:?}: {e}", self.config_path))?
+        // In enclave mode the venue set is attested: read ONLY the
+        // PCR0-measured EIF-embedded config. No env/disk override — a host
+        // operator must not be able to repoint the oracle at arbitrary
+        // venues without changing PCR0 (audit M-2). Host/dev mode keeps the
+        // inline-env → disk override for iteration without a rebuild.
+        let content = if std::env::var("ENCLAVE_MODE").is_ok() {
+            info!("Loading EIF-embedded collector config (PCR0-measured)");
+            crate::types::EXCHANGES_JSON.to_string()
+        } else {
+            match std::env::var("EXCHANGES_CONFIG_INLINE") {
+                Ok(inline) if !inline.is_empty() => {
+                    info!(
+                        bytes = inline.len(),
+                        "Loading collector config from EXCHANGES_CONFIG_INLINE env"
+                    );
+                    inline
+                }
+                _ => {
+                    info!("Loading collector config from {:?}", self.config_path);
+                    std::fs::read_to_string(&self.config_path)
+                        .map_err(|e| eyre!("read config {:?}: {e}", self.config_path))?
+                }
             }
         };
         let configs: Vec<ExchangeConfig> =
@@ -299,5 +306,26 @@ mod tests {
             assert_eq!(cfgs[0].name, "binance");
             assert!(cfgs[0].enabled);
         });
+    }
+
+    /// The EIF-embedded collector config (the only source read in enclave
+    /// mode) must parse and every enabled venue must have a collector impl —
+    /// otherwise the enclave boots and immediately errors the manager. If
+    /// this fails, a JSON typo was about to ship; fix the JSON.
+    #[test]
+    fn embedded_exchanges_json_parses_and_every_enabled_venue_is_known() {
+        let cfgs: Vec<ExchangeConfig> = serde_json::from_str(crate::types::EXCHANGES_JSON)
+            .expect("embedded exchanges.json must parse");
+        assert!(!cfgs.is_empty(), "embedded exchanges.json has zero venues");
+        for c in &cfgs {
+            assert!(!c.name.is_empty(), "venue with empty name");
+            if c.enabled {
+                assert!(
+                    crate::collectors::impls::create_collector(&c.name, c).is_some(),
+                    "{} enabled in exchanges.json but no collector impl",
+                    c.name
+                );
+            }
+        }
     }
 }

@@ -7,7 +7,7 @@
       "BTCUSDT",
       "ETHUSDT",
       "USDCUSDT",
-      "KASUSDT"
+      "TAOUSDT"
     ],
     "extra_params": {}
   },
@@ -41,7 +41,19 @@
     "pairs": [
       "BTC_USDT",
       "ETH_USDT",
-      "KAS_USDT"
+      "KAS_USDT",
+      "TAO_USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "bitrue",
+    "enabled": true,
+    "ws_url": "wss://ws.bitrue.com/market/ws",
+    "pairs": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "USDCUSDT"
     ],
     "extra_params": {}
   },
@@ -65,6 +77,18 @@
       "BTC-USDT",
       "ETH-USDT",
       "USDC-USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "coinw",
+    "enabled": true,
+    "ws_url": "wss://ws.futurescw.com",
+    "pairs": [
+      "BTC_USDT",
+      "ETH_USDT",
+      "USDC_USDT",
+      "TAO_USDT"
     ],
     "extra_params": {}
   },
@@ -120,7 +144,8 @@
     "pairs": [
       "BTC-USDT",
       "ETH-USDT",
-      "KAS-USDT"
+      "KAS-USDT",
+      "TAO-USDT"
     ],
     "extra_params": {}
   },
@@ -132,7 +157,8 @@
       "btc_usdt",
       "eth_usdt",
       "usdc_usdt",
-      "kas_usdt"
+      "kas_usdt",
+      "tao_usdt"
     ],
     "extra_params": {}
   },
@@ -144,7 +170,8 @@
       "BTCUSDT",
       "ETHUSDT",
       "USDCUSDT",
-      "KASUSDT"
+      "KASUSDT",
+      "TAOUSDT"
     ],
     "extra_params": {}
   },
@@ -156,6 +183,18 @@
       "BTC-USDT",
       "ETH-USDT",
       "USDC-USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "whitebit",
+    "enabled": true,
+    "ws_url": "wss://api.whitebit.com/ws",
+    "pairs": [
+      "BTC_USDT",
+      "ETH_USDT",
+      "USDC_USDT",
+      "TAO_USDT"
     ],
     "extra_params": {}
   },

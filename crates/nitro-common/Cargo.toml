@@ -1,0 +1,35 @@
+[package]
+name = "nitro-common"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Low-level Nitro enclave primitives: NSM, NSM-rooted RNG, vsock framing, attestation-doc parsing."
+
+[dependencies]
+eyre = "0.6"
+# Structural CBOR/COSE_Sign1 decode for attestation documents. Pinned to
+# the version the NSM api crate already resolves in the workspace lock.
+serde_cbor = "0.11"
+# rand_core 0.6 — the RngCore/CryptoRng traits k256 0.13 consumes; `std`
+# for `Error::new` on the fail path.
+rand_core = { version = "0.6", features = ["std"] }
+
+# Attestation verification. p384: ECDSA-P384/SHA384 for both the COSE
+# signature and each certificate link (SHA-384 is the curve's default
+# digest). x509-cert/der: parse certs, re-encode the TBS, read validity
+# against the injected clock. sha3: keccak for the enclave's Eth address.
+# Versions track the workspace lock (der 0.7, ecdsa 0.16, elliptic-curve 0.13).
+p384 = "0.13"
+x509-cert = "0.2"
+sha3 = "0.10"
+
+# Scrub the NSM entropy buffer (refill slot + long-lived buffer) on drop so
+# enclave secret material never lingers in freed memory.
+zeroize = "1"
+
+[dev-dependencies]
+hex = "0.4"
+
+# NSM driver is Linux-only (nix syscalls); the api types come with it.
+[target.'cfg(target_os = "linux")'.dependencies]
+aws-nitro-enclaves-nsm-api = "0.4"

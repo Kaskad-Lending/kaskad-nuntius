@@ -367,7 +367,7 @@ fn process_request(
                         num_assets: None,
                         attestation_doc: None,
                         equal_weight_fallbacks: None,
-                attestation_healthy: None,
+                        attestation_healthy: None,
                     },
                     Err(e) => PriceResponse {
                         prices: None,
@@ -378,7 +378,7 @@ fn process_request(
                         num_assets: None,
                         attestation_doc: None,
                         equal_weight_fallbacks: None,
-                attestation_healthy: None,
+                        attestation_healthy: None,
                     },
                 },
                 None => PriceResponse {
@@ -390,7 +390,7 @@ fn process_request(
                     num_assets: None,
                     attestation_doc: None,
                     equal_weight_fallbacks: None,
-                attestation_healthy: None,
+                    attestation_healthy: None,
                 },
             }
         }
@@ -453,7 +453,7 @@ fn process_request(
             num_assets: None,
             attestation_doc: None,
             equal_weight_fallbacks: None,
-                attestation_healthy: None,
+            attestation_healthy: None,
         },
     }
 }
@@ -622,10 +622,7 @@ mod tests {
     async fn get_prices_fails_closed_when_attestation_unavailable() {
         clear_attestation_cache();
         let store = empty_store();
-        store
-            .write()
-            .await
-            .insert("ETH/USD".into(), fake_price());
+        store.write().await.insert("ETH/USD".into(), fake_price());
         let signer: SharedSigner = Arc::new(StubEnclaveSignerNoAttestation);
         let req = PriceRequest {
             method: "get_prices".into(),
@@ -648,10 +645,7 @@ mod tests {
     async fn get_price_fails_closed_when_attestation_unavailable() {
         clear_attestation_cache();
         let store = empty_store();
-        store
-            .write()
-            .await
-            .insert("ETH/USD".into(), fake_price());
+        store.write().await.insert("ETH/USD".into(), fake_price());
         let signer: SharedSigner = Arc::new(StubEnclaveSignerNoAttestation);
         let req = PriceRequest {
             method: "get_price".into(),
@@ -695,10 +689,7 @@ mod tests {
         // would all start failing.
         clear_attestation_cache();
         let store = empty_store();
-        store
-            .write()
-            .await
-            .insert("ETH/USD".into(), fake_price());
+        store.write().await.insert("ETH/USD".into(), fake_price());
         let signer: SharedSigner = Arc::new(crate::signer::MockSigner::random());
         let req = PriceRequest {
             method: "get_price".into(),

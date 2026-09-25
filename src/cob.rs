@@ -89,6 +89,8 @@ fn tick_size_for(source: &str, base_asset: &str) -> f64 {
             | "bitfinex"
             | "biconomy"
             | "coinstore"
+            | "coinw"
+            | "bitrue"
     );
 
     match base_asset {
@@ -108,6 +110,14 @@ fn tick_size_for(source: &str, base_asset: &str) -> f64 {
             "binance" | "bybit" | "okx" | "kucoin" | "gate" | "gateio" | "mexc" | "kraken"
             | "cryptocom" => 0.0001,
             _ => 0.0001,
+        },
+        // TAO trades near $200; venue tick sizes verified 2026-07-15..19
+        // against each exchange's symbol-info endpoint (coinw: observed
+        // 0.1 grid in live depth_snapshot books).
+        "TAO" => match source {
+            "binance" | "gate" | "gateio" | "xt" | "lbank" | "whitebit" | "coinw" => 0.1,
+            "kucoin" | "mexc" | "bitmart" | "bitrue" => 0.01,
+            _ => 0.01,
         },
         _ => {
             // Last-resort fallback: prefer 1e-5 for any unknown base on a
@@ -362,7 +372,7 @@ fn max_spread_bps_for(base: &str) -> f64 {
     match base {
         "BTC" | "ETH" => 30.0,
         "USDC" => 20.0,
-        "KAS" => 100.0,
+        "KAS" | "TAO" => 100.0,
         _ => MAX_SPREAD_BPS_DEFAULT,
     }
 }
@@ -546,6 +556,7 @@ pub fn asset_to_collector_symbol(asset: &AssetConfig) -> &'static str {
         "ETH/USD" => "ETH",
         "KAS/USD" => "KAS",
         "USDC/USD" => "USDC",
+        "TAO/USD" => "TAO",
         _ => "",
     }
 }
@@ -804,6 +815,16 @@ mod tests {
     }
 
     #[test]
+    fn symbol_filter_tao_matches_all_venue_formats() {
+        // The seven TAO-enabled venues emit: TAOUSDT (binance, mexc),
+        // TAO-USDT (kucoin), TAO_USDT (gate, bitmart), tao_usdt (xt, lbank).
+        assert_eq!(extract_base_asset("TAOUSDT"), "TAO");
+        assert_eq!(extract_base_asset("TAO-USDT"), "TAO");
+        assert_eq!(extract_base_asset("TAO_USDT"), "TAO");
+        assert_eq!(extract_base_asset("tao_usdt"), "TAO");
+    }
+
+    #[test]
     fn symbol_filter_normalised_bitfinex_pair_matches_base() {
         // After bitfinex collector strips the lowercase `t`, the symbol
         // that lands in cob_state is `BTCUSD` — and that DOES resolve.
@@ -908,13 +929,17 @@ mod tests {
             timestamped_book("mexc", 0.03095, FIXTURE_TS_MS),
             timestamped_book("attacker", 0.62, FIXTURE_TS_MS),
         ];
-        let fv = gated_consolidated_order_book(&books, 3)
-            .expect("five honest survivors clear the gate");
+        let fv =
+            gated_consolidated_order_book(&books, 3).expect("five honest survivors clear the gate");
         assert_eq!(
             fv.num_sources, 5,
             "attacker book must be excluded from consolidation"
         );
-        assert!(fv.price < 0.05, "honest cluster must dominate, got {}", fv.price);
+        assert!(
+            fv.price < 0.05,
+            "honest cluster must dominate, got {}",
+            fv.price
+        );
     }
 
     #[test]
@@ -976,6 +1001,24 @@ mod tests {
     fn tick_kas_is_fine() {
         assert!((tick_size_for("binance", "KAS") - 0.00001).abs() < 1e-12);
         assert!((tick_size_for("mexc", "KAS") - 0.00001).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tick_tao_matches_venue_precision() {
+        for ex in ["binance", "gate", "xt", "lbank", "whitebit", "coinw"] {
+            let t = tick_size_for(ex, "TAO");
+            assert!(
+                (t - 0.1).abs() < 1e-12,
+                "TAO tick on {ex} should be 0.1, got {t}"
+            );
+        }
+        for ex in ["kucoin", "mexc", "bitmart", "bitrue"] {
+            let t = tick_size_for(ex, "TAO");
+            assert!(
+                (t - 0.01).abs() < 1e-12,
+                "TAO tick on {ex} should be 0.01, got {t}"
+            );
+        }
     }
 
     #[test]
