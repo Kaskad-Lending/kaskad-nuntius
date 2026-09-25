@@ -10,10 +10,15 @@ name: Build Keyex EIFs
 # a musl digest-pinned rebuild of the same commit yields the same PCRs.
 
 on:
-  # Dispatch-only: an EIF build freezes PCR0, a release-critical act, so it stays
-  # deliberate and never auto-fires on a push. Build a chosen ref explicitly:
-  #   gh workflow run build-eif.yml --ref <branch>
+  # Deliberate release builds only. Pushing an `eif-v*` tag runs this workflow
+  # from the tagged commit's tree and freezes that commit's PCR0 — a tag push
+  # needs no default-branch registration, so the keyex stack builds on its own
+  # branch without a main merge (parallel infra, live oracle untouched).
+  # workflow_dispatch is kept for use once this file reaches the default branch.
   workflow_dispatch:
+  push:
+    tags:
+      - "eif-v*"
 
 permissions:
   id-token: write # OIDC
