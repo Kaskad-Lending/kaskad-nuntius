@@ -18,7 +18,11 @@ pub struct ProxyTransport {
 
 impl ProxyTransport {
     pub fn new(client: reqwest::Client, url: impl Into<String>) -> Self {
-        Self { client, url: url.into(), id: AtomicU64::new(1) }
+        Self {
+            client,
+            url: url.into(),
+            id: AtomicU64::new(1),
+        }
     }
 }
 
@@ -34,7 +38,9 @@ fn parse_rpc_result(resp: Value) -> Result<Value> {
         let code = err.get("code").and_then(Value::as_i64).unwrap_or(0);
         bail!("json-rpc error {code}");
     }
-    resp.get("result").cloned().ok_or_else(|| eyre!("json-rpc response has no result"))
+    resp.get("result")
+        .cloned()
+        .ok_or_else(|| eyre!("json-rpc response has no result"))
 }
 
 impl EthTransport for ProxyTransport {
@@ -67,7 +73,8 @@ mod tests {
 
     #[test]
     fn result_is_unwrapped() {
-        let r = parse_rpc_result(json!({"jsonrpc": "2.0", "id": 1, "result": "0xdeadbeef"})).unwrap();
+        let r =
+            parse_rpc_result(json!({"jsonrpc": "2.0", "id": 1, "result": "0xdeadbeef"})).unwrap();
         assert_eq!(r, "0xdeadbeef");
     }
 

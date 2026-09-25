@@ -66,7 +66,12 @@ impl VerifiedApproval {
     /// Lift a request into a verified approval. Caller contract: only after
     /// `verify_approvals(req, ..)` returned `Ok` for this exact request.
     pub fn from_request(req: &ApprovalRequest) -> Self {
-        VerifiedApproval { pcr0: req.pcr0, version: req.version, mode: req.mode, label: req.label }
+        VerifiedApproval {
+            pcr0: req.pcr0,
+            version: req.version,
+            mode: req.mode,
+            label: req.label,
+        }
     }
 }
 
@@ -243,11 +248,19 @@ mod tests {
     }
 
     fn own(version: u64) -> ImageIdentity {
-        ImageIdentity { pcr0: pcr(0xAA), version }
+        ImageIdentity {
+            pcr0: pcr(0xAA),
+            version,
+        }
     }
 
     fn appr(pcr0: [u8; 48], version: u64, mode: ApprovalMode, label: [u8; 32]) -> VerifiedApproval {
-        VerifiedApproval { pcr0, version, mode, label }
+        VerifiedApproval {
+            pcr0,
+            version,
+            mode,
+            label,
+        }
     }
 
     // ---- server-side matrix ----
@@ -464,12 +477,14 @@ mod tests {
 
     fn sign(sk: &SigningKey, req: &ApprovalRequest) -> [u8; 65] {
         let digest = approval_digest(req);
-        let (sig, _): (Signature, RecoveryId) =
-            sk.sign_prehash(digest.as_slice()).expect("sign");
+        let (sig, _): (Signature, RecoveryId) = sk.sign_prehash(digest.as_slice()).expect("sign");
         let sig = sig.normalize_s().unwrap_or(sig);
         let vk = sk.verifying_key();
         let mut rec = RecoveryId::from_byte(0).unwrap();
-        for cand in [RecoveryId::from_byte(0).unwrap(), RecoveryId::from_byte(1).unwrap()] {
+        for cand in [
+            RecoveryId::from_byte(0).unwrap(),
+            RecoveryId::from_byte(1).unwrap(),
+        ] {
             if let Ok(rk) = VerifyingKey::recover_from_prehash(digest.as_slice(), &sig, cand) {
                 if &rk == vk {
                     rec = cand;

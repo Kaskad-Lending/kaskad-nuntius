@@ -6,10 +6,10 @@
 //! finality lag can never trip the clock-skew ceiling.
 
 use alloy_primitives::{Address, U256};
+use k256::ecdsa::SigningKey;
 use keyex::api::{ClaimGrant, SignClaimResponse};
 use keyex::chain::{self, EthTransport, Finality};
 use keyex::claim::{self, ClaimError, ClaimRequest};
-use k256::ecdsa::SigningKey;
 
 /// Everything a single `sign_claim` needs beyond the two transports and the key.
 pub struct ClaimInputs<'a> {
@@ -80,7 +80,9 @@ pub async fn build_grant<I: EthTransport, R: EthTransport>(
     };
 
     let signer = keyex::sig::address_from_key(key.verifying_key());
-    SignClaimResponse::Ok(ClaimGrant::new(signature, burned, deadline, signer, igra_block))
+    SignClaimResponse::Ok(ClaimGrant::new(
+        signature, burned, deadline, signer, igra_block,
+    ))
 }
 
 #[cfg(test)]
@@ -107,7 +109,10 @@ mod tests {
 
     impl Scripted {
         fn new(responses: Vec<Resp>) -> Self {
-            Self { responses: Mutex::new(responses.into()), calls: Mutex::new(Vec::new()) }
+            Self {
+                responses: Mutex::new(responses.into()),
+                calls: Mutex::new(Vec::new()),
+            }
         }
         fn empty() -> Self {
             Self::new(vec![])
@@ -160,7 +165,12 @@ mod tests {
         [EXIT, KSKD]
     }
 
-    fn inputs<'a>(recipient: Address, high_water: U256, enclave_now: u64, forbidden: &'a [Address]) -> ClaimInputs<'a> {
+    fn inputs<'a>(
+        recipient: Address,
+        high_water: U256,
+        enclave_now: u64,
+        forbidden: &'a [Address],
+    ) -> ClaimInputs<'a> {
         ClaimInputs {
             recipient,
             high_water,
@@ -185,7 +195,10 @@ mod tests {
     }
     /// The RH latest-block read for latest=5000 (0x1388) at timestamp `ts`.
     fn rh_latest(ts: u64) -> Scripted {
-        Scripted::new(vec![Resp::Ok(quantity(5000)), Resp::Ok(block(5000, 0xCD, ts))])
+        Scripted::new(vec![
+            Resp::Ok(quantity(5000)),
+            Resp::Ok(block(5000, 0xCD, ts)),
+        ])
     }
 
     #[tokio::test]
@@ -193,14 +206,22 @@ mod tests {
         let igra = igra_burned(ONE_KSKD);
         let rh = rh_latest(1_789_000_000);
         let f = forbidden();
-        let resp =
-            build_grant(&key(), &igra, &rh, &inputs(RECIPIENT, U256::ZERO, 1_789_000_050, &f)).await;
+        let resp = build_grant(
+            &key(),
+            &igra,
+            &rh,
+            &inputs(RECIPIENT, U256::ZERO, 1_789_000_050, &f),
+        )
+        .await;
 
         let grant = match resp {
             SignClaimResponse::Ok(g) => g,
             SignClaimResponse::Err(e) => panic!("expected grant, got {e:?}"),
         };
-        assert_eq!(grant.igra_block, 1231, "igra_block pinned to the read height");
+        assert_eq!(
+            grant.igra_block, 1231,
+            "igra_block pinned to the read height"
+        );
         assert_eq!(grant.cumulative_burned, "1000000000000000000");
         // deadline = min(enclave_now, rh_ts) + 3600.
         assert_eq!(grant.deadline, 1_789_000_000 + 3600);
@@ -213,10 +234,15 @@ mod tests {
             chain_id: CHAIN_ID,
             entry: ENTRY,
         };
-        let sig_bytes: [u8; 65] =
-            hex::decode(grant.signature.strip_prefix("0x").unwrap()).unwrap().try_into().unwrap();
+        let sig_bytes: [u8; 65] = hex::decode(grant.signature.strip_prefix("0x").unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
         let recovered = keyex::sig::recover(&claim::claim_digest(&req), &sig_bytes).unwrap();
-        assert_eq!(recovered, keyex::sig::address_from_key(key().verifying_key()));
+        assert_eq!(
+            recovered,
+            keyex::sig::address_from_key(key().verifying_key())
+        );
         assert_eq!(grant.signer, recovered.to_string());
     }
 
@@ -227,12 +253,20 @@ mod tests {
         let igra = igra_burned(ONE_KSKD);
         let rh = rh_latest(1_789_000_000);
         let f = forbidden();
-        let _ = build_grant(&key(), &igra, &rh, &inputs(RECIPIENT, U256::ZERO, 1_789_000_050, &f)).await;
+        let _ = build_grant(
+            &key(),
+            &igra,
+            &rh,
+            &inputs(RECIPIENT, U256::ZERO, 1_789_000_050, &f),
+        )
+        .await;
         let calls = rh.calls();
         assert_eq!(calls[0].0, "eth_blockNumber");
         assert_eq!(calls[1].0, "eth_getBlockByNumber");
         assert_eq!(calls[1].1[0], "0x1388"); // block 5000, the latest — not "finalized"
-        assert!(calls.iter().all(|c| c.1.get(0).is_none_or(|p| p != "finalized")));
+        assert!(calls
+            .iter()
+            .all(|c| c.1.get(0).is_none_or(|p| p != "finalized")));
     }
 
     #[tokio::test]
@@ -241,9 +275,18 @@ mod tests {
         let rh = Scripted::empty();
         let f = forbidden();
         // KSKD token as recipient — burned is read, then policy refuses.
-        let resp = build_grant(&key(), &igra, &rh, &inputs(KSKD, U256::ZERO, 1_789_000_050, &f)).await;
+        let resp = build_grant(
+            &key(),
+            &igra,
+            &rh,
+            &inputs(KSKD, U256::ZERO, 1_789_000_050, &f),
+        )
+        .await;
         assert_eq!(resp, ClaimError::RecipientForbidden.into());
-        assert!(rh.calls().is_empty(), "RH must not be read on a policy refusal");
+        assert!(
+            rh.calls().is_empty(),
+            "RH must not be read on a policy refusal"
+        );
     }
 
     #[tokio::test]
@@ -251,7 +294,13 @@ mod tests {
         let igra = igra_burned(ONE_KSKD);
         let rh = Scripted::empty();
         let f = forbidden();
-        let resp = build_grant(&key(), &igra, &rh, &inputs(Address::ZERO, U256::ZERO, 1_789_000_050, &f)).await;
+        let resp = build_grant(
+            &key(),
+            &igra,
+            &rh,
+            &inputs(Address::ZERO, U256::ZERO, 1_789_000_050, &f),
+        )
+        .await;
         assert_eq!(resp, ClaimError::RecipientForbidden.into());
     }
 
@@ -260,7 +309,13 @@ mod tests {
         let igra = igra_burned(0);
         let rh = Scripted::empty();
         let f = forbidden();
-        let resp = build_grant(&key(), &igra, &rh, &inputs(RECIPIENT, U256::ZERO, 1_789_000_050, &f)).await;
+        let resp = build_grant(
+            &key(),
+            &igra,
+            &rh,
+            &inputs(RECIPIENT, U256::ZERO, 1_789_000_050, &f),
+        )
+        .await;
         assert_eq!(resp, ClaimError::NothingBurned.into());
         assert!(rh.calls().is_empty());
     }
@@ -271,7 +326,13 @@ mod tests {
         let rh = Scripted::empty();
         let f = forbidden();
         // Already signed 1000 for this recipient; a fresh 500 is a decrease.
-        let resp = build_grant(&key(), &igra, &rh, &inputs(RECIPIENT, U256::from(1000), 1_789_000_050, &f)).await;
+        let resp = build_grant(
+            &key(),
+            &igra,
+            &rh,
+            &inputs(RECIPIENT, U256::from(1000), 1_789_000_050, &f),
+        )
+        .await;
         assert_eq!(resp, ClaimError::DecreasingBurned.into());
         assert!(rh.calls().is_empty());
     }
@@ -288,7 +349,13 @@ mod tests {
         ]);
         let rh = Scripted::empty();
         let f = forbidden();
-        let resp = build_grant(&key(), &igra, &rh, &inputs(RECIPIENT, U256::ZERO, 1_789_000_050, &f)).await;
+        let resp = build_grant(
+            &key(),
+            &igra,
+            &rh,
+            &inputs(RECIPIENT, U256::ZERO, 1_789_000_050, &f),
+        )
+        .await;
         assert_eq!(resp, ClaimError::ReadMismatch.into());
     }
 
@@ -298,7 +365,13 @@ mod tests {
         let igra = igra_burned(ONE_KSKD);
         let rh = rh_latest(1_789_000_000);
         let f = forbidden();
-        let resp = build_grant(&key(), &igra, &rh, &inputs(RECIPIENT, U256::ZERO, 1_789_000_700, &f)).await;
+        let resp = build_grant(
+            &key(),
+            &igra,
+            &rh,
+            &inputs(RECIPIENT, U256::ZERO, 1_789_000_700, &f),
+        )
+        .await;
         assert_eq!(resp, ClaimError::ClockSkew.into());
     }
 
@@ -307,7 +380,13 @@ mod tests {
         let igra = Scripted::new(vec![Resp::Fail]);
         let rh = Scripted::empty();
         let f = forbidden();
-        let resp = build_grant(&key(), &igra, &rh, &inputs(RECIPIENT, U256::ZERO, 1_789_000_050, &f)).await;
+        let resp = build_grant(
+            &key(),
+            &igra,
+            &rh,
+            &inputs(RECIPIENT, U256::ZERO, 1_789_000_050, &f),
+        )
+        .await;
         assert_eq!(resp, ClaimError::RpcError.into());
         assert!(rh.calls().is_empty());
     }
@@ -318,8 +397,13 @@ mod tests {
         let igra = igra_burned(ONE_KSKD);
         let rh = rh_latest(1_789_000_000);
         let f = forbidden();
-        let resp =
-            build_grant(&key(), &igra, &rh, &inputs(RECIPIENT, U256::from(ONE_KSKD), 1_789_000_050, &f)).await;
+        let resp = build_grant(
+            &key(),
+            &igra,
+            &rh,
+            &inputs(RECIPIENT, U256::from(ONE_KSKD), 1_789_000_050, &f),
+        )
+        .await;
         assert!(matches!(resp, SignClaimResponse::Ok(_)));
     }
 
@@ -327,6 +411,11 @@ mod tests {
     fn sign_claim_error_helper_is_unused_marker() {
         // Keep the SignClaimError import meaningful: the Err arm carries it.
         let e: SignClaimResponse = ClaimError::NotReady.into();
-        assert_eq!(e, SignClaimResponse::Err(SignClaimError { error: ClaimError::NotReady }));
+        assert_eq!(
+            e,
+            SignClaimResponse::Err(SignClaimError {
+                error: ClaimError::NotReady
+            })
+        );
     }
 }

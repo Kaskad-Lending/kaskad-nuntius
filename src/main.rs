@@ -9,8 +9,10 @@ mod http_client;
 mod nsm_rng;
 mod price_server;
 #[cfg(target_os = "linux")]
-#[cfg_attr(feature = "keyex_oracle", allow(dead_code))] mod sealing;
-#[cfg_attr(feature = "keyex_oracle", allow(dead_code))] mod signer;
+#[cfg_attr(feature = "keyex_oracle", allow(dead_code))]
+mod sealing;
+#[cfg_attr(feature = "keyex_oracle", allow(dead_code))]
+mod signer;
 mod sources;
 mod types;
 
@@ -21,7 +23,10 @@ use tokio::sync::RwLock;
 use eyre::Result;
 use tracing::{error, info, warn};
 
-#[cfg(not(feature = "keyex_oracle"))] use signer::{MockSigner, OracleSigner}; #[cfg(feature = "keyex_oracle")] use signer::OracleSigner;
+#[cfg(feature = "keyex_oracle")]
+use signer::OracleSigner;
+#[cfg(not(feature = "keyex_oracle"))]
+use signer::{MockSigner, OracleSigner};
 use sources::PriceSource;
 use types::{load_assets, CachedPrice, PricePoint};
 
@@ -93,7 +98,8 @@ async fn main() -> Result<()> {
     // Init signer. The enclave key only signs price updates; the per-asset
     // quorum is committed separately by the admin via
     // KaskadPriceOracle.registerAssets (no enclave-side bundle signature).
-    #[cfg(not(feature = "keyex_oracle"))] let signer: Box<dyn OracleSigner> = if enclave_mode {
+    #[cfg(not(feature = "keyex_oracle"))]
+    let signer: Box<dyn OracleSigner> = if enclave_mode {
         #[cfg(target_os = "linux")]
         {
             info!("Running in ENCLAVE mode — Initializing EnclaveSigner via NSM");
@@ -136,7 +142,8 @@ async fn main() -> Result<()> {
             }
         }
     };
-    #[cfg(feature = "keyex_oracle")] let signer: Box<dyn OracleSigner> = keyex_oracle::boot_and_serve().await?;
+    #[cfg(feature = "keyex_oracle")]
+    let signer: Box<dyn OracleSigner> = keyex_oracle::boot_and_serve().await?;
     let signer_address = format!("0x{}", hex::encode(signer.address()));
     let signer: SharedSigner = Arc::from(signer);
     info!(address = %signer_address, "Oracle signer initialized");

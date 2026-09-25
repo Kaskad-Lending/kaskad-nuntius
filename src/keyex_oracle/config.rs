@@ -34,8 +34,10 @@ impl BakedOracleConfig {
     /// The enclave refuses to boot if any required value is missing or malformed.
     pub fn from_baked() -> Result<Self> {
         let owners = baked_addr_list("KEYEX_ORACLE_OWNERS", option_env!("KEYEX_ORACLE_OWNERS"))?;
-        let threshold =
-            baked_u64("KEYEX_ORACLE_THRESHOLD", option_env!("KEYEX_ORACLE_THRESHOLD"))? as usize;
+        let threshold = baked_u64(
+            "KEYEX_ORACLE_THRESHOLD",
+            option_env!("KEYEX_ORACLE_THRESHOLD"),
+        )? as usize;
         if threshold == 0 {
             return Err(eyre!("KEYEX_ORACLE_THRESHOLD must be >= 1"));
         }
@@ -53,7 +55,10 @@ impl BakedOracleConfig {
             rh_rpcs: baked_rpcs("KEYEX_ORACLE_RH_RPCS", option_env!("KEYEX_ORACLE_RH_RPCS"))?,
             owners,
             threshold,
-            chain_id: baked_u64("KEYEX_ORACLE_CHAIN_ID", option_env!("KEYEX_ORACLE_CHAIN_ID"))?,
+            chain_id: baked_u64(
+                "KEYEX_ORACLE_CHAIN_ID",
+                option_env!("KEYEX_ORACLE_CHAIN_ID"),
+            )?,
             version: baked_u64("KEYEX_ORACLE_VERSION", option_env!("KEYEX_ORACLE_VERSION"))?,
             ancestors: parse_ancestor_pcrs(option_env!("KEYEX_ORACLE_ANCESTORS"))?,
             peers: parse_endpoints(option_env!("KEYEX_ORACLE_PEERS")),
@@ -87,8 +92,9 @@ fn baked_addr_list(name: &str, v: Option<&str>) -> Result<Vec<Address>> {
     let raw = v.ok_or_else(|| eyre!("{name} not baked into image"))?;
     let mut out = Vec::new();
     for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let a: Address =
-            entry.parse().map_err(|_| eyre!("{name} has a non-address entry ({entry})"))?;
+        let a: Address = entry
+            .parse()
+            .map_err(|_| eyre!("{name} has a non-address entry ({entry})"))?;
         if a == Address::ZERO {
             return Err(eyre!("{name} must not contain the zero address"));
         }
@@ -105,8 +111,12 @@ fn baked_addr_list(name: &str, v: Option<&str>) -> Result<Vec<Address>> {
 /// proxy forge the registry read. Fail-loud on missing / empty / non-https.
 fn baked_rpcs(name: &str, v: Option<&str>) -> Result<Vec<String>> {
     let raw = v.ok_or_else(|| eyre!("{name} not baked into image"))?;
-    let list: Vec<String> =
-        raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+    let list: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
     if list.is_empty() {
         return Err(eyre!("{name} baked but empty"));
     }
@@ -125,7 +135,12 @@ fn baked_rpcs(name: &str, v: Option<&str>) -> Result<Vec<String>> {
 /// https-checked here.
 fn parse_endpoints(v: Option<&str>) -> Vec<String> {
     match v {
-        Some(s) => s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect(),
+        Some(s) => s
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -141,8 +156,9 @@ fn parse_ancestor_pcrs(v: Option<&str>) -> Result<Vec<[u8; 48]>> {
     for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let bytes = hex::decode(entry.strip_prefix("0x").unwrap_or(entry))
             .map_err(|_| eyre!("KEYEX_ORACLE_ANCESTORS has a non-hex entry"))?;
-        let arr: [u8; 48] =
-            bytes.try_into().map_err(|_| eyre!("KEYEX_ORACLE_ANCESTORS entry is not 48 bytes"))?;
+        let arr: [u8; 48] = bytes
+            .try_into()
+            .map_err(|_| eyre!("KEYEX_ORACLE_ANCESTORS entry is not 48 bytes"))?;
         out.push(arr);
     }
     Ok(out)
@@ -162,7 +178,9 @@ mod tests {
     #[test]
     fn registry_rejects_zero() {
         assert!(baked_addr_nonzero("R", Some(&format!("{:?}", Address::ZERO))).is_err());
-        assert!(baked_addr_nonzero("R", Some("0x1111111111111111111111111111111111111111")).is_ok());
+        assert!(
+            baked_addr_nonzero("R", Some("0x1111111111111111111111111111111111111111")).is_ok()
+        );
     }
 
     #[test]
@@ -194,7 +212,10 @@ mod tests {
     fn peers_absent_is_empty() {
         assert!(parse_endpoints(None).is_empty());
         assert!(parse_endpoints(Some("")).is_empty());
-        assert_eq!(parse_endpoints(Some("a, b")), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            parse_endpoints(Some("a, b")),
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 
     #[test]

@@ -41,7 +41,9 @@ fn to_vec<T: Serialize>(v: &T) -> Vec<u8> {
 }
 
 fn wire_error(code: &str) -> Vec<u8> {
-    to_vec(&WireError { error: code.to_owned() })
+    to_vec(&WireError {
+        error: code.to_owned(),
+    })
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
@@ -56,7 +58,11 @@ pub async fn handle<A: Attestor>(
     attestor: &A,
 ) -> Vec<u8> {
     match req {
-        BridgeRequest::Configure { entry, rh_rpcs, oracle_peers } => {
+        BridgeRequest::Configure {
+            entry,
+            rh_rpcs,
+            oracle_peers,
+        } => {
             let ok = configure(state, ctx.baked, &entry, rh_rpcs, oracle_peers);
             to_vec(&Ack { ok })
         }
@@ -94,7 +100,11 @@ fn configure(
 /// The money path. Refuses before any chain read when unbooted, unconfigured, or
 /// handed an unparseable recipient; otherwise delegates every check to
 /// [`build_grant`] and records the signed total to ratchet the session high-water.
-async fn sign_claim(state: &mut BridgeState, ctx: &HandlerCtx<'_>, recipient: &str) -> SignClaimResponse {
+async fn sign_claim(
+    state: &mut BridgeState,
+    ctx: &HandlerCtx<'_>,
+    recipient: &str,
+) -> SignClaimResponse {
     let recipient = match keyex::api::parse_address(recipient) {
         Some(a) => a,
         None => return ClaimError::RecipientForbidden.into(),
@@ -232,7 +242,12 @@ mod tests {
     }
     impl MockAttestor {
         fn returning(doc: Option<Vec<u8>>) -> Self {
-            Self { doc, calls: Cell::new(0), last_nonce: Cell::new(None), last_pubkey: Cell::new(None) }
+            Self {
+                doc,
+                calls: Cell::new(0),
+                last_nonce: Cell::new(None),
+                last_pubkey: Cell::new(None),
+            }
         }
     }
     impl Attestor for MockAttestor {
@@ -257,7 +272,12 @@ mod tests {
     }
 
     fn ctx<'a>(c: &'a reqwest::Client, b: &'a BakedIdentity) -> HandlerCtx<'a> {
-        HandlerCtx { client: c, igra_url: "http://igra.invalid", baked: b, enclave_now: 1_789_000_050 }
+        HandlerCtx {
+            client: c,
+            igra_url: "http://igra.invalid",
+            baked: b,
+            enclave_now: 1_789_000_050,
+        }
     }
 
     #[tokio::test]
@@ -391,14 +411,21 @@ mod tests {
         let (c, b) = (client(), baked());
         let mut st = BridgeState::new([0; 48], 1); // no key
         let out = handle(
-            BridgeRequest::SignClaim { recipient: format!("{:?}", Address::from([0x22; 20])) },
+            BridgeRequest::SignClaim {
+                recipient: format!("{:?}", Address::from([0x22; 20])),
+            },
             &mut st,
             &ctx(&c, &b),
             &PanicAttestor,
         )
         .await;
         let resp: SignClaimResponse = serde_json::from_slice(&out).unwrap();
-        assert_eq!(resp, SignClaimResponse::Err(SignClaimError { error: ClaimError::NotReady }));
+        assert_eq!(
+            resp,
+            SignClaimResponse::Err(SignClaimError {
+                error: ClaimError::NotReady
+            })
+        );
     }
 
     #[tokio::test]
@@ -406,7 +433,9 @@ mod tests {
         let (c, b) = (client(), baked());
         let mut st = booted_state(Address::from([0x33; 20])); // key, no config
         let out = handle(
-            BridgeRequest::SignClaim { recipient: format!("{:?}", Address::from([0x22; 20])) },
+            BridgeRequest::SignClaim {
+                recipient: format!("{:?}", Address::from([0x22; 20])),
+            },
             &mut st,
             &ctx(&c, &b),
             &PanicAttestor,
@@ -421,7 +450,9 @@ mod tests {
         let (c, b) = (client(), baked());
         let mut st = BridgeState::new([0; 48], 1);
         let out = handle(
-            BridgeRequest::SignClaim { recipient: "0xnothex".into() },
+            BridgeRequest::SignClaim {
+                recipient: "0xnothex".into(),
+            },
             &mut st,
             &ctx(&c, &b),
             &PanicAttestor,

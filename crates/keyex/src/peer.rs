@@ -6,9 +6,9 @@
 
 use std::future::Future;
 
+use crate::policy::FetchKind;
 use alloy_primitives::Address;
 use k256::ecdsa::SigningKey;
-use crate::policy::FetchKind;
 
 /// A key fetched and accepted from a peer, with its derived Eth address. The
 /// `SigningKey` zeroizes on drop.
@@ -46,12 +46,12 @@ mod real {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use eyre::{eyre, Result};
     use crate::policy::FetchKind;
     use crate::ratls::{
         client_config, crypto_provider, fresh_nonce, generate_ephemeral_cert, run_client_handshake,
         AcceptInputs, ClientExchange, Handshake, NsmPeerVerifier, NONCE_LEN,
     };
+    use eyre::{eyre, Result};
     use nitro_common::nsm::Nsm;
     use nitro_common::rng::NsmRng;
     use rustls::pki_types::ServerName;
@@ -123,7 +123,11 @@ mod real {
 
     impl RatlsPeerSource {
         pub fn new(nsm: Nsm, own_pcr0: [u8; 48], baked_ancestors: Vec<[u8; 48]>) -> Self {
-            Self { nsm, own_pcr0, baked_ancestors }
+            Self {
+                nsm,
+                own_pcr0,
+                baked_ancestors,
+            }
         }
     }
 
@@ -137,8 +141,10 @@ mod real {
             let nonce = fresh_nonce(&mut rng);
             // Clock read per fetch, not once at construction: a long-lived source
             // must judge each peer cert's validity against the current time.
-            let now_unix_secs =
-                SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let now_unix_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             let verifier = NsmPeerVerifier { now_unix_secs };
             // My attestation answers the peer's nonce and binds my TLS point; a
             // failed NSM call yields an empty doc → the peer fails verification.
@@ -151,7 +157,12 @@ mod real {
             let target = with_default_port(endpoint);
             let tcp = connect_via_proxy(&target).await?;
             let server_name = ServerName::try_from("enclave.local")?;
-            let hs = Handshake { my_cert: &cert, my_nonce: &nonce, verifier: &verifier, attest_fn: &attest };
+            let hs = Handshake {
+                my_cert: &cert,
+                my_nonce: &nonce,
+                verifier: &verifier,
+                attest_fn: &attest,
+            };
             let inputs = AcceptInputs {
                 kind,
                 own_pcr0: &self.own_pcr0,
@@ -182,6 +193,9 @@ mod tests {
             crate::sig::address_from_key(sk.verifying_key())
         };
         assert_eq!(fk.address, expected);
-        assert!(FetchedKey::from_bytes(&[0u8; 32]).is_err(), "zero scalar is invalid");
+        assert!(
+            FetchedKey::from_bytes(&[0u8; 32]).is_err(),
+            "zero scalar is invalid"
+        );
     }
 }

@@ -72,8 +72,12 @@ pub fn baked_igra_rpcs() -> Result<Vec<String>> {
 
 fn baked_rpcs(name: &str, v: Option<&str>) -> Result<Vec<String>> {
     let raw = v.ok_or_else(|| eyre!("{name} not baked into image"))?;
-    let list: Vec<String> =
-        raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+    let list: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
     if list.is_empty() {
         return Err(eyre!("{name} baked but empty"));
     }
@@ -106,8 +110,9 @@ fn parse_ancestor_pcrs(v: Option<&str>) -> Result<Vec<[u8; 48]>> {
     for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let bytes = hex::decode(entry.strip_prefix("0x").unwrap_or(entry))
             .map_err(|_| eyre!("PONTIFEX_ANCESTOR_PCRS has a non-hex entry"))?;
-        let arr: [u8; 48] =
-            bytes.try_into().map_err(|_| eyre!("PONTIFEX_ANCESTOR_PCRS entry is not 48 bytes"))?;
+        let arr: [u8; 48] = bytes
+            .try_into()
+            .map_err(|_| eyre!("PONTIFEX_ANCESTOR_PCRS entry is not 48 bytes"))?;
         out.push(arr);
     }
     Ok(out)
@@ -171,7 +176,10 @@ mod tests {
             rh_rpcs: vec![],
             oracle_peers: vec![],
         };
-        assert_eq!(cfg.forbidden(), [Address::from([0xEE; 20]), Address::from([0xDD; 20])]);
+        assert_eq!(
+            cfg.forbidden(),
+            [Address::from([0xEE; 20]), Address::from([0xDD; 20])]
+        );
     }
 
     #[test]
@@ -187,11 +195,7 @@ mod tests {
             entry: Address::from([0x11; 20]),
             chain_id: 46630,
         };
-        let cfg = BridgeConfig::from_parts(
-            &baked,
-            vec!["https://rh".into()],
-            vec!["o1".into()],
-        );
+        let cfg = BridgeConfig::from_parts(&baked, vec!["https://rh".into()], vec!["o1".into()]);
         assert_eq!(cfg.exit, baked.exit);
         assert_eq!(cfg.kskd, baked.kskd);
         assert_eq!(cfg.chain_id, 46630);
@@ -214,7 +218,9 @@ mod tests {
     fn baked_entry_rejects_zero_and_missing() {
         assert!(baked_addr_nonzero("E", None).is_err());
         assert!(baked_addr_nonzero("E", Some(&format!("{:?}", Address::ZERO))).is_err());
-        assert!(baked_addr_nonzero("E", Some("0x1111111111111111111111111111111111111111")).is_ok());
+        assert!(
+            baked_addr_nonzero("E", Some("0x1111111111111111111111111111111111111111")).is_ok()
+        );
     }
 
     #[test]

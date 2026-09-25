@@ -142,7 +142,12 @@ mod tests {
         s.publish_candidate(Address::from([0x11; 20]), vec![0x04; 65]);
         assert_eq!(s.health().0, BootState::WaitingRegistration);
         assert_eq!(s.signer_pubkey().unwrap().len(), 65);
-        s.install_key([7u8; 32], Address::from([0x11; 20]), vec![0x04; 65], KeySource::Genesis);
+        s.install_key(
+            [7u8; 32],
+            Address::from([0x11; 20]),
+            vec![0x04; 65],
+            KeySource::Genesis,
+        );
         assert_eq!(s.health().0, BootState::Ready);
         assert_eq!(s.root_key().unwrap(), [7u8; 32]);
     }

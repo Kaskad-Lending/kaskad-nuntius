@@ -29,5 +29,8 @@ impl Attestor for NsmAttestor {
 /// This enclave's measured PCR0 (48 bytes). Errors if the slot is the wrong
 /// length — a bridge with an unknown identity must not boot.
 pub fn own_pcr0(nsm: &Nsm) -> Result<[u8; 48]> {
-    nsm.describe_pcr(0)?.data.try_into().map_err(|_| eyre!("PCR0 is not 48 bytes"))
+    nsm.describe_pcr(0)?
+        .data
+        .try_into()
+        .map_err(|_| eyre!("PCR0 is not 48 bytes"))
 }

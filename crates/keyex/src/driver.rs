@@ -5,12 +5,12 @@
 
 use std::future::Future;
 
-use alloy_primitives::Address;
-use eyre::{eyre, Result};
-use k256::ecdsa::SigningKey;
 use crate::boot::{self, BootAction, Role, Tick};
 use crate::chain::ChainView;
 use crate::policy::FetchKind;
+use alloy_primitives::Address;
+use eyre::{eyre, Result};
+use k256::ecdsa::SigningKey;
 
 use crate::peer::PeerSource;
 
@@ -73,17 +73,27 @@ pub async fn step<P: PeerSource, V: ChainView, G: Genesis>(
     let sweep: Vec<Address> = fetched.iter().map(|f| f.address).collect();
     let candidate = loop_state.candidate.as_ref().map(|(a, _)| *a);
 
-    let t = Tick { role: deps.role, sweep: &sweep, fresh_approved: deps.fresh_approved, candidate };
+    let t = Tick {
+        role: deps.role,
+        sweep: &sweep,
+        fresh_approved: deps.fresh_approved,
+        candidate,
+    };
     // ChainError carries no std::error::Error impl; map it into the eyre channel
     // so run_boot backs off and retries on a registry read fault.
-    let action = boot::tick(&t, view).await.map_err(|e| eyre!("registry read during boot: {e:?}"))?;
+    let action = boot::tick(&t, view)
+        .await
+        .map_err(|e| eyre!("registry read during boot: {e:?}"))?;
     match action {
         BootAction::InstallPeerKey(addr) => {
             let fk = fetched
                 .into_iter()
                 .find(|f| f.address == addr)
                 .ok_or_else(|| eyre!("boot chose an address absent from the sweep"))?;
-            Ok(StepOutcome::Done(Installed::Peer { address: fk.address, key: fk.key }))
+            Ok(StepOutcome::Done(Installed::Peer {
+                address: fk.address,
+                key: fk.key,
+            }))
         }
         BootAction::GenerateCandidate => {
             let key = genesis.generate()?;
@@ -142,7 +152,10 @@ mod tests {
     }
     impl MockView {
         fn new(count: u64) -> Self {
-            Self { registered: HashMap::new(), count: U256::from(count) }
+            Self {
+                registered: HashMap::new(),
+                count: U256::from(count),
+            }
         }
         fn with(mut self, who: Address, ok: bool) -> Self {
             self.registered.insert(who, ok);
@@ -150,7 +163,10 @@ mod tests {
         }
     }
     impl ChainView for MockView {
-        fn registered(&self, who: Address) -> impl Future<Output = Result<bool, crate::chain::ChainError>> {
+        fn registered(
+            &self,
+            who: Address,
+        ) -> impl Future<Output = Result<bool, crate::chain::ChainError>> {
             let out = Ok(self.registered.get(&who).copied().unwrap_or(false));
             async move { out }
         }
@@ -166,7 +182,9 @@ mod tests {
     }
     impl MockPeer {
         fn none() -> Self {
-            Self { keys: HashMap::new() }
+            Self {
+                keys: HashMap::new(),
+            }
         }
         fn with(mut self, endpoint: &str, seed: [u8; 32]) -> Self {
             self.keys.insert(endpoint.to_owned(), seed);
@@ -194,7 +212,10 @@ mod tests {
     }
     impl CountingGenesis {
         fn new(seed: [u8; 32]) -> Self {
-            Self { seed, calls: AtomicU32::new(0) }
+            Self {
+                seed,
+                calls: AtomicU32::new(0),
+            }
         }
     }
     impl Genesis for CountingGenesis {
@@ -215,11 +236,19 @@ mod tests {
     }
 
     fn addr_of(seed: [u8; 32]) -> Address {
-        crate::sig::address_from_key(SigningKey::from_bytes((&seed).into()).unwrap().verifying_key())
+        crate::sig::address_from_key(
+            SigningKey::from_bytes((&seed).into())
+                .unwrap()
+                .verifying_key(),
+        )
     }
 
     fn deps<'a>(role: Role, peers: &'a [(String, FetchKind)], fresh: bool) -> BootDeps<'a> {
-        BootDeps { role, peers, fresh_approved: fresh }
+        BootDeps {
+            role,
+            peers,
+            fresh_approved: fresh,
+        }
     }
 
     #[tokio::test]
@@ -230,9 +259,15 @@ mod tests {
         let view = MockView::new(1).with(addr, true);
         let peers = [("sib".to_owned(), FetchKind::BridgeFromBridge)];
         let mut st = BootLoopState::default();
-        let out = step(&mut st, &deps(Role::Bridge, &peers, false), &source, &view, &PanicGenesis)
-            .await
-            .unwrap();
+        let out = step(
+            &mut st,
+            &deps(Role::Bridge, &peers, false),
+            &source,
+            &view,
+            &PanicGenesis,
+        )
+        .await
+        .unwrap();
         match out {
             StepOutcome::Done(Installed::Peer { address, .. }) => assert_eq!(address, addr),
             _ => panic!("expected a peer install"),
@@ -249,9 +284,15 @@ mod tests {
         let view = MockView::new(1).with(addr, false); // fetched, not yet registered
         let peers = [("parent".to_owned(), FetchKind::BridgeFromParent)];
         let mut st = BootLoopState::default();
-        let out = step(&mut st, &deps(Role::Bridge, &peers, false), &source, &view, &PanicGenesis)
-            .await
-            .unwrap();
+        let out = step(
+            &mut st,
+            &deps(Role::Bridge, &peers, false),
+            &source,
+            &view,
+            &PanicGenesis,
+        )
+        .await
+        .unwrap();
         match out {
             StepOutcome::Done(Installed::Peer { address, .. }) => assert_eq!(address, addr),
             _ => panic!("expected a peer install"),
@@ -269,25 +310,41 @@ mod tests {
         // Tick 1: empty registry → generate + hold the candidate.
         let mut st = BootLoopState::default();
         let view0 = MockView::new(0);
-        let out = step(&mut st, &deps(Role::Oracle, &peers, false), &source, &view0, &genesis)
-            .await
-            .unwrap();
+        let out = step(
+            &mut st,
+            &deps(Role::Oracle, &peers, false),
+            &source,
+            &view0,
+            &genesis,
+        )
+        .await
+        .unwrap();
         assert!(matches!(out, StepOutcome::Continue));
         assert_eq!(genesis.calls.load(Ordering::SeqCst), 1);
         assert!(st.candidate.is_some());
 
         // Tick 2: the candidate is now registered → install it, no re-generation.
         let view1 = MockView::new(1).with(cand_addr, true);
-        let out = step(&mut st, &deps(Role::Oracle, &peers, false), &source, &view1, &genesis)
-            .await
-            .unwrap();
+        let out = step(
+            &mut st,
+            &deps(Role::Oracle, &peers, false),
+            &source,
+            &view1,
+            &genesis,
+        )
+        .await
+        .unwrap();
         match out {
             StepOutcome::Done(Installed::Candidate(key)) => {
                 assert_eq!(crate::sig::address_from_key(key.verifying_key()), cand_addr);
             }
             _ => panic!("expected candidate install"),
         }
-        assert_eq!(genesis.calls.load(Ordering::SeqCst), 1, "candidate not regenerated");
+        assert_eq!(
+            genesis.calls.load(Ordering::SeqCst),
+            1,
+            "candidate not regenerated"
+        );
     }
 
     #[tokio::test]
@@ -299,14 +356,27 @@ mod tests {
         let genesis = CountingGenesis::new(cand_seed);
 
         // Pre-load a held candidate.
-        let mut st = BootLoopState { candidate: Some((cand_addr, SigningKey::from_bytes((&cand_seed).into()).unwrap())) };
+        let mut st = BootLoopState {
+            candidate: Some((
+                cand_addr,
+                SigningKey::from_bytes((&cand_seed).into()).unwrap(),
+            )),
+        };
         // A registered mate appears in the sweep; candidate is not registered.
         let source = MockPeer::none().with("mate", mate_seed);
-        let view = MockView::new(1).with(mate_addr, true).with(cand_addr, false);
+        let view = MockView::new(1)
+            .with(mate_addr, true)
+            .with(cand_addr, false);
         let peers = [("mate".to_owned(), FetchKind::BridgeFromBridge)];
-        let out = step(&mut st, &deps(Role::Oracle, &peers, false), &source, &view, &genesis)
-            .await
-            .unwrap();
+        let out = step(
+            &mut st,
+            &deps(Role::Oracle, &peers, false),
+            &source,
+            &view,
+            &genesis,
+        )
+        .await
+        .unwrap();
         match out {
             StepOutcome::Done(Installed::Peer { address, .. }) => assert_eq!(address, mate_addr),
             _ => panic!("registered peer must beat the pending candidate"),
@@ -323,7 +393,10 @@ mod tests {
             cand: Address,
         }
         impl ChainView for FlipView {
-            fn registered(&self, who: Address) -> impl Future<Output = Result<bool, crate::chain::ChainError>> {
+            fn registered(
+                &self,
+                who: Address,
+            ) -> impl Future<Output = Result<bool, crate::chain::ChainError>> {
                 let n = self.reads.fetch_add(1, Ordering::SeqCst);
                 let out = Ok(who == self.cand && n >= 1);
                 async move { out }
@@ -337,10 +410,19 @@ mod tests {
         let genesis = CountingGenesis::new(cand_seed);
         let source = MockPeer::none();
         let peers: [(String, FetchKind); 0] = [];
-        let view = FlipView { reads: AtomicU32::new(0), cand: cand_addr };
+        let view = FlipView {
+            reads: AtomicU32::new(0),
+            cand: cand_addr,
+        };
 
-        let installed =
-            run_boot(&deps(Role::Oracle, &peers, false), &source, &view, &genesis, &NoBackoff).await;
+        let installed = run_boot(
+            &deps(Role::Oracle, &peers, false),
+            &source,
+            &view,
+            &genesis,
+            &NoBackoff,
+        )
+        .await;
         match installed {
             Installed::Candidate(key) => {
                 assert_eq!(crate::sig::address_from_key(key.verifying_key()), cand_addr);

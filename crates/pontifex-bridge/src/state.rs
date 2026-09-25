@@ -76,12 +76,20 @@ impl BridgeState {
     /// The installed signer's uncompressed SEC1 public key (`0x04 ‖ X ‖ Y`, 65
     /// bytes), for binding into an attestation document. `None` before boot.
     pub fn signer_pubkey(&self) -> Option<Vec<u8>> {
-        self.key.as_ref().map(|k| k.verifying_key().to_encoded_point(false).as_bytes().to_vec())
+        self.key.as_ref().map(|k| {
+            k.verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec()
+        })
     }
 
     /// The highest burned total already signed for `recipient` this session.
     pub fn high_water(&self, recipient: Address) -> U256 {
-        self.last_signed.get(&recipient).copied().unwrap_or(U256::ZERO)
+        self.last_signed
+            .get(&recipient)
+            .copied()
+            .unwrap_or(U256::ZERO)
     }
 
     /// Record a freshly-signed burned total, keeping the per-recipient maximum.
@@ -147,10 +155,17 @@ mod tests {
     fn install_key_is_ignored_when_a_key_is_already_installed() {
         let mut st = state();
         let first = SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
-        let first_pk = first.verifying_key().to_encoded_point(false).as_bytes().to_vec();
+        let first_pk = first
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
         st.install_key(first, Address::from([0x33; 20]));
         // A second install must not swap the signer or the key.
-        st.install_key(SigningKey::from_bytes((&[8u8; 32]).into()).unwrap(), Address::from([0x44; 20]));
+        st.install_key(
+            SigningKey::from_bytes((&[8u8; 32]).into()).unwrap(),
+            Address::from([0x44; 20]),
+        );
         assert_eq!(st.signer(), Some(Address::from([0x33; 20])));
         assert_eq!(st.signer_pubkey().unwrap(), first_pk);
     }

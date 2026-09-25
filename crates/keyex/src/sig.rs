@@ -77,7 +77,10 @@ mod tests {
         let sk = key(7);
         let digest = B256::from([0x11u8; 32]);
         let sig = sign_recoverable(&sk, &digest).unwrap();
-        assert_eq!(recover(&digest, &sig).unwrap(), address_from_key(sk.verifying_key()));
+        assert_eq!(
+            recover(&digest, &sig).unwrap(),
+            address_from_key(sk.verifying_key())
+        );
     }
 
     #[test]
@@ -88,8 +91,15 @@ mod tests {
             let digest = B256::from([seed; 32]);
             let sig = sign_recoverable(&sk, &digest).unwrap();
             let parsed = Signature::from_slice(&sig[..64]).unwrap();
-            assert!(parsed.normalize_s().is_none(), "seed {seed} produced high-s");
-            assert!(sig[64] == 27 || sig[64] == 28, "seed {seed} non-canonical v {}", sig[64]);
+            assert!(
+                parsed.normalize_s().is_none(),
+                "seed {seed} produced high-s"
+            );
+            assert!(
+                sig[64] == 27 || sig[64] == 28,
+                "seed {seed} non-canonical v {}",
+                sig[64]
+            );
         }
     }
 

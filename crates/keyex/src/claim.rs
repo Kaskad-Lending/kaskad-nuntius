@@ -153,24 +153,42 @@ mod tests {
     fn digest_binds_chain_and_contract() {
         let base = canonical();
         // A claim signed for 46630 must not verify on Igra mainnet 4663.
-        assert_ne!(claim_digest(&base), claim_digest(&ClaimRequest { chain_id: 4663, ..base }));
+        assert_ne!(
+            claim_digest(&base),
+            claim_digest(&ClaimRequest {
+                chain_id: 4663,
+                ..base
+            })
+        );
         // Nor against a different KskdEntry deployment.
         assert_ne!(
             claim_digest(&base),
-            claim_digest(&ClaimRequest { entry: Address::from([0x99u8; 20]), ..base }),
+            claim_digest(&ClaimRequest {
+                entry: Address::from([0x99u8; 20]),
+                ..base
+            }),
         );
         // Nor for a different recipient / amount / deadline.
         assert_ne!(
             claim_digest(&base),
-            claim_digest(&ClaimRequest { recipient: Address::from([0x23u8; 20]), ..base }),
+            claim_digest(&ClaimRequest {
+                recipient: Address::from([0x23u8; 20]),
+                ..base
+            }),
         );
         assert_ne!(
             claim_digest(&base),
-            claim_digest(&ClaimRequest { cumulative_burned: U256::from(2u64), ..base }),
+            claim_digest(&ClaimRequest {
+                cumulative_burned: U256::from(2u64),
+                ..base
+            }),
         );
         assert_ne!(
             claim_digest(&base),
-            claim_digest(&ClaimRequest { deadline: U256::from(1u64), ..base }),
+            claim_digest(&ClaimRequest {
+                deadline: U256::from(1u64),
+                ..base
+            }),
         );
     }
 
@@ -180,11 +198,23 @@ mod tests {
         let kskd = Address::from([0xDDu8; 20]);
         let forbidden = [kskd_exit, kskd];
         let one = U256::from(1u64);
-        assert_eq!(check_claimable(Address::ZERO, one, &forbidden), Err(ClaimError::RecipientForbidden));
-        assert_eq!(check_claimable(kskd_exit, one, &forbidden), Err(ClaimError::RecipientForbidden));
-        assert_eq!(check_claimable(kskd, one, &forbidden), Err(ClaimError::RecipientForbidden));
+        assert_eq!(
+            check_claimable(Address::ZERO, one, &forbidden),
+            Err(ClaimError::RecipientForbidden)
+        );
+        assert_eq!(
+            check_claimable(kskd_exit, one, &forbidden),
+            Err(ClaimError::RecipientForbidden)
+        );
+        assert_eq!(
+            check_claimable(kskd, one, &forbidden),
+            Err(ClaimError::RecipientForbidden)
+        );
         let ok_recipient = Address::from([0x22u8; 20]);
-        assert_eq!(check_claimable(ok_recipient, U256::ZERO, &forbidden), Err(ClaimError::NothingBurned));
+        assert_eq!(
+            check_claimable(ok_recipient, U256::ZERO, &forbidden),
+            Err(ClaimError::NothingBurned)
+        );
         assert!(check_claimable(ok_recipient, one, &forbidden).is_ok());
     }
 

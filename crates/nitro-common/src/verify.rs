@@ -161,8 +161,8 @@ fn verify_cert_chain(
     let mut leaf_pubkey = Vec::new();
     let chain_len = chain.len();
     for (i, cert_der) in chain.iter().enumerate() {
-        let cert = Certificate::from_der(cert_der)
-            .map_err(|e| eyre!("cert[{}] parse: {}", i, e))?;
+        let cert =
+            Certificate::from_der(cert_der).map_err(|e| eyre!("cert[{}] parse: {}", i, e))?;
         check_validity(&cert, now_unix_secs, i)?;
 
         // Every cert that signs a child must be a CA (RFC 5280 §6.1.4). Without
@@ -228,7 +228,10 @@ fn require_ca(cert: &Certificate, idx: usize) -> Result<()> {
         .map_err(|e| eyre!("cert[{}] basicConstraints decode: {}", idx, e))?
     {
         Some((_critical, bc)) if bc.ca => {}
-        _ => bail!("cert[{}] is not a CA (basicConstraints CA:TRUE required)", idx),
+        _ => bail!(
+            "cert[{}] is not a CA (basicConstraints CA:TRUE required)",
+            idx
+        ),
     }
     if let Some((_critical, ku)) = cert
         .tbs_certificate
@@ -247,11 +250,19 @@ fn require_ca(cert: &Certificate, idx: usize) -> Result<()> {
 fn check_freshness(ts_millis: u64, now_secs: u64, max_age_secs: u64) -> Result<()> {
     let ts_secs = ts_millis / 1000;
     if ts_secs > now_secs.saturating_add(CLOCK_SKEW_SECS) {
-        bail!("attestation timestamp {}s is in the future (now {}s)", ts_secs, now_secs);
+        bail!(
+            "attestation timestamp {}s is in the future (now {}s)",
+            ts_secs,
+            now_secs
+        );
     }
     let age = now_secs.saturating_sub(ts_secs);
     if age > max_age_secs {
-        bail!("attestation is stale: age {}s exceeds max_age {}s", age, max_age_secs);
+        bail!(
+            "attestation is stale: age {}s exceeds max_age {}s",
+            age,
+            max_age_secs
+        );
     }
     Ok(())
 }
@@ -458,8 +469,7 @@ mod tests {
             "544705f5d72e1c6f24bfd7c2e176f2cd2aa8dc2a"
         );
         let expected_pcr0 =
-            decode_hex("2e66fc4f74006323675a397ab3c6b6eab68f2ccc36f4cf10bb4d0e5c82b2106c")
-                .unwrap();
+            decode_hex("2e66fc4f74006323675a397ab3c6b6eab68f2ccc36f4cf10bb4d0e5c82b2106c").unwrap();
         assert_eq!(&v.pcr0[..32], expected_pcr0.as_slice());
         assert_eq!(v.public_key.len(), 65);
     }

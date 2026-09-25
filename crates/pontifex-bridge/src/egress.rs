@@ -24,7 +24,10 @@ pub async fn spawn_forwarder() -> Result<()> {
     }
     let listener = match tokio::net::TcpListener::bind(("127.0.0.1", EGRESS_PORT as u16)).await {
         Ok(l) => {
-            info!(port = EGRESS_PORT, "VSOCK egress forwarder bound on 127.0.0.1");
+            info!(
+                port = EGRESS_PORT,
+                "VSOCK egress forwarder bound on 127.0.0.1"
+            );
             l
         }
         Err(e) => {
@@ -90,7 +93,9 @@ async fn bridge_connection(
 
         if ret < 0 {
             unsafe { libc::close(fd) };
-            return Err(eyre!("VSOCK connect to CID {remote_cid} port {remote_port} failed"));
+            return Err(eyre!(
+                "VSOCK connect to CID {remote_cid} port {remote_port} failed"
+            ));
         }
 
         // SAFETY: `fd` is a fresh owned socket we just connected.

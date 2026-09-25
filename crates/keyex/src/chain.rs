@@ -95,11 +95,16 @@ pub async fn finalized_block<T: EthTransport>(
         .rpc("eth_getBlockByNumber", json!([tag, false]))
         .await
         .map_err(|_| ChainError::Rpc)?;
-    let number = parse_quantity(resp.get("number").ok_or(ChainError::Rpc)?).ok_or(ChainError::Rpc)?;
+    let number =
+        parse_quantity(resp.get("number").ok_or(ChainError::Rpc)?).ok_or(ChainError::Rpc)?;
     let hash = parse_b256(resp.get("hash").ok_or(ChainError::Rpc)?).ok_or(ChainError::Rpc)?;
     let timestamp =
         parse_quantity(resp.get("timestamp").ok_or(ChainError::Rpc)?).ok_or(ChainError::Rpc)?;
-    Ok(BlockRef { number, hash, timestamp })
+    Ok(BlockRef {
+        number,
+        hash,
+        timestamp,
+    })
 }
 
 /// `KskdExit.burned(recipient)` at finality, returned with the block number it was
@@ -129,7 +134,10 @@ pub async fn burned_finalized<T: EthTransport>(
 /// Block hash at an explicit height, for the burned double-read's second pass.
 async fn read_block_hash<T: EthTransport>(t: &T, number: u64) -> Result<B256, ChainError> {
     let resp = t
-        .rpc("eth_getBlockByNumber", json!([format!("0x{number:x}"), false]))
+        .rpc(
+            "eth_getBlockByNumber",
+            json!([format!("0x{number:x}"), false]),
+        )
         .await
         .map_err(|_| ChainError::Rpc)?;
     parse_b256(resp.get("hash").ok_or(ChainError::Rpc)?).ok_or(ChainError::Rpc)
@@ -195,7 +203,10 @@ impl<T: EthTransport> ChainView for RpcChainView<'_, T> {
 }
 
 async fn eth_block_number<T: EthTransport>(t: &T) -> Result<u64, ChainError> {
-    let resp = t.rpc("eth_blockNumber", json!([])).await.map_err(|_| ChainError::Rpc)?;
+    let resp = t
+        .rpc("eth_blockNumber", json!([]))
+        .await
+        .map_err(|_| ChainError::Rpc)?;
     parse_quantity(&resp).ok_or(ChainError::Rpc)
 }
 
@@ -210,7 +221,10 @@ async fn eth_call_word<T: EthTransport>(
         { "to": to.to_string(), "data": hex::encode_prefixed(data) },
         format!("0x{block:x}"),
     ]);
-    let resp = t.rpc("eth_call", params).await.map_err(|_| ChainError::Rpc)?;
+    let resp = t
+        .rpc("eth_call", params)
+        .await
+        .map_err(|_| ChainError::Rpc)?;
     let s = resp.as_str().ok_or(ChainError::Rpc)?;
     let bytes = decode_hex(s).ok_or(ChainError::Rpc)?;
     if bytes.len() < 32 {
@@ -269,7 +283,10 @@ mod tests {
 
     impl Scripted {
         fn new(responses: Vec<Resp>) -> Self {
-            Self { responses: Mutex::new(responses.into()), calls: Mutex::new(Vec::new()) }
+            Self {
+                responses: Mutex::new(responses.into()),
+                calls: Mutex::new(Vec::new()),
+            }
         }
         fn calls(&self) -> Vec<(String, Value)> {
             self.calls.lock().unwrap().clone()
@@ -312,10 +329,14 @@ mod tests {
             Resp::Ok(block(100, 0xAB, 1000)),
             Resp::Ok(word_u64(500)),
         ]);
-        let (v, n) =
-            burned_finalized(&t, Address::from([0xEE; 20]), Address::from([0x22; 20]), Finality::Tag)
-                .await
-                .unwrap();
+        let (v, n) = burned_finalized(
+            &t,
+            Address::from([0xEE; 20]),
+            Address::from([0x22; 20]),
+            Finality::Tag,
+        )
+        .await
+        .unwrap();
         assert_eq!(v, U256::from(500));
         assert_eq!(n, 100); // returns the height the value was read at
         let calls = t.calls();
@@ -323,7 +344,7 @@ mod tests {
         assert_eq!(calls[0].1[0], "finalized");
         assert_eq!(calls[1].0, "eth_call");
         assert_eq!(calls[1].1[1], "0x64"); // eth_call pinned to block 100
-        // Second pass re-fetches the SAME height, never re-resolves the tag.
+                                           // Second pass re-fetches the SAME height, never re-resolves the tag.
         assert_eq!(calls[2].0, "eth_getBlockByNumber");
         assert_eq!(calls[2].1[0], "0x64");
     }
@@ -400,7 +421,10 @@ mod tests {
         .unwrap();
         assert!(ok);
         let data = t.calls()[1].1[0]["data"].as_str().unwrap().to_owned();
-        assert!(data.starts_with("0xd5f50582"), "oracle uses isValidSigner: {data}");
+        assert!(
+            data.starts_with("0xd5f50582"),
+            "oracle uses isValidSigner: {data}"
+        );
         assert!(data.ends_with(hex::encode([0x33u8; 20]).as_str()));
     }
 
@@ -418,13 +442,18 @@ mod tests {
         .unwrap();
         assert!(!ok);
         let data = t.calls()[1].1[0]["data"].as_str().unwrap().to_owned();
-        assert!(data.starts_with("0xba6f8b0e"), "bridge uses validSigner: {data}");
+        assert!(
+            data.starts_with("0xba6f8b0e"),
+            "bridge uses validSigner: {data}"
+        );
     }
 
     #[tokio::test]
     async fn signer_count_decodes_word_and_uses_selector() {
         let t = Scripted::new(vec![Resp::Ok(block(5, 0x01, 1)), Resp::Ok(word_u64(2))]);
-        let n = signer_count(&t, Address::from([0x44; 20]), Finality::Tag).await.unwrap();
+        let n = signer_count(&t, Address::from([0x44; 20]), Finality::Tag)
+            .await
+            .unwrap();
         assert_eq!(n, U256::from(2));
         assert_eq!(t.calls()[1].1[0]["data"].as_str().unwrap(), "0x7ca548c6");
     }
@@ -460,21 +489,36 @@ mod tests {
     #[tokio::test]
     async fn transport_failure_maps_to_rpc_error() {
         let t = Scripted::new(vec![Resp::Fail]);
-        assert_eq!(finalized_block(&t, Finality::Tag).await, Err(ChainError::Rpc));
+        assert_eq!(
+            finalized_block(&t, Finality::Tag).await,
+            Err(ChainError::Rpc)
+        );
     }
 
     #[tokio::test]
     async fn empty_call_return_is_rpc_error() {
         // A revert with no return data (`0x`) must not decode to a phantom zero.
-        let t = Scripted::new(vec![Resp::Ok(block(5, 0x01, 1)), Resp::Ok(Value::String("0x".to_owned()))]);
-        assert_eq!(signer_count(&t, Address::ZERO, Finality::Tag).await, Err(ChainError::Rpc));
+        let t = Scripted::new(vec![
+            Resp::Ok(block(5, 0x01, 1)),
+            Resp::Ok(Value::String("0x".to_owned())),
+        ]);
+        assert_eq!(
+            signer_count(&t, Address::ZERO, Finality::Tag).await,
+            Err(ChainError::Rpc)
+        );
     }
 
     #[test]
     fn chain_error_maps_to_claim_error() {
         use crate::claim::ClaimError;
-        assert_eq!(ClaimError::from(ChainError::ReadMismatch), ClaimError::ReadMismatch);
-        assert_eq!(ClaimError::from(ChainError::DecreasingBurned), ClaimError::DecreasingBurned);
+        assert_eq!(
+            ClaimError::from(ChainError::ReadMismatch),
+            ClaimError::ReadMismatch
+        );
+        assert_eq!(
+            ClaimError::from(ChainError::DecreasingBurned),
+            ClaimError::DecreasingBurned
+        );
         assert_eq!(ClaimError::from(ChainError::Rpc), ClaimError::RpcError);
     }
 
@@ -489,7 +533,10 @@ mod tests {
         };
         assert!(view.registered(Address::from([0x33; 20])).await.unwrap());
         let data = t.calls()[1].1[0]["data"].as_str().unwrap().to_owned();
-        assert!(data.starts_with("0xd5f50582"), "oracle view uses isValidSigner: {data}");
+        assert!(
+            data.starts_with("0xd5f50582"),
+            "oracle view uses isValidSigner: {data}"
+        );
     }
 
     #[tokio::test]
@@ -503,7 +550,10 @@ mod tests {
         };
         assert!(!view.registered(Address::from([0x33; 20])).await.unwrap());
         let data = t.calls()[1].1[0]["data"].as_str().unwrap().to_owned();
-        assert!(data.starts_with("0xba6f8b0e"), "bridge view uses validSigner: {data}");
+        assert!(
+            data.starts_with("0xba6f8b0e"),
+            "bridge view uses validSigner: {data}"
+        );
     }
 
     #[tokio::test]
