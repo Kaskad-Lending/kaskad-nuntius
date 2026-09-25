@@ -146,6 +146,13 @@ build_one() {
   retry 3 5 aws s3 cp "$WORK/$name.pcr0.json"      "$S3/$name/pcr0.json"
   retry 3 5 aws s3 cp "$WORK/$name.pcr0.json.sig"  "$S3/$name/pcr0.json.sig"
 
+  # Reclaim the multi-GB cargo build cache + this image before the next image
+  # builds; two sequential musl release builds otherwise exhaust the 30G builder
+  # volume (oracle succeeds, pontifex hits ENOSPC). PCR0 is cache-independent
+  # (musl digest-pinned + --locked), so pruning never changes measurements.
+  sudo docker rmi -f "$tag" >/dev/null 2>&1 || true
+  sudo docker builder prune -af >/dev/null 2>&1 || true
+
   echo "$name PCR0=$pcr0"
 }
 
@@ -162,10 +169,27 @@ publish_host_bundle() {
   echo "host bundle published to $S3/host/"
 }
 
-for entry in "${IMAGES[@]}"; do
-  build_one "${entry%%:*}" "${entry#*:}"
-done
+# Run the whole build piped to tee so the full transcript — not just SSM's
+# truncated 2500-char tail — lands in S3 on success or failure. The pipeline
+# barrier makes tee flush before the upload (no lost-tail race), and
+# PIPESTATUS[0] carries the real build rc past the `| tee`.
+BUILD_LOG="$(mktemp /tmp/build-eif-XXXXXX.log)"
+# -e off around the pipeline so a failing build does not abort before the rc is
+# read and the log is uploaded; the inner group keeps its inherited -e and fails
+# fast, so PIPESTATUS[0] still carries the real build rc.
+set +e
+{
+  for entry in "${IMAGES[@]}"; do
+    build_one "${entry%%:*}" "${entry#*:}"
+  done
 
-publish_host_bundle
+  publish_host_bundle
 
-echo "=== keyex EIFs built + signed + published (commit $COMMIT) ==="
+  echo "=== keyex EIFs built + signed + published (commit $COMMIT) ==="
+} 2>&1 | tee "$BUILD_LOG"
+BUILD_RC=${PIPESTATUS[0]}
+set -e
+aws s3 cp "$BUILD_LOG" "$S3/builds/$COMMIT/build.log" >/dev/null 2>&1 || true
+rm -f "$BUILD_LOG"
+echo "build log: $S3/builds/$COMMIT/build.log (rc=$BUILD_RC)"
+exit "$BUILD_RC"
