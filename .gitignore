@@ -10,3 +10,8 @@ docs/timestamps.md
 CLAUDE.md
 enclave/__pycache__/
 docs/pr-timeline-*.md
+
+# Session scratch + Python bytecode — never commit (may hold local keys/notes).
+scratchpad/
+__pycache__/
+*.pyc

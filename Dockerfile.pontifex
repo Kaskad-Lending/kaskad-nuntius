@@ -1,0 +1,79 @@
+# Pontifex (bridge) keyex enclave image. CID 17.
+# 2-stage musl, digest-pinned (audit S-1) — same bases as the oracle
+# Dockerfile so both EIFs pin identical toolchain bytes into PCR0.
+# The bridge holds only k_bridge (no root, no KMS): no sealing env here.
+# Bump the digests in lockstep with the oracle Dockerfile.
+FROM rust:1.91.1-alpine3.20@sha256:1f1428db130caff5a0ae90d268a9dda7ba5fd6dad69792ab23483a31f11c1338 AS builder
+
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconf
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src/ ./src/
+COPY proto/ ./proto/
+COPY config/ ./config/
+COPY crates/ ./crates/
+
+# Trust-critical PONTIFEX_* identity, baked at COMPILE time (option_env! in
+# crates/pontifex-bridge config.rs/runner.rs) — MUST sit in the builder stage,
+# the runtime stage is too late. ARG defaults empty → fail-loud at boot
+# (from_baked / baked_igra_rpcs reject "" exactly like missing); host/build-eif.sh
+# passes the real values as --build-arg from host/eif-config/<network>.env.
+# All PUBLIC — no secrets baked.
+#   PONTIFEX_EXIT      = KskdExit on Galleon/Igra (burn ledger).
+#   PONTIFEX_KSKD      = KSKD token on Igra (forbidden claim recipient).
+#   PONTIFEX_ENTRY     = KskdEntry on RH (EIP-712 verifyingContract) — nonzero.
+#   PONTIFEX_CHAIN_ID  = RH chain id (46630 testnet / 4663 mainnet).
+#   PONTIFEX_IGRA_RPCS = comma-separated https Igra JSON-RPC endpoints.
+#   PONTIFEX_VERSION   = image version bound into key-handover approvals (empty → 1);
+#                        the claim signature itself carries no version.
+#   PONTIFEX_ANCESTOR_PCRS = REQUIRED parent-oracle PCR0 allowlist (48-byte hex).
+#                        host/build-eif.sh derives it from the just-built oracle
+#                        EIF and injects it; leave empty in the .env. An empty
+#                        value reaching the binary makes the bridge refuse to boot.
+ARG PONTIFEX_EXIT=""
+ARG PONTIFEX_KSKD=""
+ARG PONTIFEX_ENTRY=""
+ARG PONTIFEX_CHAIN_ID=""
+ARG PONTIFEX_IGRA_RPCS=""
+ARG PONTIFEX_VERSION=""
+ARG PONTIFEX_ANCESTOR_PCRS=""
+ENV PONTIFEX_EXIT=${PONTIFEX_EXIT}
+ENV PONTIFEX_KSKD=${PONTIFEX_KSKD}
+ENV PONTIFEX_ENTRY=${PONTIFEX_ENTRY}
+ENV PONTIFEX_CHAIN_ID=${PONTIFEX_CHAIN_ID}
+ENV PONTIFEX_IGRA_RPCS=${PONTIFEX_IGRA_RPCS}
+ENV PONTIFEX_VERSION=${PONTIFEX_VERSION}
+ENV PONTIFEX_ANCESTOR_PCRS=${PONTIFEX_ANCESTOR_PCRS}
+
+# pontifex-bridge bin (crates/pontifex-bridge): bridge boot + claim signer.
+RUN cargo build --release --locked --target x86_64-unknown-linux-musl --bin pontifex-bridge
+
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+
+RUN apk add --no-cache ca-certificates iproute2
+
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/pontifex-bridge /usr/local/bin/pontifex-bridge
+
+ENV RUST_LOG=info
+ENV ENCLAVE_MODE=1
+
+COPY <<'EOF' /entrypoint.sh
+#!/bin/sh
+set -e
+
+# Loopback for the VSOCK->TCP bridge on 127.0.0.1.
+ip link set lo up
+
+# NSM hardware RNG backs ephemeral RA-TLS keys — fail closed if absent.
+RNG_CURRENT=$(cat /sys/devices/virtual/misc/hw_random/rng_current 2>/dev/null || echo "none")
+if [ "$RNG_CURRENT" != "nsm-hwrng" ]; then
+  echo "FATAL: Hardware RNG is '$RNG_CURRENT', expected 'nsm-hwrng'"
+  exit 1
+fi
+
+exec /usr/local/bin/pontifex-bridge
+EOF
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

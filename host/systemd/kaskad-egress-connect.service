@@ -1,0 +1,17 @@
+[Unit]
+Description=Kaskad keyex egress HTTP CONNECT proxy (stdlib)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/kaskad/http_connect_proxy.py --bind 127.0.0.1 --port 8888
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+StandardOutput=file:/var/log/kaskad-egress.log
+StandardError=file:/var/log/kaskad-egress.log
+
+[Install]
+WantedBy=multi-user.target

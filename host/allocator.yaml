@@ -1,0 +1,6 @@
+---
+# Nitro allocator for the keyex host (c5.2xlarge = 8 vCPU / 16 GiB).
+# Reserves both enclaves: oracle 4 vCPU/1024 MiB + pontifex 2 vCPU/512 MiB,
+# plus headroom for per-enclave overhead. Host keeps 2 vCPU.
+cpu_count: 6
+memory_mib: 2048

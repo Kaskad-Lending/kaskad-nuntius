@@ -1,0 +1,94 @@
+# Keyex genesis oracle EIF (kaskad-nitro-us, CID 16). Mints an NSM-rooted
+# genesis signing key, registers it on the RH KaskadPriceOracle, serves it to
+# successor enclaves over RA-TLS, and signs prices with it. Built
+# `--features keyex_oracle` (Cargo.toml) → a NEW binary and NEW PCRs by design,
+# distinct from the live Igra price oracle (Dockerfile). Digest-pinned in
+# lockstep with Dockerfile.pontifex so both keyex EIFs pin identical toolchain
+# bytes. No secret is baked — only public addresses / RPCs / chain ids.
+FROM rust:1.91.1-alpine3.20@sha256:1f1428db130caff5a0ae90d268a9dda7ba5fd6dad69792ab23483a31f11c1338 AS builder
+
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconf
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src/ ./src/
+COPY proto/ ./proto/
+# `include_str!` on config/assets.json AND config/exchanges.json (main.rs still
+# runs the full price loop under the feature) means both must be present at
+# compile time; their bytes go into PCR0.
+COPY config/ ./config/
+# Workspace members (keyex, nitro-common) are compiled in under the feature, so
+# the whole crates/ tree must be present — cargo needs every member manifest to
+# resolve the workspace even for the ones the default build leaves out.
+COPY crates/ ./crates/
+
+# GO-LIVE: fill these before the EIF build. They are read at COMPILE time via
+# option_env! (keyex_oracle/config.rs from_baked) and baked into the binary →
+# into PCR0, so the lying host cannot redirect them at runtime. All PUBLIC:
+#   KEYEX_ORACLE_REGISTRY  = the RH KaskadPriceOracle address (predicted off
+#                            the deployer nonce; see the deploy runbook — the
+#                            registry↔PCR0 circular bootstrap is broken by
+#                            predicting the CREATE address and asserting it).
+#   KEYEX_ORACLE_RH_RPCS   = comma-separated https RH JSON-RPC endpoints.
+#   KEYEX_ORACLE_OWNERS    = comma-separated owner EOAs that may EIP-712-approve
+#                            a future key handover to a newer image.
+#   KEYEX_ORACLE_THRESHOLD = approval quorum (genesis launch = 1).
+#   KEYEX_ORACLE_CHAIN_ID  = 46630 (RH testnet) — the approval domain chainId.
+#   KEYEX_ORACLE_VERSION   = image version bound into every approval (genesis 1).
+# ARG defaults empty → the enclave fail-loud refuses to boot (from_baked Err);
+# a placeholder EIF can never sign or register. host/build-eif.sh passes the real
+# values as --build-arg from host/eif-config/<network>.env. These MUST live in
+# the builder stage, before `cargo build`, or option_env! never sees them.
+ARG KEYEX_ORACLE_REGISTRY=""
+ARG KEYEX_ORACLE_RH_RPCS=""
+ARG KEYEX_ORACLE_OWNERS=""
+ARG KEYEX_ORACLE_THRESHOLD=""
+ARG KEYEX_ORACLE_CHAIN_ID=""
+ARG KEYEX_ORACLE_VERSION=""
+# Optional: ancestor PCR0 allowlist (empty for a genesis image) and sibling
+# oracle peers to sweep for an already-installed root (empty for genesis).
+ARG KEYEX_ORACLE_ANCESTORS=""
+ARG KEYEX_ORACLE_PEERS=""
+ENV KEYEX_ORACLE_REGISTRY=${KEYEX_ORACLE_REGISTRY}
+ENV KEYEX_ORACLE_RH_RPCS=${KEYEX_ORACLE_RH_RPCS}
+ENV KEYEX_ORACLE_OWNERS=${KEYEX_ORACLE_OWNERS}
+ENV KEYEX_ORACLE_THRESHOLD=${KEYEX_ORACLE_THRESHOLD}
+ENV KEYEX_ORACLE_CHAIN_ID=${KEYEX_ORACLE_CHAIN_ID}
+ENV KEYEX_ORACLE_VERSION=${KEYEX_ORACLE_VERSION}
+ENV KEYEX_ORACLE_ANCESTORS=${KEYEX_ORACLE_ANCESTORS}
+ENV KEYEX_ORACLE_PEERS=${KEYEX_ORACLE_PEERS}
+
+RUN cargo build --release --locked --target x86_64-unknown-linux-musl --features keyex_oracle
+
+# ── Stage 2: Minimal runtime image ───────────────────────────────────
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+
+RUN apk add --no-cache ca-certificates iproute2
+
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/kaskad-oracle /usr/local/bin/kaskad-oracle
+
+ENV RUST_LOG=info
+ENV ENCLAVE_MODE=1
+# No KASKAD_KEY_SEALING: the keyex path mints an NSM-rooted genesis key and
+# never touches KMS sealing (sealing/signer are dead_code under the feature).
+
+# Nitro Enclave boots with lo down; bring it up before the VSOCK→TCP bridge
+# binds 127.0.0.1, then fail closed unless the NSM hardware RNG is active.
+COPY <<'EOF' /entrypoint.sh
+#!/bin/sh
+set -e
+
+ip link set lo up
+
+RNG_CURRENT=$(cat /sys/devices/virtual/misc/hw_random/rng_current 2>/dev/null || echo "none")
+if [ "$RNG_CURRENT" != "nsm-hwrng" ]; then
+  echo "FATAL: Hardware RNG is '$RNG_CURRENT', expected 'nsm-hwrng'"
+  echo "Enclave key generation would be insecure. Aborting."
+  exit 1
+fi
+
+exec /usr/local/bin/kaskad-oracle
+EOF
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

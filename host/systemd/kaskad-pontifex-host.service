@@ -1,0 +1,20 @@
+[Unit]
+Description=Kaskad Pontifex host (HTTP:8081 relayer front end + configure loop)
+After=network.target
+
+[Service]
+Type=simple
+# Public, non-secret runtime config (registry/entry addresses, RPC URLs, ASG
+# name, EIF bucket, region). Written by user-data from terraform outputs.
+EnvironmentFile=/etc/kaskad/pontifex-host.env
+ExecStart=/usr/bin/python3 /opt/kaskad/pontifex_host.py --port 8081
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+StandardOutput=file:/var/log/kaskad-pontifex-host.log
+StandardError=file:/var/log/kaskad-pontifex-host.log
+
+[Install]
+WantedBy=multi-user.target
