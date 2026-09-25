@@ -149,7 +149,7 @@ jobs:
             esac
             sleep 30
           done
-        timeout-minutes: 40
+        timeout-minutes: 60
 
       - name: Stop builder instance
         if: always()

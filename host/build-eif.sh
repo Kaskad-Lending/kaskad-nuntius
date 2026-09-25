@@ -146,10 +146,9 @@ build_one() {
   retry 3 5 aws s3 cp "$WORK/$name.pcr0.json"      "$S3/$name/pcr0.json"
   retry 3 5 aws s3 cp "$WORK/$name.pcr0.json.sig"  "$S3/$name/pcr0.json.sig"
 
-  # Reclaim the multi-GB cargo build cache + this image before the next image
-  # builds; two sequential musl release builds otherwise exhaust the 30G builder
-  # volume (oracle succeeds, pontifex hits ENOSPC). PCR0 is cache-independent
-  # (musl digest-pinned + --locked), so pruning never changes measurements.
+  # Reclaim the oracle build cache + image before pontifex builds, so two musl
+  # release trees need not co-reside on the 30G builder volume. Cache-independent
+  # (digest-pinned bases + --locked): pruning is PCR-neutral.
   sudo docker rmi -f "$tag" >/dev/null 2>&1 || true
   sudo docker builder prune -af >/dev/null 2>&1 || true
 

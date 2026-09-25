@@ -47,7 +47,9 @@ ENV PONTIFEX_VERSION=${PONTIFEX_VERSION}
 ENV PONTIFEX_ANCESTOR_PCRS=${PONTIFEX_ANCESTOR_PCRS}
 
 # pontifex-bridge bin (crates/pontifex-bridge): bridge boot + claim signer.
-RUN cargo build --release --locked --target x86_64-unknown-linux-musl --bin pontifex-bridge
+# -p selects the workspace member; without it --bin resolves only against the
+# root package (kaskad-oracle) and cargo errors "no bin target in default-run".
+RUN cargo build --release --locked --target x86_64-unknown-linux-musl -p pontifex-bridge --bin pontifex-bridge
 
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
