@@ -88,7 +88,11 @@ pub fn verify_approvals(
         bail!("threshold must be >= 1");
     }
     if threshold > owners.len() {
-        bail!("threshold {} exceeds owner count {}", threshold, owners.len());
+        bail!(
+            "threshold {} exceeds owner count {}",
+            threshold,
+            owners.len()
+        );
     }
 
     let digest = approval_digest(req);
@@ -143,7 +147,13 @@ mod tests {
         label: [u8; 32],
         chain_id: u64,
     ) -> ApprovalRequest {
-        ApprovalRequest { pcr0, version, mode, label, chain_id }
+        ApprovalRequest {
+            pcr0,
+            version,
+            mode,
+            label,
+            chain_id,
+        }
     }
 
     fn key(seed: u8) -> SigningKey {
@@ -169,7 +179,10 @@ mod tests {
         label: [u8; 32],
         chain_id: u64,
     ) -> [u8; 65] {
-        sign(sk, &approval_digest(&req(*pcr0, version, mode, label, chain_id)))
+        sign(
+            sk,
+            &approval_digest(&req(*pcr0, version, mode, label, chain_id)),
+        )
     }
 
     #[test]
@@ -179,8 +192,18 @@ mod tests {
         let expected =
             hex::decode("cb8a371abea52badb34086be1ed4d34b1af468a4804f61754fb89188c441a7fc")
                 .unwrap();
-        let got = approval_digest(&req(canonical_pcr0(), 1, ApprovalMode::Carry, v1_label(), 46630));
-        assert_eq!(got.as_slice(), expected.as_slice(), "Rust↔Solidity EIP-712 parity");
+        let got = approval_digest(&req(
+            canonical_pcr0(),
+            1,
+            ApprovalMode::Carry,
+            v1_label(),
+            46630,
+        ));
+        assert_eq!(
+            got.as_slice(),
+            expected.as_slice(),
+            "Rust↔Solidity EIP-712 parity"
+        );
     }
 
     #[test]
@@ -203,10 +226,22 @@ mod tests {
             sign_at(&o1, &pcr0, 1, ApprovalMode::Carry, label, 46630),
             sign_at(&o2, &pcr0, 1, ApprovalMode::Carry, label, 46630),
         ];
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 46630), &two, &owners, 2).is_ok());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
+            &two,
+            &owners,
+            2
+        )
+        .is_ok());
 
         let one = vec![sign_at(&o1, &pcr0, 1, ApprovalMode::Carry, label, 46630)];
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 46630), &one, &owners, 2).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
+            &one,
+            &owners,
+            2
+        )
+        .is_err());
     }
 
     #[test]
@@ -218,7 +253,13 @@ mod tests {
 
         let s = sign_at(&o1, &pcr0, 1, ApprovalMode::Carry, label, 46630);
         let dup = vec![s, s];
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 46630), &dup, &owners, 2).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
+            &dup,
+            &owners,
+            2
+        )
+        .is_err());
     }
 
     #[test]
@@ -235,9 +276,21 @@ mod tests {
         ];
         // threshold 3 (== owner count, so not the >owners guard): only 2 owners
         // signed, foreigner ignored → 2 < 3 fails.
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 46630), &sigs, &owners, 3).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
+            &sigs,
+            &owners,
+            3
+        )
+        .is_err());
         // threshold 2: the two owner sigs meet it, foreigner ignored.
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 46630), &sigs, &owners, 2).is_ok());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
+            &sigs,
+            &owners,
+            2
+        )
+        .is_ok());
     }
 
     #[test]
@@ -252,7 +305,13 @@ mod tests {
             sign_at(&o1, &pcr0, 1, ApprovalMode::Carry, label, 1),
             sign_at(&o2, &pcr0, 1, ApprovalMode::Carry, label, 1),
         ];
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 46630), &sigs, &owners, 2).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
+            &sigs,
+            &owners,
+            2
+        )
+        .is_err());
     }
 
     #[test]
@@ -266,7 +325,13 @@ mod tests {
             sign_at(&o2, &pcr0, 1, ApprovalMode::Carry, label, 46630),
         ];
         // verify under Fresh — digest differs → owner sigs no longer count
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Fresh, label, 46630), &sigs, &owners, 2).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Fresh, label, 46630),
+            &sigs,
+            &owners,
+            2
+        )
+        .is_err());
     }
 
     #[test]
@@ -280,7 +345,13 @@ mod tests {
             sign_at(&o1, &pcr0, 1, ApprovalMode::Child, label, 46630),
             sign_at(&o2, &pcr0, 1, ApprovalMode::Child, label, 46630),
         ];
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Child, other, 46630), &sigs, &owners, 2).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Child, other, 46630),
+            &sigs,
+            &owners,
+            2
+        )
+        .is_err());
     }
 
     #[test]
@@ -293,7 +364,13 @@ mod tests {
             sign_at(&o1, &pcr0, 1, ApprovalMode::Carry, label, 46630),
             sign_at(&o2, &pcr0, 1, ApprovalMode::Carry, label, 46630),
         ];
-        assert!(verify_approvals(&req(pcr0, 2, ApprovalMode::Carry, label, 46630), &sigs, &owners, 2).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 2, ApprovalMode::Carry, label, 46630),
+            &sigs,
+            &owners,
+            2
+        )
+        .is_err());
     }
 
     #[test]
@@ -314,9 +391,21 @@ mod tests {
             approval_digest(&req(x, 1, ApprovalMode::Carry, label, 46630)),
             approval_digest(&req(y, 1, ApprovalMode::Carry, label, 46630)),
         );
-        assert!(verify_approvals(&req(y, 1, ApprovalMode::Carry, label, 46630), &sigs, &owners, 2).is_err());
+        assert!(verify_approvals(
+            &req(y, 1, ApprovalMode::Carry, label, 46630),
+            &sigs,
+            &owners,
+            2
+        )
+        .is_err());
         // control: same pcr0 still passes
-        assert!(verify_approvals(&req(x, 1, ApprovalMode::Carry, label, 46630), &sigs, &owners, 2).is_ok());
+        assert!(verify_approvals(
+            &req(x, 1, ApprovalMode::Carry, label, 46630),
+            &sigs,
+            &owners,
+            2
+        )
+        .is_ok());
     }
 
     #[test]
@@ -334,7 +423,13 @@ mod tests {
             approval_digest(&req(pcr0, 1, ApprovalMode::Carry, label, 46630)),
             approval_digest(&req(pcr0, 1, ApprovalMode::Carry, label, 4663)),
         );
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 4663), &sigs, &owners, 2).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 4663),
+            &sigs,
+            &owners,
+            2
+        )
+        .is_err());
     }
 
     #[test]
@@ -349,8 +444,20 @@ mod tests {
             sign_at(&o1, &pcr0, 1, ApprovalMode::Carry, label, 46630),
             sign_at(&o2, &pcr0, 1, ApprovalMode::Carry, label, 46630),
         ];
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Child, label, 46630), &sigs, &owners, 2).is_err());
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Fresh, label, 46630), &sigs, &owners, 2).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Child, label, 46630),
+            &sigs,
+            &owners,
+            2
+        )
+        .is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Fresh, label, 46630),
+            &sigs,
+            &owners,
+            2
+        )
+        .is_err());
     }
 
     #[test]
@@ -361,9 +468,27 @@ mod tests {
         let owners = vec![addr(&o1)];
         let good = sign_at(&o1, &pcr0, 1, ApprovalMode::Carry, label, 46630);
         // threshold 0 fails closed: valid sig, empty sigs, and empty owners alike.
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 46630), &[good], &owners, 0).is_err());
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 46630), &[], &owners, 0).is_err());
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 46630), &[], &[], 0).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
+            &[good],
+            &owners,
+            0
+        )
+        .is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
+            &[],
+            &owners,
+            0
+        )
+        .is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
+            &[],
+            &[],
+            0
+        )
+        .is_err());
     }
 
     #[test]
@@ -377,7 +502,13 @@ mod tests {
             sign_at(&o2, &pcr0, 1, ApprovalMode::Carry, label, 46630),
         ];
         // 3-of-2 is unsatisfiable → explicit fail even with both owners signing.
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 46630), &sigs, &owners, 3).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
+            &sigs,
+            &owners,
+            3
+        )
+        .is_err());
     }
 
     #[test]
@@ -389,13 +520,19 @@ mod tests {
         let mut sig = sign_at(&o1, &pcr0, 1, ApprovalMode::Carry, label, 46630);
         let d = approval_digest(&req(pcr0, 1, ApprovalMode::Carry, label, 46630));
         assert!(recover(&d, &sig).is_ok()); // canonical v accepted
-        // v ∉ {27,28} rejected before any recovery math.
+                                            // v ∉ {27,28} rejected before any recovery math.
         sig[64] = 29;
         assert!(recover(&d, &sig).is_err());
         sig[64] = 30;
         assert!(recover(&d, &sig).is_err());
         // and such a sig never counts toward a quorum.
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 46630), &[sig], &owners, 1).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
+            &[sig],
+            &owners,
+            1
+        )
+        .is_err());
     }
 
     #[test]
@@ -416,7 +553,13 @@ mod tests {
 
         // With only o1 good + o2 high-s, threshold 2 fails (high-s ignored).
         let sigs = vec![good1, high2];
-        assert!(verify_approvals(&req(pcr0, 1, ApprovalMode::Carry, label, 46630), &sigs, &owners, 2).is_err());
+        assert!(verify_approvals(
+            &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
+            &sigs,
+            &owners,
+            2
+        )
+        .is_err());
     }
 
     /// Produce a high-s variant of a valid low-s 65-byte sig (s' = n - s, v flipped).

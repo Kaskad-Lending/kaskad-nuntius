@@ -17,11 +17,11 @@ use tracing::info;
 
 use crate::config::{baked_ancestor_pcrs, baked_igra_rpcs, BakedIdentity};
 use crate::nitro::{own_pcr0, NsmAttestor};
-use keyex::driver::{run_boot, Backoff, BootDeps, Genesis, Installed};
-use keyex::peer::RatlsPeerSource;
 use crate::serve::{create_listener, serve_loop, Serve};
 use crate::state::BridgeState;
 use crate::transport::ProxyTransport;
+use keyex::driver::{run_boot, Backoff, BootDeps, Genesis, Installed};
+use keyex::peer::RatlsPeerSource;
 
 /// Bridge VSOCK port (CID 17).
 const SERVE_PORT: u32 = 5004;
@@ -35,7 +35,9 @@ const BOOT_POLL: Duration = Duration::from_secs(3);
 struct RefusingGenesis;
 impl Genesis for RefusingGenesis {
     fn generate(&self) -> Result<SigningKey> {
-        Err(eyre!("bridge never generates a key; it fetches from the oracle"))
+        Err(eyre!(
+            "bridge never generates a key; it fetches from the oracle"
+        ))
     }
 }
 
@@ -59,8 +61,10 @@ pub async fn run() -> Result<()> {
 
     // Trust-critical identity + endpoints are baked (fail-loud), never host-supplied.
     let baked = BakedIdentity::from_baked()?;
-    let igra_url =
-        baked_igra_rpcs()?.into_iter().next().ok_or_else(|| eyre!("no baked Igra RPC"))?;
+    let igra_url = baked_igra_rpcs()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| eyre!("no baked Igra RPC"))?;
     let ancestors = baked_ancestor_pcrs()?;
     // The bridge only ever fetches BridgeFromParent, which now accepts a parent
     // solely by baked PCR0. An empty allowlist would reject every oracle and spin
@@ -76,8 +80,9 @@ pub async fn run() -> Result<()> {
     let pcr0 = own_pcr0(&Nsm::new()?)?;
     let attestor = Arc::new(NsmAttestor::new(Nsm::new()?));
 
-    let version: u64 =
-        option_env!("PONTIFEX_VERSION").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let version: u64 = option_env!("PONTIFEX_VERSION")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
 
     let client = reqwest::Client::builder()
         .proxy(reqwest::Proxy::all(
@@ -114,7 +119,11 @@ pub async fn run() -> Result<()> {
 
     // Fetch the claim key: a child derived by the local oracle from the genesis
     // root. Membership is read at RH finality.
-    let rh_url = cfg.rh_rpcs.first().cloned().ok_or_else(|| eyre!("configure had no RH RPC"))?;
+    let rh_url = cfg
+        .rh_rpcs
+        .first()
+        .cloned()
+        .ok_or_else(|| eyre!("configure had no RH RPC"))?;
     let rh = ProxyTransport::new(client.clone(), rh_url);
     let view = RpcChainView {
         transport: &rh,
@@ -123,20 +132,31 @@ pub async fn run() -> Result<()> {
         finality: Finality::Tag,
     };
 
-    let peers: Vec<(String, FetchKind)> =
-        cfg.oracle_peers.iter().map(|o| (o.clone(), FetchKind::BridgeFromParent)).collect();
-    let deps = BootDeps { role: Role::Bridge, peers: &peers, fresh_approved: false };
+    let peers: Vec<(String, FetchKind)> = cfg
+        .oracle_peers
+        .iter()
+        .map(|o| (o.clone(), FetchKind::BridgeFromParent))
+        .collect();
+    let deps = BootDeps {
+        role: Role::Bridge,
+        peers: &peers,
+        fresh_approved: false,
+    };
 
     let source = RatlsPeerSource::new(Nsm::new()?, pcr0, ancestors);
 
     let (key, addr) = match run_boot(&deps, &source, &view, &RefusingGenesis, &SleepBackoff).await {
         Installed::Peer { address, key } => (key, address),
         Installed::Candidate(_) => {
-            return Err(eyre!("bridge boot produced a candidate; a fetch-only role must never generate a key"))
+            return Err(eyre!(
+                "bridge boot produced a candidate; a fetch-only role must never generate a key"
+            ))
         }
     };
     state.lock().await.install_key(key, addr);
     info!(signer = %addr, "claim key installed; bridge ready");
 
-    serve_task.await.map_err(|e| eyre!("serve task ended: {e}"))?
+    serve_task
+        .await
+        .map_err(|e| eyre!("serve task ended: {e}"))?
 }

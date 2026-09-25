@@ -52,7 +52,11 @@ pub struct ControlCtx {
 /// register the genesis candidate while `run_boot` blocks awaiting registration.
 pub async fn serve_control(ctx: ControlCtx) -> Result<()> {
     let listener = create_listener(CONTROL_PORT)?;
-    info!(port = CONTROL_PORT, enclave = enclave_mode(), "keyex control channel listening");
+    info!(
+        port = CONTROL_PORT,
+        enclave = enclave_mode(),
+        "keyex control channel listening"
+    );
     let ctx = Arc::new(ctx);
     let sem = Arc::new(Semaphore::new(MAX_INFLIGHT));
     loop {
@@ -103,14 +107,17 @@ fn accept_connection(listener: &TcpListener) -> Result<CtlAccept> {
     if enclave_mode() {
         let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
         let mut len: libc::socklen_t = std::mem::size_of::<libc::sockaddr>() as libc::socklen_t;
-        let client_fd = unsafe { libc::accept(listener.as_raw_fd(), &mut addr as *mut _, &mut len) };
+        let client_fd =
+            unsafe { libc::accept(listener.as_raw_fd(), &mut addr as *mut _, &mut len) };
         if client_fd < 0 {
             return Ok(fault_to_accept(classify_accept(
                 std::io::Error::last_os_error().raw_os_error(),
             )?));
         }
         // SAFETY: `client_fd` is a fresh owned fd returned by accept.
-        Ok(CtlAccept::Conn(unsafe { TcpStream::from_raw_fd(client_fd) }))
+        Ok(CtlAccept::Conn(unsafe {
+            TcpStream::from_raw_fd(client_fd)
+        }))
     } else {
         match listener.accept() {
             Ok((stream, _)) => Ok(CtlAccept::Conn(stream)),
@@ -141,11 +148,17 @@ fn handle_control_connection(mut stream: TcpStream, ctx: &ControlCtx) -> Result<
 
 fn handle_oracle_request(req: OracleRequest, ctx: &ControlCtx) -> Vec<u8> {
     match req {
-        OracleRequest::Configure { registry, rh_rpcs, oracle_peers } => {
+        OracleRequest::Configure {
+            registry,
+            rh_rpcs,
+            oracle_peers,
+        } => {
             match registry.trim().parse::<Address>() {
                 Ok(a) if a == ctx.registry => {
-                    let https: Vec<String> =
-                        rh_rpcs.into_iter().filter(|u| u.starts_with("https://")).collect();
+                    let https: Vec<String> = rh_rpcs
+                        .into_iter()
+                        .filter(|u| u.starts_with("https://"))
+                        .collect();
                     if let Ok(mut st) = ctx.state.lock() {
                         st.set_config(https, oracle_peers);
                     }
@@ -155,7 +168,10 @@ fn handle_oracle_request(req: OracleRequest, ctx: &ControlCtx) -> Vec<u8> {
                 _ => encode(&Ack { ok: false }),
             }
         }
-        OracleRequest::Approval { typed_data, signatures } => {
+        OracleRequest::Approval {
+            typed_data,
+            signatures,
+        } => {
             match process_approval(
                 &typed_data,
                 &signatures,
@@ -167,9 +183,15 @@ fn handle_oracle_request(req: OracleRequest, ctx: &ControlCtx) -> Vec<u8> {
                     if let Ok(mut st) = ctx.state.lock() {
                         st.add_approval(va);
                     }
-                    encode(&ApprovalResult { accepted: true, reason: None })
+                    encode(&ApprovalResult {
+                        accepted: true,
+                        reason: None,
+                    })
                 }
-                Err(reason) => encode(&ApprovalResult { accepted: false, reason: Some(reason) }),
+                Err(reason) => encode(&ApprovalResult {
+                    accepted: false,
+                    reason: Some(reason),
+                }),
             }
         }
         OracleRequest::GetAttestation { nonce } => attestation_reply(ctx, nonce),
@@ -179,7 +201,11 @@ fn handle_oracle_request(req: OracleRequest, ctx: &ControlCtx) -> Vec<u8> {
 
 /// Fresh NSM attestation binding the caller's optional nonce and the current key.
 fn attestation_reply(ctx: &ControlCtx, nonce: Option<String>) -> Vec<u8> {
-    let (pubkey, addr) = match ctx.state.lock().ok().map(|st| (st.signer_pubkey(), st.signer_addr()))
+    let (pubkey, addr) = match ctx
+        .state
+        .lock()
+        .ok()
+        .map(|st| (st.signer_pubkey(), st.signer_addr()))
     {
         Some((Some(pk), Some(a))) => (pk, a),
         _ => return err_reply("not_ready"),
@@ -228,7 +254,9 @@ fn parse_approval_request(td: &Value, expected_chain_id: u64) -> Result<Approval
     }
     let cid = parse_u64_flexible(domain.get("chainId"))?;
     if cid != expected_chain_id {
-        return Err(format!("approval chainId {cid} != baked {expected_chain_id}"));
+        return Err(format!(
+            "approval chainId {cid} != baked {expected_chain_id}"
+        ));
     }
     let msg = td.get("message").ok_or("typedData has no message")?;
     let pcr0 = parse_hex_bytes::<48>(msg.get("pcr0"))?;
@@ -237,7 +265,13 @@ fn parse_approval_request(td: &Value, expected_chain_id: u64) -> Result<Approval
     let mode =
         ApprovalMode::try_from(mode_u8).map_err(|_| format!("invalid approval mode {mode_u8}"))?;
     let label = parse_hex_bytes::<32>(msg.get("label"))?;
-    Ok(ApprovalRequest { pcr0, version, mode, label, chain_id: expected_chain_id })
+    Ok(ApprovalRequest {
+        pcr0,
+        version,
+        mode,
+        label,
+        chain_id: expected_chain_id,
+    })
 }
 
 /// Verify an approval message reached owner quorum. Malformed signatures are
@@ -354,9 +388,18 @@ mod tests {
 
     #[test]
     fn u64_accepts_number_decimal_and_hex() {
-        assert_eq!(parse_u64_flexible(Some(&Value::from(46630))).unwrap(), 46630);
-        assert_eq!(parse_u64_flexible(Some(&Value::from("46630"))).unwrap(), 46630);
-        assert_eq!(parse_u64_flexible(Some(&Value::from("0xb626"))).unwrap(), 46630);
+        assert_eq!(
+            parse_u64_flexible(Some(&Value::from(46630))).unwrap(),
+            46630
+        );
+        assert_eq!(
+            parse_u64_flexible(Some(&Value::from("46630"))).unwrap(),
+            46630
+        );
+        assert_eq!(
+            parse_u64_flexible(Some(&Value::from("0xb626"))).unwrap(),
+            46630
+        );
         assert!(parse_u64_flexible(None).is_err());
     }
 

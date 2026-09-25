@@ -210,7 +210,12 @@ mod tests {
 
         let sc: BridgeRequest =
             serde_json::from_value(json!({"method": "sign_claim", "recipient": "0x22"})).unwrap();
-        assert_eq!(sc, BridgeRequest::SignClaim { recipient: "0x22".into() });
+        assert_eq!(
+            sc,
+            BridgeRequest::SignClaim {
+                recipient: "0x22".into()
+            }
+        );
 
         let h: BridgeRequest = serde_json::from_value(json!({"method": "health"})).unwrap();
         assert_eq!(h, BridgeRequest::Health);
@@ -220,7 +225,12 @@ mod tests {
     fn get_attestation_nonce_is_optional() {
         let with: BridgeRequest =
             serde_json::from_value(json!({"method": "get_attestation", "nonce": "0xab"})).unwrap();
-        assert_eq!(with, BridgeRequest::GetAttestation { nonce: Some("0xab".into()) });
+        assert_eq!(
+            with,
+            BridgeRequest::GetAttestation {
+                nonce: Some("0xab".into())
+            }
+        );
         let without: BridgeRequest =
             serde_json::from_value(json!({"method": "get_attestation"})).unwrap();
         assert_eq!(without, BridgeRequest::GetAttestation { nonce: None });
@@ -280,13 +290,21 @@ mod tests {
         assert_eq!(v, json!({"error": "decreasing_burned"}));
         // And it round-trips back to the Err variant, not a phantom Ok.
         let back: SignClaimResponse = serde_json::from_value(v).unwrap();
-        assert_eq!(back, SignClaimResponse::Err(SignClaimError { error: ClaimError::DecreasingBurned }));
+        assert_eq!(
+            back,
+            SignClaimResponse::Err(SignClaimError {
+                error: ClaimError::DecreasingBurned
+            })
+        );
     }
 
     #[test]
     fn health_states_and_sources_wire_strings() {
         assert_eq!(serde_json::to_value(BootState::Ready).unwrap(), "ready");
-        assert_eq!(serde_json::to_value(BootState::Fetching).unwrap(), "fetching");
+        assert_eq!(
+            serde_json::to_value(BootState::Fetching).unwrap(),
+            "fetching"
+        );
         assert_eq!(
             serde_json::to_value(BootState::WaitingRegistration).unwrap(),
             "waiting_registration"
@@ -323,7 +341,11 @@ mod tests {
 
     #[test]
     fn approval_result_omits_absent_reason() {
-        let v = serde_json::to_value(ApprovalResult { accepted: true, reason: None }).unwrap();
+        let v = serde_json::to_value(ApprovalResult {
+            accepted: true,
+            reason: None,
+        })
+        .unwrap();
         assert_eq!(v, json!({"accepted": true}));
         let v = serde_json::to_value(ApprovalResult {
             accepted: false,
@@ -342,6 +364,9 @@ mod tests {
 
     #[test]
     fn ack_is_ok_true() {
-        assert_eq!(serde_json::to_value(Ack { ok: true }).unwrap(), json!({"ok": true}));
+        assert_eq!(
+            serde_json::to_value(Ack { ok: true }).unwrap(),
+            json!({"ok": true})
+        );
     }
 }

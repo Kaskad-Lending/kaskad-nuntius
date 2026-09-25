@@ -46,7 +46,11 @@ impl KeyexSigner {
         let alloy_addr = keyex::sig::address_from_key(vk);
         let mut address = [0u8; 20];
         address.copy_from_slice(alloy_addr.as_slice());
-        Self { signing_key, address, pubkey_bytes }
+        Self {
+            signing_key,
+            address,
+            pubkey_bytes,
+        }
     }
 
     /// The 65-byte SEC1 public point, published to boot state for attestation.

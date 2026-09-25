@@ -72,7 +72,11 @@ pub async fn tick<V: ChainView>(t: &Tick<'_>, view: &V) -> Result<BootAction, Ch
                 return Ok(BootAction::Wait); // keep the candidate, back off
             }
             let eligible = t.fresh_approved || view.signer_count().await?.is_zero();
-            Ok(if eligible { BootAction::GenerateCandidate } else { BootAction::Wait })
+            Ok(if eligible {
+                BootAction::GenerateCandidate
+            } else {
+                BootAction::Wait
+            })
         }
     }
 }
@@ -93,14 +97,22 @@ mod tests {
 
     impl MockView {
         fn new(count: u64) -> Self {
-            Self { registered: HashMap::new(), count: U256::from(count), err: false }
+            Self {
+                registered: HashMap::new(),
+                count: U256::from(count),
+                err: false,
+            }
         }
         fn with(mut self, who: Address, ok: bool) -> Self {
             self.registered.insert(who, ok);
             self
         }
         fn failing() -> Self {
-            Self { registered: HashMap::new(), count: U256::ZERO, err: true }
+            Self {
+                registered: HashMap::new(),
+                count: U256::ZERO,
+                err: true,
+            }
         }
     }
 
@@ -114,7 +126,11 @@ mod tests {
             async move { out }
         }
         fn signer_count(&self) -> impl Future<Output = Result<U256, ChainError>> {
-            let out = if self.err { Err(ChainError::Rpc) } else { Ok(self.count) };
+            let out = if self.err {
+                Err(ChainError::Rpc)
+            } else {
+                Ok(self.count)
+            };
             async move { out }
         }
     }
@@ -123,11 +139,25 @@ mod tests {
         Address::from([b; 20])
     }
 
-    fn oracle<'a>(sweep: &'a [Address], fresh_approved: bool, candidate: Option<Address>) -> Tick<'a> {
-        Tick { role: Role::Oracle, sweep, fresh_approved, candidate }
+    fn oracle<'a>(
+        sweep: &'a [Address],
+        fresh_approved: bool,
+        candidate: Option<Address>,
+    ) -> Tick<'a> {
+        Tick {
+            role: Role::Oracle,
+            sweep,
+            fresh_approved,
+            candidate,
+        }
     }
     fn bridge(sweep: &[Address]) -> Tick<'_> {
-        Tick { role: Role::Bridge, sweep, fresh_approved: false, candidate: None }
+        Tick {
+            role: Role::Bridge,
+            sweep,
+            fresh_approved: false,
+            candidate: None,
+        }
     }
 
     #[tokio::test]
@@ -137,7 +167,10 @@ mod tests {
         let view = MockView::new(0).with(mate, true);
         let sweep = [mate];
         let t = oracle(&sweep, false, None);
-        assert_eq!(tick(&t, &view).await.unwrap(), BootAction::InstallPeerKey(mate));
+        assert_eq!(
+            tick(&t, &view).await.unwrap(),
+            BootAction::InstallPeerKey(mate)
+        );
     }
 
     #[tokio::test]
@@ -147,7 +180,10 @@ mod tests {
         let view = MockView::new(0).with(mate, true);
         let sweep = [mate];
         let t = oracle(&sweep, false, None);
-        assert_eq!(tick(&t, &view).await.unwrap(), BootAction::InstallPeerKey(mate));
+        assert_eq!(
+            tick(&t, &view).await.unwrap(),
+            BootAction::InstallPeerKey(mate)
+        );
     }
 
     #[tokio::test]
@@ -156,21 +192,30 @@ mod tests {
         let view = MockView::new(5).with(mate, true);
         let sweep = [mate];
         let t = oracle(&sweep, true, None); // replayed FRESH present
-        assert_eq!(tick(&t, &view).await.unwrap(), BootAction::InstallPeerKey(mate));
+        assert_eq!(
+            tick(&t, &view).await.unwrap(),
+            BootAction::InstallPeerKey(mate)
+        );
     }
 
     #[tokio::test]
     async fn oracle_genesis_on_empty_registry() {
         let view = MockView::new(0);
         let t = oracle(&[], false, None);
-        assert_eq!(tick(&t, &view).await.unwrap(), BootAction::GenerateCandidate);
+        assert_eq!(
+            tick(&t, &view).await.unwrap(),
+            BootAction::GenerateCandidate
+        );
     }
 
     #[tokio::test]
     async fn oracle_genesis_on_fresh_approval_even_if_populated() {
         let view = MockView::new(5); // nonzero, but FRESH is the other trigger
         let t = oracle(&[], true, None);
-        assert_eq!(tick(&t, &view).await.unwrap(), BootAction::GenerateCandidate);
+        assert_eq!(
+            tick(&t, &view).await.unwrap(),
+            BootAction::GenerateCandidate
+        );
     }
 
     #[tokio::test]
@@ -203,7 +248,10 @@ mod tests {
         let view = MockView::new(1).with(cand, false).with(mate, true);
         let sweep = [mate];
         let t = oracle(&sweep, false, Some(cand));
-        assert_eq!(tick(&t, &view).await.unwrap(), BootAction::InstallPeerKey(mate));
+        assert_eq!(
+            tick(&t, &view).await.unwrap(),
+            BootAction::InstallPeerKey(mate)
+        );
     }
 
     #[tokio::test]
@@ -219,7 +267,10 @@ mod tests {
         let view = MockView::new(1).with(child, true);
         let sweep = [child];
         let t = bridge(&sweep);
-        assert_eq!(tick(&t, &view).await.unwrap(), BootAction::InstallPeerKey(child));
+        assert_eq!(
+            tick(&t, &view).await.unwrap(),
+            BootAction::InstallPeerKey(child)
+        );
     }
 
     #[tokio::test]
@@ -230,7 +281,10 @@ mod tests {
         let view = MockView::new(1).with(child, false);
         let sweep = [child];
         let t = bridge(&sweep);
-        assert_eq!(tick(&t, &view).await.unwrap(), BootAction::InstallPeerKey(child));
+        assert_eq!(
+            tick(&t, &view).await.unwrap(),
+            BootAction::InstallPeerKey(child)
+        );
     }
 
     #[tokio::test]
@@ -240,7 +294,10 @@ mod tests {
         let view = MockView::new(1).with(unreg, false).with(reg, true);
         let sweep = [unreg, reg];
         let t = bridge(&sweep);
-        assert_eq!(tick(&t, &view).await.unwrap(), BootAction::InstallPeerKey(reg));
+        assert_eq!(
+            tick(&t, &view).await.unwrap(),
+            BootAction::InstallPeerKey(reg)
+        );
     }
 
     #[tokio::test]

@@ -104,7 +104,10 @@ fn handle_connection<A: Attestor + Send + Sync + 'static>(
     };
 
     // Enclave wall clock, stamped per request; feeds the claim's soft deadline.
-    let enclave_now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let enclave_now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
     let resp = rt.block_on(async {
         let fut = async {
@@ -216,7 +219,9 @@ fn classify_accept(errno: Option<i32>) -> Result<Accepted> {
         Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM) => {
             Ok(Accepted::Backoff)
         }
-        other => Err(eyre!("VSOCK accept failed (errno {other:?}) — listener unrecoverable")),
+        other => Err(eyre!(
+            "VSOCK accept failed (errno {other:?}) — listener unrecoverable"
+        )),
     }
 }
 

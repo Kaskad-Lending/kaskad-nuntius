@@ -82,9 +82,15 @@ pub fn generate_ephemeral_cert() -> Result<EphemeralCert> {
     let certified = rcgen::generate_simple_self_signed(vec!["ratls.local".to_string()])
         .map_err(|e| eyre!("rcgen self-signed cert: {e}"))?;
     let cert_der = certified.cert.der().clone();
-    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()));
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        certified.signing_key.serialize_der(),
+    ));
     let public_point = public_point_from_cert(&cert_der)?;
-    Ok(EphemeralCert { cert_der, key_der, public_point })
+    Ok(EphemeralCert {
+        cert_der,
+        key_der,
+        public_point,
+    })
 }
 
 /// Extract the 65-byte uncompressed EC point (`0x04 || X || Y`) from a cert's
@@ -105,7 +111,10 @@ pub fn public_point_from_cert(cert: &CertificateDer<'_>) -> Result<Vec<u8>> {
         .subject_public_key
         .raw_bytes();
     if point.len() != 65 || point[0] != 0x04 {
-        bail!("cert public key is not a 65-byte uncompressed EC point ({} bytes)", point.len());
+        bail!(
+            "cert public key is not a 65-byte uncompressed EC point ({} bytes)",
+            point.len()
+        );
     }
     Ok(point.to_vec())
 }
@@ -473,8 +482,20 @@ where
     A: AttestFn,
     K: Zeroize + AsRef<[u8; 32]>,
 {
-    let Channel { stream, my_nonce, my_point, peer_point, verifier, attest_fn } = ctx;
-    let HandoverInputs { own, role, own_key_is_candidate, approvals } = inputs;
+    let Channel {
+        stream,
+        my_nonce,
+        my_point,
+        peer_point,
+        verifier,
+        attest_fn,
+    } = ctx;
+    let HandoverInputs {
+        own,
+        role,
+        own_key_is_candidate,
+        approvals,
+    } = inputs;
 
     let (_peer_nonce, peer_doc) =
         match nonce_and_doc_exchange(stream, my_nonce, my_point, attest_fn).await {
@@ -539,8 +560,19 @@ where
     V: PeerVerifier,
     A: AttestFn,
 {
-    let Channel { stream, my_nonce, my_point, peer_point, verifier, attest_fn } = ctx;
-    let AcceptInputs { kind, own_pcr0, baked_ancestors } = inputs;
+    let Channel {
+        stream,
+        my_nonce,
+        my_point,
+        peer_point,
+        verifier,
+        attest_fn,
+    } = ctx;
+    let AcceptInputs {
+        kind,
+        own_pcr0,
+        baked_ancestors,
+    } = inputs;
 
     let (_peer_nonce, peer_doc) =
         nonce_and_doc_exchange(stream, my_nonce, my_point, attest_fn).await?;
@@ -705,8 +737,11 @@ mod tests {
         let provider = crypto_provider();
         let server_cert = generate_ephemeral_cert().unwrap();
         let client_cert = generate_ephemeral_cert().unwrap();
-        let acceptor = TlsAcceptor::from(Arc::new(server_config(provider.clone(), &server_cert).unwrap()));
-        let connector = TlsConnector::from(Arc::new(client_config(provider, &client_cert).unwrap()));
+        let acceptor = TlsAcceptor::from(Arc::new(
+            server_config(provider.clone(), &server_cert).unwrap(),
+        ));
+        let connector =
+            TlsConnector::from(Arc::new(client_config(provider, &client_cert).unwrap()));
 
         let (c, s) = duplex(16 * 1024);
         // Post-handshake byte exchange keeps both streams alive through the full
@@ -731,7 +766,12 @@ mod tests {
         let (sr, cr) = tokio::join!(srv, cli);
         let sr = sr.unwrap();
         let cr = cr.unwrap();
-        assert!(sr.is_ok(), "server handshake: {:?} / client: {:?}", sr.err(), cr.as_ref().err());
+        assert!(
+            sr.is_ok(),
+            "server handshake: {:?} / client: {:?}",
+            sr.err(),
+            cr.as_ref().err()
+        );
         assert!(cr.is_ok(), "client handshake: {:?}", cr.err());
         assert_eq!(sr.unwrap(), b'c');
         assert_eq!(cr.unwrap(), b's');
@@ -746,14 +786,19 @@ mod tests {
         let cert_a = generate_ephemeral_cert().unwrap();
         let key_b = generate_ephemeral_cert().unwrap();
 
-        let acceptor = TlsAcceptor::from(Arc::new(server_config(provider.clone(), &server_cert).unwrap()));
+        let acceptor = TlsAcceptor::from(Arc::new(
+            server_config(provider.clone(), &server_cert).unwrap(),
+        ));
 
         // Client config presenting cert A's chain with key B's signing key.
         let signing_key = provider
             .key_provider
             .load_private_key(key_b.key_der.clone_key())
             .unwrap();
-        let certified = Arc::new(CertifiedKey::new(vec![cert_a.cert_der.clone()], signing_key));
+        let certified = Arc::new(CertifiedKey::new(
+            vec![cert_a.cert_der.clone()],
+            signing_key,
+        ));
 
         #[derive(Debug)]
         struct FixedResolver(Arc<CertifiedKey>);
@@ -803,9 +848,11 @@ mod tests {
         let provider = crypto_provider();
         let server_cert = generate_ephemeral_cert().unwrap();
         let client_cert = generate_ephemeral_cert().unwrap();
-        let acceptor =
-            TlsAcceptor::from(Arc::new(server_config(provider.clone(), &server_cert).unwrap()));
-        let connector = TlsConnector::from(Arc::new(client_config(provider, &client_cert).unwrap()));
+        let acceptor = TlsAcceptor::from(Arc::new(
+            server_config(provider.clone(), &server_cert).unwrap(),
+        ));
+        let connector =
+            TlsConnector::from(Arc::new(client_config(provider, &client_cert).unwrap()));
 
         let shared = pcr(0xAB);
         let server_nonce = nonce(0x11);
@@ -824,9 +871,15 @@ mod tests {
         let srv_attest = |_n: &[u8; NONCE_LEN], _p: &[u8]| b"srv-doc".to_vec();
         let cli_attest = |_n: &[u8; NONCE_LEN], _p: &[u8]| b"cli-doc".to_vec();
 
-        let own = ImageIdentity { pcr0: shared, version: 5 };
+        let own = ImageIdentity {
+            pcr0: shared,
+            version: 5,
+        };
         let wiped = Arc::new(AtomicBool::new(false));
-        let granted = SpyKey { bytes: [0x42u8; 32], wiped: wiped.clone() };
+        let granted = SpyKey {
+            bytes: [0x42u8; 32],
+            wiped: wiped.clone(),
+        };
 
         let (c, s) = duplex(64 * 1024);
         let sni = ServerName::try_from("ratls.local").unwrap();
@@ -858,12 +911,19 @@ mod tests {
                 verifier: &cli_verifier,
                 attest_fn: &cli_attest,
             },
-            AcceptInputs { kind: FetchKind::RootFromRoot, own_pcr0: &shared, baked_ancestors: &[] },
+            AcceptInputs {
+                kind: FetchKind::RootFromRoot,
+                own_pcr0: &shared,
+                baked_ancestors: &[],
+            },
         );
 
         let (sr, cr) = tokio::join!(server_fut, client_fut);
         assert_eq!(sr.unwrap(), ServerExchange::HandedOwnKey);
-        assert!(wiped.load(Ordering::SeqCst), "handed key wiped locally after grant");
+        assert!(
+            wiped.load(Ordering::SeqCst),
+            "handed key wiped locally after grant"
+        );
         match cr.unwrap() {
             ClientExchange::Installed(k) => assert_eq!(*k, [0x42u8; 32]),
             ClientExchange::Refused(r) => panic!("expected install, got {r:?}"),
@@ -881,9 +941,11 @@ mod tests {
         let server_cert = generate_ephemeral_cert().unwrap();
         let client_cert = generate_ephemeral_cert().unwrap();
         let impostor = generate_ephemeral_cert().unwrap();
-        let acceptor =
-            TlsAcceptor::from(Arc::new(server_config(provider.clone(), &server_cert).unwrap()));
-        let connector = TlsConnector::from(Arc::new(client_config(provider, &client_cert).unwrap()));
+        let acceptor = TlsAcceptor::from(Arc::new(
+            server_config(provider.clone(), &server_cert).unwrap(),
+        ));
+        let connector =
+            TlsConnector::from(Arc::new(client_config(provider, &client_cert).unwrap()));
 
         let shared = pcr(0xAB);
         let server_nonce = nonce(0x11);
@@ -902,9 +964,15 @@ mod tests {
         let srv_attest = |_n: &[u8; NONCE_LEN], _p: &[u8]| b"srv-doc".to_vec();
         let cli_attest = |_n: &[u8; NONCE_LEN], _p: &[u8]| b"cli-doc".to_vec();
 
-        let own = ImageIdentity { pcr0: shared, version: 5 };
+        let own = ImageIdentity {
+            pcr0: shared,
+            version: 5,
+        };
         let wiped = Arc::new(AtomicBool::new(false));
-        let granted = SpyKey { bytes: [0x42u8; 32], wiped: wiped.clone() };
+        let granted = SpyKey {
+            bytes: [0x42u8; 32],
+            wiped: wiped.clone(),
+        };
 
         let (c, s) = duplex(64 * 1024);
         let sni = ServerName::try_from("ratls.local").unwrap();
@@ -936,13 +1004,23 @@ mod tests {
                 verifier: &cli_verifier,
                 attest_fn: &cli_attest,
             },
-            AcceptInputs { kind: FetchKind::RootFromRoot, own_pcr0: &shared, baked_ancestors: &[] },
+            AcceptInputs {
+                kind: FetchKind::RootFromRoot,
+                own_pcr0: &shared,
+                baked_ancestors: &[],
+            },
         );
 
         let (sr, cr) = tokio::join!(server_fut, client_fut);
-        assert_eq!(sr.unwrap(), ServerExchange::Refused(ExchangeRefusal::KeyMismatch));
+        assert_eq!(
+            sr.unwrap(),
+            ServerExchange::Refused(ExchangeRefusal::KeyMismatch)
+        );
         assert!(wiped.load(Ordering::SeqCst), "key wiped on refusal");
-        assert!(matches!(cr.unwrap(), ClientExchange::Refused(ExchangeRefusal::ServerDeclined)));
+        assert!(matches!(
+            cr.unwrap(),
+            ClientExchange::Refused(ExchangeRefusal::ServerDeclined)
+        ));
     }
 
     // ---- refuse-wipe primitive ----
@@ -966,7 +1044,10 @@ mod tests {
     #[test]
     fn refuse_wipe_zeroizes_and_refuses() {
         let flag = Arc::new(AtomicBool::new(false));
-        let spy = SpyKey { bytes: [7u8; 32], wiped: flag.clone() };
+        let spy = SpyKey {
+            bytes: [7u8; 32],
+            wiped: flag.clone(),
+        };
         let out = refuse_wipe(spy, ExchangeRefusal::NonceMismatch);
         assert!(flag.load(Ordering::SeqCst), "key must be wiped");
         assert_eq!(out, ServerExchange::Refused(ExchangeRefusal::NonceMismatch));
@@ -1003,7 +1084,10 @@ mod tests {
     ) {
         let (mut srv_side, mut cli_side) = duplex(16 * 1024);
         let wiped = Arc::new(AtomicBool::new(false));
-        let spy = SpyKey { bytes: [9u8; 32], wiped: wiped.clone() };
+        let spy = SpyKey {
+            bytes: [9u8; 32],
+            wiped: wiped.clone(),
+        };
         let my_point = b"server-point".to_vec();
 
         // Fake client peer: sends a nonce and a (fixture) doc, then reads the tag.
@@ -1011,13 +1095,18 @@ mod tests {
             write_frame(&mut cli_side, &nonce(0x55)).await.unwrap();
             let _server_nonce = read_frame(&mut cli_side).await.unwrap();
             let _server_doc = read_frame(&mut cli_side).await.unwrap();
-            write_frame(&mut cli_side, &load_fixture(US_HEX)).await.unwrap();
+            write_frame(&mut cli_side, &load_fixture(US_HEX))
+                .await
+                .unwrap();
             // Read the server's grant/decline frame.
             read_frame(&mut cli_side).await.unwrap()
         });
 
         let attest = |_n: &[u8; NONCE_LEN], _s: &[u8]| b"server-doc".to_vec();
-        let own = ImageIdentity { pcr0: pcr(0xAA), version: 5 };
+        let own = ImageIdentity {
+            pcr0: pcr(0xAA),
+            version: 5,
+        };
         let out = server_exchange(
             Channel {
                 stream: &mut srv_side,
@@ -1040,7 +1129,10 @@ mod tests {
 
         let client_frame = peer.await.unwrap();
         assert_eq!(out, ServerExchange::Refused(expected));
-        assert!(wiped.load(Ordering::SeqCst), "own key must be wiped on refuse");
+        assert!(
+            wiped.load(Ordering::SeqCst),
+            "own key must be wiped on refuse"
+        );
         assert_eq!(client_frame, vec![TAG_DECLINE], "no key may reach the wire");
     }
 
@@ -1052,8 +1144,13 @@ mod tests {
             nonce: Some(vec![0xEE; NONCE_LEN]),
             public_key: b"peer-point".to_vec(),
         };
-        run_server_refusal(v, nonce(0x11), b"peer-point".to_vec(), ExchangeRefusal::NonceMismatch)
-            .await;
+        run_server_refusal(
+            v,
+            nonce(0x11),
+            b"peer-point".to_vec(),
+            ExchangeRefusal::NonceMismatch,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1065,8 +1162,13 @@ mod tests {
             nonce: Some(my_nonce.to_vec()),
             public_key: b"attested-other-key".to_vec(),
         };
-        run_server_refusal(v, my_nonce, b"peer-tls-point".to_vec(), ExchangeRefusal::KeyMismatch)
-            .await;
+        run_server_refusal(
+            v,
+            my_nonce,
+            b"peer-tls-point".to_vec(),
+            ExchangeRefusal::KeyMismatch,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1076,19 +1178,27 @@ mod tests {
         // AttestationInvalid, key wiped, decline on the wire.
         let (mut srv_side, mut cli_side) = duplex(16 * 1024);
         let wiped = Arc::new(AtomicBool::new(false));
-        let spy = SpyKey { bytes: [3u8; 32], wiped: wiped.clone() };
+        let spy = SpyKey {
+            bytes: [3u8; 32],
+            wiped: wiped.clone(),
+        };
 
         let peer = tokio::spawn(async move {
             write_frame(&mut cli_side, &nonce(0x55)).await.unwrap();
             let _n = read_frame(&mut cli_side).await.unwrap();
             let _d = read_frame(&mut cli_side).await.unwrap();
-            write_frame(&mut cli_side, &load_fixture(US_HEX)).await.unwrap();
+            write_frame(&mut cli_side, &load_fixture(US_HEX))
+                .await
+                .unwrap();
             read_frame(&mut cli_side).await.unwrap()
         });
 
         let attest = |_n: &[u8; NONCE_LEN], _s: &[u8]| b"server-doc".to_vec();
         let verifier = NsmPeerVerifier { now_unix_secs: NOW };
-        let own = ImageIdentity { pcr0: pcr(0xAA), version: 5 };
+        let own = ImageIdentity {
+            pcr0: pcr(0xAA),
+            version: 5,
+        };
         let out = server_exchange(
             Channel {
                 stream: &mut srv_side,
@@ -1110,7 +1220,10 @@ mod tests {
         .unwrap();
 
         let client_frame = peer.await.unwrap();
-        assert_eq!(out, ServerExchange::Refused(ExchangeRefusal::AttestationInvalid));
+        assert_eq!(
+            out,
+            ServerExchange::Refused(ExchangeRefusal::AttestationInvalid)
+        );
         assert!(wiped.load(Ordering::SeqCst));
         assert_eq!(client_frame, vec![TAG_DECLINE]);
     }
@@ -1155,7 +1268,11 @@ mod tests {
                 verifier: &v,
                 attest_fn: &attest,
             },
-            AcceptInputs { kind: FetchKind::RootFromRoot, own_pcr0: &server_pcr0, baked_ancestors: &[] },
+            AcceptInputs {
+                kind: FetchKind::RootFromRoot,
+                own_pcr0: &server_pcr0,
+                baked_ancestors: &[],
+            },
         )
         .await
         .unwrap();
@@ -1190,7 +1307,11 @@ mod tests {
                 verifier: &v,
                 attest_fn: &attest,
             },
-            AcceptInputs { kind: FetchKind::RootFromRoot, own_pcr0: &pcr(0xAB), baked_ancestors: &[] },
+            AcceptInputs {
+                kind: FetchKind::RootFromRoot,
+                own_pcr0: &pcr(0xAB),
+                baked_ancestors: &[],
+            },
         )
         .await
         .unwrap();

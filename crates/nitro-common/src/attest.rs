@@ -61,8 +61,7 @@ pub fn parse_attestation_doc(cose_sign1: &[u8]) -> Result<AttestationDoc> {
         other => return Err(eyre!("COSE payload is not bytes: {:?}", tag_of(other))),
     };
 
-    let doc: Value =
-        serde_cbor::from_slice(payload).map_err(|e| eyre!("payload decode: {}", e))?;
+    let doc: Value = serde_cbor::from_slice(payload).map_err(|e| eyre!("payload decode: {}", e))?;
     let map = match doc {
         Value::Map(m) => m,
         other => return Err(eyre!("payload is not a map: {:?}", tag_of(&other))),

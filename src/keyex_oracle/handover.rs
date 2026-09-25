@@ -20,7 +20,7 @@ use eyre::{eyre, Result};
 use keyex::policy::{EnclaveRole, ImageIdentity};
 use keyex::ratls::{
     crypto_provider, fresh_nonce, generate_ephemeral_cert, run_server_handshake, server_config,
-    Handshake, HandoverInputs, NsmPeerVerifier, ServerExchange, NONCE_LEN,
+    HandoverInputs, Handshake, NsmPeerVerifier, ServerExchange, NONCE_LEN,
 };
 use nitro_common::nsm::Nsm;
 use nitro_common::rng::NsmRng;
@@ -81,7 +81,10 @@ fn accept_loop_vsock(
     // OwnedFd closes it if the loop ever returns.
     let _listener = unsafe { OwnedFd::from_raw_fd(listen_fd) };
     let inflight = Arc::new(AtomicUsize::new(0));
-    info!(port = HANDOVER_PORT, "keyex handover channel listening (vsock)");
+    info!(
+        port = HANDOVER_PORT,
+        "keyex handover channel listening (vsock)"
+    );
     loop {
         let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
         let mut len = std::mem::size_of::<libc::sockaddr>() as libc::socklen_t;
@@ -101,7 +104,14 @@ fn accept_loop_vsock(
         }
         // SAFETY: `client_fd` is a fresh owned fd returned by accept.
         let owned = unsafe { OwnedFd::from_raw_fd(client_fd) };
-        spawn_handover_conn(&handle, owned, Arc::clone(&inflight), Arc::clone(&state), pcr0, version);
+        spawn_handover_conn(
+            &handle,
+            owned,
+            Arc::clone(&inflight),
+            Arc::clone(&state),
+            pcr0,
+            version,
+        );
     }
 }
 
@@ -113,7 +123,10 @@ async fn accept_loop_tcp(
     version: u64,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{HANDOVER_PORT}")).await?;
-    info!(port = HANDOVER_PORT, "keyex handover channel listening (tcp fallback)");
+    info!(
+        port = HANDOVER_PORT,
+        "keyex handover channel listening (tcp fallback)"
+    );
     let inflight = Arc::new(AtomicUsize::new(0));
     loop {
         let (stream, _) = match listener.accept().await {
@@ -128,7 +141,14 @@ async fn accept_loop_tcp(
             },
         };
         let owned: OwnedFd = stream.into_std()?.into();
-        spawn_handover_conn(&handle, owned, Arc::clone(&inflight), Arc::clone(&state), pcr0, version);
+        spawn_handover_conn(
+            &handle,
+            owned,
+            Arc::clone(&inflight),
+            Arc::clone(&state),
+            pcr0,
+            version,
+        );
     }
 }
 
@@ -152,7 +172,10 @@ fn spawn_handover_conn(
     let guard = InflightGuard { inflight };
     handle.spawn_blocking(move || {
         let _guard = guard;
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(e) => {
                 warn!(error = %e, "handover: failed to build connection runtime");
@@ -198,7 +221,9 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (mut root_opt, approvals) = {
-        let st = state.lock().map_err(|_| eyre!("handover: state mutex poisoned"))?;
+        let st = state
+            .lock()
+            .map_err(|_| eyre!("handover: state mutex poisoned"))?;
         (st.root_key(), st.approvals())
     };
     let mut root_bytes = match root_opt {
@@ -215,12 +240,15 @@ where
 
     let mut rng = NsmRng::new()?;
     let my_nonce = fresh_nonce(&mut rng);
-    let now_unix_secs =
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let verifier = NsmPeerVerifier { now_unix_secs };
     let nsm = Nsm::new()?;
     let attest = |peer_nonce: &[u8; NONCE_LEN], my_point: &[u8]| -> Vec<u8> {
-        nsm.attestation(None, Some(peer_nonce.to_vec()), Some(my_point.to_vec())).unwrap_or_default()
+        nsm.attestation(None, Some(peer_nonce.to_vec()), Some(my_point.to_vec()))
+            .unwrap_or_default()
     };
 
     let own = ImageIdentity { pcr0, version };
@@ -237,8 +265,7 @@ where
         approvals: &approvals,
     };
 
-    let handshake =
-        run_server_handshake(&acceptor, stream, hs, inputs, RootKeyBytes(root_bytes));
+    let handshake = run_server_handshake(&acceptor, stream, hs, inputs, RootKeyBytes(root_bytes));
     let outcome = tokio::time::timeout(HANDOVER_TIMEOUT, handshake).await;
     // Scrub every local copy of the transferable key on BOTH paths — the handshake's
     // own `RootKeyBytes` copy self-zeroizes on drop (including timeout cancellation),
@@ -250,7 +277,10 @@ where
     let outcome = match outcome {
         Ok(o) => o,
         Err(_elapsed) => {
-            warn!(timeout_secs = HANDOVER_TIMEOUT.as_secs(), "handover handshake timed out");
+            warn!(
+                timeout_secs = HANDOVER_TIMEOUT.as_secs(),
+                "handover handshake timed out"
+            );
             return Ok(());
         }
     };
@@ -278,7 +308,9 @@ struct VsockAsyncStream {
 impl VsockAsyncStream {
     fn from_owned(fd: OwnedFd) -> Result<Self> {
         set_nonblocking(&fd)?;
-        Ok(Self { inner: AsyncFd::new(fd)? })
+        Ok(Self {
+            inner: AsyncFd::new(fd)?,
+        })
     }
 }
 
@@ -288,11 +320,17 @@ fn set_nonblocking(fd: &OwnedFd) -> Result<()> {
     // SAFETY: fcntl on a fd we own.
     let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
     if flags < 0 {
-        return Err(eyre!("fcntl(F_GETFL) failed: {}", io::Error::last_os_error()));
+        return Err(eyre!(
+            "fcntl(F_GETFL) failed: {}",
+            io::Error::last_os_error()
+        ));
     }
     let rc = unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) };
     if rc < 0 {
-        return Err(eyre!("fcntl(F_SETFL, O_NONBLOCK) failed: {}", io::Error::last_os_error()));
+        return Err(eyre!(
+            "fcntl(F_SETFL, O_NONBLOCK) failed: {}",
+            io::Error::last_os_error()
+        ));
     }
     Ok(())
 }

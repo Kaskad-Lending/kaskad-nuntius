@@ -12,7 +12,9 @@
 //! shared VSOCK primitives and the [`boot_and_serve`] orchestration.
 
 #[cfg(not(target_os = "linux"))]
-compile_error!("feature `keyex_oracle` targets the Nitro enclave and requires target_os = \"linux\"");
+compile_error!(
+    "feature `keyex_oracle` targets the Nitro enclave and requires target_os = \"linux\""
+);
 
 mod config;
 mod control;
@@ -75,7 +77,10 @@ fn bound_vsock_listen_fd(port: u32) -> Result<RawFd> {
     unsafe {
         let fd = libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0);
         if fd < 0 {
-            return Err(eyre!("vsock socket() failed: {}", io::Error::last_os_error()));
+            return Err(eyre!(
+                "vsock socket() failed: {}",
+                io::Error::last_os_error()
+            ));
         }
         let one: libc::c_int = 1;
         libc::setsockopt(
@@ -199,7 +204,10 @@ impl Genesis for NsmGenesis {
 /// This image's measured PCR0 (48 bytes). A signer with an unknown identity must
 /// not boot.
 fn own_pcr0(nsm: &Nsm) -> Result<[u8; 48]> {
-    nsm.describe_pcr(0)?.data.try_into().map_err(|_| eyre!("PCR0 is not 48 bytes"))
+    nsm.describe_pcr(0)?
+        .data
+        .try_into()
+        .map_err(|_| eyre!("PCR0 is not 48 bytes"))
 }
 
 /// Boot the keyex oracle and return the installed key as an [`OracleSigner`].
@@ -243,7 +251,11 @@ pub async fn boot_and_serve() -> Result<Box<dyn crate::signer::OracleSigner>> {
         .timeout(Duration::from_secs(8))
         .connect_timeout(Duration::from_secs(4))
         .build()?;
-    let rh_url = cfg.rh_rpcs.first().cloned().ok_or_else(|| eyre!("no baked RH RPC"))?;
+    let rh_url = cfg
+        .rh_rpcs
+        .first()
+        .cloned()
+        .ok_or_else(|| eyre!("no baked RH RPC"))?;
     let rh = transport::ProxyTransport::new(client, rh_url);
     let view = RpcChainView {
         transport: &rh,
@@ -258,9 +270,15 @@ pub async fn boot_and_serve() -> Result<Box<dyn crate::signer::OracleSigner>> {
     for p in &cfg.peers {
         peers.push((p.clone(), FetchKind::RootFromRoot));
     }
-    let deps = BootDeps { role: Role::Oracle, peers: &peers, fresh_approved: false };
+    let deps = BootDeps {
+        role: Role::Oracle,
+        peers: &peers,
+        fresh_approved: false,
+    };
     let source = RatlsPeerSource::new(Nsm::new()?, pcr0, cfg.ancestors.clone());
-    let genesis = NsmGenesis { state: Arc::clone(&state) };
+    let genesis = NsmGenesis {
+        state: Arc::clone(&state),
+    };
 
     let (key, source_kind) = match run_boot(&deps, &source, &view, &genesis, &SleepBackoff).await {
         Installed::Candidate(key) => (key, KeySource::Genesis),
