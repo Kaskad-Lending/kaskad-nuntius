@@ -163,6 +163,7 @@ publish_host_bundle() {
   echo "=== publish host bundle ==="
   retry 3 5 aws s3 cp host/http_connect_proxy.py "$S3/host/http_connect_proxy.py"
   retry 3 5 aws s3 cp host/pontifex_host.py      "$S3/host/pontifex_host.py"
+  retry 3 5 aws s3 cp host/genesis_capture.py    "$S3/host/genesis_capture.py"
   retry 3 5 aws s3 cp enclave/pull_api.py        "$S3/host/pull_api.py"
   retry 3 5 aws s3 cp --recursive host/systemd/  "$S3/host/systemd/"
   echo "host bundle published to $S3/host/"
