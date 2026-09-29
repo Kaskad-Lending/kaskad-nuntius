@@ -449,10 +449,14 @@ fn decode_hex(s: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const US_HEX: &str =
-        "/home/oxide/projects/kastad/kaskad-pontifex/test/fixtures/attestation-us.hex";
-    const EU_HEX: &str =
-        "/home/oxide/projects/kastad/kaskad-pontifex/test/fixtures/attestation-eu.hex";
+    const US_HEX: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../testdata/attestation-us.hex"
+    );
+    const EU_HEX: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../testdata/attestation-eu.hex"
+    );
     // Inside both leaf validity windows (2026-09-17 22:04:58Z).
     const NOW: u64 = 1789682698;
 

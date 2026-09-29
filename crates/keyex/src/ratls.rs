@@ -709,8 +709,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::duplex;
 
-    const US_HEX: &str =
-        "/home/oxide/projects/kastad/kaskad-pontifex/test/fixtures/attestation-us.hex";
+    const US_HEX: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../testdata/attestation-us.hex"
+    );
     // Inside both fixture leaf validity windows.
     const NOW: u64 = 1789682698;
 

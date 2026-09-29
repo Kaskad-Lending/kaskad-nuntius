@@ -163,8 +163,10 @@ fn tag_of(v: &Value) -> &'static str {
 mod tests {
     use super::*;
 
-    const US_FIXTURE: &str =
-        "/home/oxide/projects/kastad/kaskad-pontifex/test/fixtures/attestation-us.hex";
+    const US_FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../testdata/attestation-us.hex"
+    );
 
     fn load_us() -> Vec<u8> {
         let hex = std::fs::read_to_string(US_FIXTURE)
