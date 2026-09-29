@@ -259,11 +259,25 @@ struct HtxDelta {
     asks: Vec<(f64, f64)>,
 }
 
+/// Cap on decompressed size of a single gzip frame — bounds a
+/// decompression bomb well below the 512 MiB enclave. The compressed side
+/// is capped at MAX_MESSAGE_SIZE (1 MiB) but gzip expands ~1000:1, so the
+/// output needs its own limit. Mirrors bingx.rs / bitrue.rs (audit 10 P2 / H-8).
+const MAX_DECOMPRESSED_BYTES: u64 = 4 * 1024 * 1024;
+
 fn decompress(bin: &[u8]) -> Option<String> {
-    let mut d = GzDecoder::new(bin);
-    let mut s = String::new();
-    d.read_to_string(&mut s).ok()?;
-    Some(s)
+    // .take(N+1) so overrun is detected and the frame dropped, rather than
+    // handing a silently-truncated payload to the JSON parser.
+    let mut limited = GzDecoder::new(bin).take(MAX_DECOMPRESSED_BYTES + 1);
+    let mut buf = Vec::with_capacity(64 * 1024);
+    limited.read_to_end(&mut buf).ok()?;
+    if buf.len() as u64 > MAX_DECOMPRESSED_BYTES {
+        warn!(
+            "[htx] decompressed payload exceeds {MAX_DECOMPRESSED_BYTES} bytes — dropping (possible decompression bomb)"
+        );
+        return None;
+    }
+    String::from_utf8(buf).ok()
 }
 
 fn ping_ts(text: &str) -> Option<u64> {
@@ -337,5 +351,23 @@ mod tests {
     fn channel_format() {
         assert_eq!(Htx::channel("BTCUSDT"), "market.btcusdt.mbp.400");
         assert_eq!(Htx::channel("kasusdt"), "market.kasusdt.mbp.400");
+    }
+
+    #[test]
+    fn decompress_drops_bomb_over_limit() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let gzip = |s: &str| {
+            let mut e = GzEncoder::new(Vec::new(), Compression::default());
+            e.write_all(s.as_bytes()).unwrap();
+            e.finish().unwrap()
+        };
+        // 8 MiB decompressed > 4 MiB cap → dropped (None), not truncated.
+        let raw = "\0".repeat(8 * 1024 * 1024);
+        assert!(decompress(&gzip(&raw)).is_none());
+        // A normal HTX frame round-trips.
+        let frame = r#"{"ch":"market.btcusdt.mbp.400","ts":1,"tick":{}}"#;
+        assert_eq!(decompress(&gzip(frame)).as_deref(), Some(frame));
     }
 }

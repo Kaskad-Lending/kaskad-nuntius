@@ -58,6 +58,13 @@ pub struct AssetsConfig {
 /// measurement (PCR0).
 pub const ASSETS_JSON: &str = include_str!("../config/assets.json");
 
+/// Raw JSON of the bundled collector (exchange WS) configuration. Embedded
+/// like `ASSETS_JSON` so the venue/pair set is measured in PCR0: which
+/// exchanges feed the oracle is part of the attested boundary, not
+/// host-supplied config. In enclave mode this is the ONLY source read
+/// (see `CollectorManager::load_config_from_file`).
+pub const EXCHANGES_JSON: &str = include_str!("../config/exchanges.json");
+
 /// Parse the bundled config. Panics on malformed JSON — the enclave must
 /// never boot with a broken asset table. Called once at startup from main.
 pub fn load_assets() -> Result<AssetsConfig> {

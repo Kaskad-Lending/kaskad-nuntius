@@ -1,0 +1,17 @@
+[Unit]
+Description=Kaskad keyex enclaves (oracle CID16 + pontifex CID17)
+After=network.target nitro-enclaves-allocator.service docker.service
+Requires=nitro-enclaves-allocator.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Public config only; S3/KMS access is the instance role.
+EnvironmentFile=/etc/kaskad/enclaves.env
+ExecStart=/opt/kaskad/run-enclaves.sh
+ExecStop=/usr/bin/nitro-cli terminate-enclave --all
+StandardOutput=file:/var/log/kaskad-init.log
+StandardError=file:/var/log/kaskad-init.log
+
+[Install]
+WantedBy=multi-user.target
