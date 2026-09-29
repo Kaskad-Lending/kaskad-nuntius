@@ -7,6 +7,7 @@
 
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,7 +19,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tracing::{info, warn};
 
 use crate::config::BakedIdentity;
-use crate::handler::{handle, Attestor, HandlerCtx};
+use crate::handler::{handle, readiness, Attestor, HandlerCtx};
 use crate::state::BridgeState;
 
 /// Concurrent-handler ceiling; overflow connections are dropped at accept.
@@ -40,6 +41,7 @@ const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
 /// before and after boot.
 pub struct Serve<A: Attestor> {
     pub state: Arc<Mutex<BridgeState>>,
+    pub(crate) key_installed: AtomicBool,
     pub client: reqwest::Client,
     pub igra_url: String,
     pub baked: BakedIdentity,
@@ -102,6 +104,13 @@ fn handle_connection<A: Attestor + Send + Sync + 'static>(
             return Ok(());
         }
     };
+
+    // Readiness must not queue behind a claim's chain reads or take the state lock.
+    if matches!(req, BridgeRequest::Readiness) {
+        let resp = readiness(serve.key_installed.load(Ordering::Acquire));
+        write_frame(&mut stream, &resp, MAX_FRAME)?;
+        return Ok(());
+    }
 
     // Enclave wall clock, stamped per request; feeds the claim's soft deadline.
     let enclave_now = SystemTime::now()
@@ -240,5 +249,159 @@ fn accept_connection(listener: &TcpListener) -> Result<Accepted> {
             Ok((stream, _)) => Ok(Accepted::Conn(stream)),
             Err(e) => classify_accept(e.raw_os_error()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::ErrorKind;
+
+    use alloy_primitives::Address;
+    use k256::ecdsa::SigningKey;
+    use serde_json::{json, Value};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::timeout;
+
+    use crate::config::BridgeConfig;
+
+    const PROBE_BUDGET: Duration = Duration::from_secs(2);
+
+    struct NoAttestation;
+    impl Attestor for NoAttestation {
+        fn attest(&self, _: Option<Vec<u8>>, _: Vec<u8>) -> Option<Vec<u8>> {
+            panic!("readiness and signing must not attest");
+        }
+    }
+
+    fn serve(igra_url: String) -> Arc<Serve<NoAttestation>> {
+        Arc::new(Serve {
+            state: Arc::new(Mutex::new(BridgeState::new([0xab; 48], 1))),
+            key_installed: AtomicBool::new(false),
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .timeout(HANDLER_DEADLINE)
+                .build()
+                .unwrap(),
+            igra_url,
+            baked: BakedIdentity {
+                exit: Address::from([0xee; 20]),
+                kskd: Address::from([0xdd; 20]),
+                entry: Address::from([0x11; 20]),
+                chain_id: 46630,
+            },
+            attestor: Arc::new(NoAttestation),
+        })
+    }
+
+    fn install_test_key(state: &mut BridgeState, key_installed: &AtomicBool) {
+        let key = SigningKey::from_bytes((&[0x42; 32]).into()).unwrap();
+        let signer = keyex::sig::address_from_key(key.verifying_key());
+        state.install_key(key, signer);
+        key_installed.store(true, Ordering::Release);
+    }
+
+    async fn request(serve: Arc<Serve<NoAttestation>>, request: Value) -> Value {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let rt = Handle::current();
+        let handler = tokio::task::spawn_blocking(move || handle_connection(&rt, server, &serve));
+        let response = tokio::task::spawn_blocking(move || {
+            client.set_write_timeout(Some(PROBE_BUDGET)).unwrap();
+            let body = serde_json::to_vec(&request).unwrap();
+            write_frame(&mut client, &body, MAX_FRAME).unwrap();
+            let reply =
+                read_frame_deadline(&mut client, MAX_FRAME, Instant::now() + HANDLER_DEADLINE)
+                    .unwrap();
+            serde_json::from_slice(&reply).unwrap()
+        })
+        .await
+        .unwrap();
+        handler.await.unwrap().unwrap();
+        response
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readiness_fetching_and_installed_ignore_state_lock_and_host_overrides() {
+        let rpc = TcpListener::bind("127.0.0.1:0").unwrap();
+        rpc.set_nonblocking(true).unwrap();
+        let serve = serve(format!("http://{}", rpc.local_addr().unwrap()));
+        let mut state = serve.state.lock().await;
+
+        let fetching = timeout(
+            PROBE_BUDGET,
+            request(
+                Arc::clone(&serve),
+                json!({"method": "readiness", "state": "ready", "ready": true}),
+            ),
+        )
+        .await
+        .expect("fetching readiness must not wait for the state lock");
+        assert_eq!(fetching, json!({"state": "fetching"}));
+        assert!(state.key().is_none());
+        assert!(!serve.key_installed.load(Ordering::Acquire));
+
+        install_test_key(&mut state, &serve.key_installed);
+        let ready = timeout(
+            PROBE_BUDGET,
+            request(Arc::clone(&serve), json!({"method": "readiness"})),
+        )
+        .await
+        .expect("installed readiness must not wait for the state lock");
+        assert_eq!(ready, json!({"state": "ready"}));
+        assert!(state.config().is_none());
+        assert_eq!(rpc.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readiness_returns_while_signing_rpc_holds_the_state_lock() {
+        let rpc = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let serve = serve(format!("http://{}", rpc.local_addr().unwrap()));
+        {
+            let mut state = serve.state.lock().await;
+            state.set_config(BridgeConfig::from_parts(
+                &serve.baked,
+                vec![serve.igra_url.clone()],
+                vec![],
+            ));
+            install_test_key(&mut state, &serve.key_installed);
+        }
+        let claim = tokio::spawn(request(
+            Arc::clone(&serve),
+            json!({"method": "sign_claim", "recipient": Address::from([0x22; 20]).to_string()}),
+        ));
+        let (mut pending_rpc, _) = timeout(PROBE_BUDGET, rpc.accept()).await.unwrap().unwrap();
+        let mut bytes = [0; 4096];
+        assert!(
+            timeout(PROBE_BUDGET, pending_rpc.read(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap()
+                > 0
+        );
+        assert!(serve.state.try_lock().is_err());
+        assert!(!claim.is_finished());
+
+        let readiness = timeout(
+            PROBE_BUDGET,
+            request(Arc::clone(&serve), json!({"method": "readiness"})),
+        )
+        .await;
+        let claim_still_blocked = !claim.is_finished() && serve.state.try_lock().is_err();
+        pending_rpc
+            .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        drop(pending_rpc);
+        let claim_reply = timeout(PROBE_BUDGET, claim).await.unwrap().unwrap();
+
+        assert_eq!(readiness.unwrap(), json!({"state": "ready"}));
+        assert!(claim_still_blocked);
+        assert_eq!(claim_reply, json!({"error": "rpc_error"}));
+        assert_eq!(
+            rpc.into_std().unwrap().accept().unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
     }
 }

@@ -7,8 +7,8 @@ use alloy_primitives::{hex, Address};
 use eyre::{eyre, Result};
 use keyex::chain::Finality;
 
-/// Igra RPC is load-balanced; measured safe read depth is `latest - 769`.
-pub const IGRA_FINALITY: Finality = Finality::HeadMinus(769);
+/// Igra burns must be finalized and at least 800 blocks behind the latest head.
+pub const IGRA_FINALITY: Finality = Finality::FinalizedWithDepth(800);
 
 /// Trust-critical identity baked into the image at EIF build time: which burn
 /// ledger and token a claim reads, which chain it signs for, and which contract
@@ -183,8 +183,8 @@ mod tests {
     }
 
     #[test]
-    fn igra_finality_is_head_minus_769() {
-        assert_eq!(IGRA_FINALITY, Finality::HeadMinus(769));
+    fn igra_finality_requires_finalized_and_800_blocks_of_depth() {
+        assert_eq!(IGRA_FINALITY, Finality::FinalizedWithDepth(800));
     }
 
     #[test]

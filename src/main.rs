@@ -24,6 +24,11 @@ use eyre::Result;
 use tracing::{error, info, warn};
 
 #[cfg(feature = "keyex_oracle")]
+use keyex_oracle::spawn_blocking_listener as spawn_price_listener;
+#[cfg(not(feature = "keyex_oracle"))]
+use tokio::spawn as spawn_price_listener;
+
+#[cfg(feature = "keyex_oracle")]
 use signer::OracleSigner;
 #[cfg(not(feature = "keyex_oracle"))]
 use signer::{MockSigner, OracleSigner};
@@ -160,7 +165,7 @@ async fn main() -> Result<()> {
     let server_store = price_store.clone();
     let server_signer = signer.clone();
     let server_signer_address = signer_address.clone();
-    tokio::spawn(async move {
+    spawn_price_listener(async move {
         if let Err(e) = price_server::run_price_server(
             vsock_port,
             server_store,

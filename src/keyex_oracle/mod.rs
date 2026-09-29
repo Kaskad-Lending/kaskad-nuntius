@@ -33,9 +33,9 @@ use eyre::{eyre, Result};
 use k256::ecdsa::SigningKey;
 use keyex::api::KeySource;
 use keyex::boot::Role;
-use keyex::chain::{Finality, Registry, RpcChainView};
-use keyex::driver::{run_boot, Backoff, BootDeps, Genesis, Installed};
-use keyex::peer::RatlsPeerSource;
+use keyex::chain::{ChainView, Finality, Registry, RpcChainView};
+use keyex::driver::{step, Backoff, BootDeps, BootLoopState, Genesis, Installed, StepOutcome};
+use keyex::peer::{PeerSource, RatlsPeerSource};
 use keyex::policy::FetchKind;
 use nitro_common::nsm::Nsm;
 use nitro_common::rng::NsmRng;
@@ -54,6 +54,16 @@ const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
 const DEFAULT_PROXY: &str = "http://127.0.0.1:5000";
 /// Poll cadence between boot ticks while awaiting on-chain registration.
 const BOOT_POLL: Duration = Duration::from_secs(3);
+
+/// Keep blocking accept loops off Tokio workers while retaining async backoff and handlers.
+pub(crate) fn spawn_blocking_listener<F>(listener: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || runtime.block_on(listener))
+}
 
 /// Whether this process runs inside the enclave (VSOCK) or on a dev host (TCP).
 fn enclave_mode() -> bool {
@@ -164,6 +174,38 @@ impl Backoff for SleepBackoff {
     }
 }
 
+/// Refresh discovery every tick without discarding a pending genesis candidate.
+async fn run_boot_with_discovery<P: PeerSource, V: ChainView, G: Genesis, B: Backoff>(
+    state: &Mutex<OracleKeyexState>,
+    baked_peers: &[String],
+    source: &P,
+    view: &V,
+    genesis: &G,
+    backoff: &B,
+) -> Result<Installed> {
+    let mut loop_state = BootLoopState::default();
+    loop {
+        let peers: Vec<_> = state
+            .lock()
+            .map_err(|_| eyre!("state mutex poisoned"))?
+            .peer_snapshot(baked_peers)
+            .into_iter()
+            .map(|peer| (peer, FetchKind::RootFromRoot))
+            .collect();
+        let deps = BootDeps {
+            role: Role::Oracle,
+            peers: &peers,
+            fresh_approved: false,
+        };
+        match step(&mut loop_state, &deps, source, view, genesis).await {
+            Ok(StepOutcome::Done(installed)) => return Ok(installed),
+            Ok(StepOutcome::Continue) => {}
+            Err(_) => tracing::warn!("boot tick failed; backing off"),
+        }
+        backoff.wait().await;
+    }
+}
+
 /// NSM-rooted candidate generation. Draws entropy from the Nitro Security Module
 /// (never the host-seeded guest CSPRNG), mints a secp256k1 key, and publishes its
 /// address + public point into shared state so the control channel can attest it
@@ -220,13 +262,8 @@ pub async fn boot_and_serve() -> Result<Box<dyn crate::signer::OracleSigner>> {
     let cfg = BakedOracleConfig::from_baked()?;
     let pcr0 = own_pcr0(&Nsm::new()?)?;
     let state = Arc::new(Mutex::new(OracleKeyexState::new()));
-    state
-        .lock()
-        .map_err(|_| eyre!("state mutex poisoned"))?
-        .set_config(cfg.rh_rpcs.clone(), cfg.peers.clone());
 
-    // Serve the operator control channel before boot: the genesis candidate is
-    // attested and registered over it while `run_boot` awaits registration.
+    // Serve control before boot so discovery and registration can arrive later.
     let ctrl = control::ControlCtx {
         state: Arc::clone(&state),
         pcr0,
@@ -236,7 +273,7 @@ pub async fn boot_and_serve() -> Result<Box<dyn crate::signer::OracleSigner>> {
         chain_id: cfg.chain_id,
         registry: cfg.registry,
     };
-    tokio::spawn(async move {
+    spawn_blocking_listener(async move {
         if let Err(e) = control::serve_control(ctrl).await {
             error!(error = %e, "keyex control channel exited");
         }
@@ -264,23 +301,15 @@ pub async fn boot_and_serve() -> Result<Box<dyn crate::signer::OracleSigner>> {
         finality: Finality::Tag,
     };
 
-    // Genesis launch has no siblings; a later image sweeps registered oracle peers
-    // for the already-installed root (root→root RA-TLS).
-    let mut peers: Vec<(String, FetchKind)> = Vec::new();
-    for p in &cfg.peers {
-        peers.push((p.clone(), FetchKind::RootFromRoot));
-    }
-    let deps = BootDeps {
-        role: Role::Oracle,
-        peers: &peers,
-        fresh_approved: false,
-    };
     let source = RatlsPeerSource::new(Nsm::new()?, pcr0, cfg.ancestors.clone());
     let genesis = NsmGenesis {
         state: Arc::clone(&state),
     };
 
-    let (key, source_kind) = match run_boot(&deps, &source, &view, &genesis, &SleepBackoff).await {
+    let installed =
+        run_boot_with_discovery(&state, &cfg.peers, &source, &view, &genesis, &SleepBackoff)
+            .await?;
+    let (key, source_kind) = match installed {
         Installed::Candidate(key) => (key, KeySource::Genesis),
         Installed::Peer { key, .. } => (key, KeySource::Peer),
     };
@@ -301,4 +330,187 @@ pub async fn boot_and_serve() -> Result<Box<dyn crate::signer::OracleSigner>> {
 
     handover::spawn_handover_server(Arc::clone(&state), pcr0, cfg.version)?;
     Ok(Box::new(installed))
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::spawn_blocking_listener;
+    use std::io;
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Listener {
+        Control,
+        Price,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Progress {
+        Accepting(Listener),
+        Timer(usize),
+        Handled(Listener),
+        Egress,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Dispatch {
+        BlockingPool,
+        Workers,
+    }
+
+    struct AcceptCleanup {
+        stop: Arc<AtomicBool>,
+        addresses: [SocketAddr; 2],
+    }
+
+    impl Drop for AcceptCleanup {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            for address in &self.addresses {
+                let _ = TcpStream::connect_timeout(address, WAIT);
+            }
+        }
+    }
+
+    async fn blocking_listener(
+        listener: TcpListener,
+        kind: Listener,
+        stop: Arc<AtomicBool>,
+        active: Arc<AtomicUsize>,
+        progress: mpsc::Sender<Progress>,
+    ) -> io::Result<()> {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let mut announce = true;
+        while !stop.load(Ordering::SeqCst) {
+            active.fetch_add(1, Ordering::SeqCst);
+            if announce {
+                let _ = progress.send(Progress::Accepting(kind));
+                announce = false;
+            }
+            let accepted = listener.accept();
+            active.fetch_sub(1, Ordering::SeqCst);
+            let (stream, _) = accepted?;
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            stream.set_nonblocking(true)?;
+            let mut stream = tokio::net::TcpStream::from_std(stream)?;
+            let progress = progress.clone();
+            tokio::spawn(async move {
+                stream.write_all(b"ok").await.unwrap();
+                let _ = progress.send(Progress::Handled(kind));
+            });
+        }
+        Ok(())
+    }
+
+    fn check_dispatch(dispatch: Dispatch) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let control = TcpListener::bind("127.0.0.1:0").unwrap();
+        let price = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addresses = [control.local_addr().unwrap(), price.local_addr().unwrap()];
+        let stop = Arc::new(AtomicBool::new(false));
+        let active = Arc::new(AtomicUsize::new(0));
+        let (progress, events) = mpsc::channel();
+        // Drop before the runtime: waking accept must not depend on Tokio progress.
+        let cleanup = AcceptCleanup {
+            stop: Arc::clone(&stop),
+            addresses,
+        };
+        let mut listeners = Vec::new();
+        {
+            let _entered = runtime.enter();
+            for (listener, kind) in [(control, Listener::Control), (price, Listener::Price)] {
+                let task = blocking_listener(
+                    listener,
+                    kind,
+                    Arc::clone(&stop),
+                    Arc::clone(&active),
+                    progress.clone(),
+                );
+                listeners.push(match dispatch {
+                    Dispatch::BlockingPool => spawn_blocking_listener(task),
+                    Dispatch::Workers => tokio::spawn(task),
+                });
+                assert_eq!(
+                    events.recv_timeout(WAIT).unwrap(),
+                    Progress::Accepting(kind)
+                );
+            }
+        }
+        assert_eq!(active.load(Ordering::SeqCst), 2);
+
+        let timer_progress = progress.clone();
+        let timer_active = Arc::clone(&active);
+        runtime.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = timer_progress.send(Progress::Timer(timer_active.load(Ordering::SeqCst)));
+        });
+        match dispatch {
+            Dispatch::BlockingPool => {
+                assert_eq!(events.recv_timeout(WAIT).unwrap(), Progress::Timer(2));
+                runtime.spawn(async move {
+                    for address in addresses {
+                        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+                        let mut response = [0u8; 2];
+                        stream.read_exact(&mut response).await.unwrap();
+                        assert_eq!(&response, b"ok");
+                    }
+                    let _ = progress.send(Progress::Egress);
+                });
+                let mut handled = Vec::new();
+                let mut egress_done = false;
+                for _ in 0..3 {
+                    match events.recv_timeout(WAIT).unwrap() {
+                        Progress::Handled(kind) => handled.push(kind),
+                        Progress::Egress => egress_done = true,
+                        other => panic!("unexpected progress: {other:?}"),
+                    }
+                }
+                assert!(handled.contains(&Listener::Control));
+                assert!(handled.contains(&Listener::Price));
+                assert!(egress_done);
+            }
+            Dispatch::Workers => {
+                assert!(matches!(
+                    events.recv_timeout(Duration::from_millis(50)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ));
+            }
+        }
+        drop(cleanup);
+        runtime.block_on(async {
+            for listener in listeners {
+                listener.await.unwrap().unwrap();
+            }
+        });
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        if let Dispatch::Workers = dispatch {
+            assert!(matches!(
+                events.recv_timeout(WAIT).unwrap(),
+                Progress::Timer(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn blocking_listeners_preserve_async_progress_on_two_workers() {
+        check_dispatch(Dispatch::BlockingPool);
+    }
+
+    #[test]
+    fn cleanup_guard_releases_accepts_even_when_workers_are_starved() {
+        check_dispatch(Dispatch::Workers);
+    }
 }

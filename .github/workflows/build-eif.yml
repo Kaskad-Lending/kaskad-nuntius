@@ -45,6 +45,29 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Test host bootstrap and publication gates
+        run: python3 -m unittest discover -s host -p 'test_*.py' -v
+
+      - uses: dtolnay/rust-toolchain@1.91.1
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check Rust release sources
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --features keyex_oracle -- -D warnings
+          cargo test --locked --workspace --features keyex_oracle
+          cargo test --locked -p kaskad-oracle --no-default-features
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.4.3
+
+      - name: Test the pinned attestation verifier
+        run: forge test --root contracts
+
       - name: Resolve stack config
         run: |
           set -euo pipefail

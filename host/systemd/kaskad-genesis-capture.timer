@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the oracle's public registration attestation
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=10min
+RandomizedDelaySec=30s
+Unit=kaskad-genesis-capture.service
+
+[Install]
+WantedBy=timers.target

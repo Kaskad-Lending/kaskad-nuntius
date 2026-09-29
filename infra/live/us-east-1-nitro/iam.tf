@@ -79,6 +79,20 @@ resource "aws_iam_role_policy" "prod" {
         Condition = {
           StringLike = { "s3:prefix" = ["approvals/*"] }
         }
+      },
+      {
+        # genesis_capture.py publishes the boot attestation (public COSE doc +
+        # signer + PCR0, no secret) to genesis/; pontifex_host.py the bridge
+        # attestation to bridge/; the allocator diagnostic lands in diag/.
+        # PutObject only on those publish prefixes, never bucket-wide.
+        Sid    = "PublishAttestations"
+        Effect = "Allow"
+        Action = ["s3:PutObject"]
+        Resource = [
+          "${aws_s3_bucket.eif.arn}/genesis/*",
+          "${aws_s3_bucket.eif.arn}/bridge/*",
+          "${aws_s3_bucket.eif.arn}/diag/*",
+        ]
       }
     ]
   })
