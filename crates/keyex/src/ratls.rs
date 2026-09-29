@@ -365,14 +365,15 @@ async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, payload: &[u8]) -> Result
     Ok(())
 }
 
-async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Vec<u8>> {
+async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Zeroizing<Vec<u8>>> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > MAX_FRAME {
         bail!("frame length {len} exceeds max {MAX_FRAME}");
     }
-    let mut buf = vec![0u8; len];
+    // A cancelled partial grant read must wipe the bytes already received.
+    let mut buf = Zeroizing::new(vec![0u8; len]);
     r.read_exact(&mut buf).await?;
     Ok(buf)
 }
@@ -384,7 +385,7 @@ async fn nonce_and_doc_exchange<S, A>(
     my_nonce: &[u8; NONCE_LEN],
     my_point: &[u8],
     attest_fn: &A,
-) -> Result<([u8; NONCE_LEN], Vec<u8>)>
+) -> Result<([u8; NONCE_LEN], Zeroizing<Vec<u8>>)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     A: AttestFn,
@@ -586,7 +587,7 @@ where
 
     // Always read the server's grant frame so the stream stays in step; wipe
     // whatever arrives unless we accepted.
-    let frame = Zeroizing::new(read_frame(stream).await?);
+    let frame = read_frame(stream).await?;
     if frame.first() == Some(&TAG_GRANT) && frame.len() == 1 + 32 {
         match decision {
             ClientDecision::Reject(r) => {
@@ -611,7 +612,7 @@ async fn drain_and_refuse<S>(stream: &mut S, reason: ExchangeRefusal) -> Result<
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let _drained = Zeroizing::new(read_frame(stream).await.unwrap_or_default());
+    let _drained = read_frame(stream).await.unwrap_or_default();
     Ok(ClientExchange::Refused(reason))
 }
 
@@ -728,6 +729,27 @@ mod tests {
 
     fn pcr(fill: u8) -> [u8; 48] {
         [fill; 48]
+    }
+
+    #[tokio::test]
+    async fn key_frames_are_returned_in_zeroizing_buffers() {
+        let (mut reader, mut writer) = duplex(128);
+        let payload = [0x42; 33];
+        write_frame(&mut writer, &payload).await.unwrap();
+        let frame: Zeroizing<Vec<u8>> = read_frame(&mut reader).await.unwrap();
+        assert_eq!(frame.as_slice(), payload);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_key_frame_read_can_be_cancelled() {
+        let (mut reader, mut writer) = duplex(128);
+        writer.write_u32(33).await.unwrap();
+        writer.write_all(&[0x42; 16]).await.unwrap();
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(1), read_frame(&mut reader)).await;
+        assert!(result.is_err());
+        drop(reader);
+        assert_eq!(writer.read(&mut [0]).await.unwrap(), 0);
     }
 
     // ---- TLS 1.3 handshake with both custom verifiers ----
@@ -1133,7 +1155,11 @@ mod tests {
             wiped.load(Ordering::SeqCst),
             "own key must be wiped on refuse"
         );
-        assert_eq!(client_frame, vec![TAG_DECLINE], "no key may reach the wire");
+        assert_eq!(
+            client_frame.as_slice(),
+            [TAG_DECLINE],
+            "no key may reach the wire"
+        );
     }
 
     #[tokio::test]
@@ -1225,7 +1251,7 @@ mod tests {
             ServerExchange::Refused(ExchangeRefusal::AttestationInvalid)
         );
         assert!(wiped.load(Ordering::SeqCst));
-        assert_eq!(client_frame, vec![TAG_DECLINE]);
+        assert_eq!(client_frame.as_slice(), [TAG_DECLINE]);
     }
 
     // ---- client side: accept → Installed, key mismatch → Refuse + no key ----

@@ -174,11 +174,10 @@ publish_host_bundle() {
 # barrier makes tee flush before the upload (no lost-tail race), and
 # PIPESTATUS[0] carries the real build rc past the `| tee`.
 BUILD_LOG="$(mktemp /tmp/build-eif-XXXXXX.log)"
-# -e off around the pipeline so a failing build does not abort before the rc is
-# read and the log is uploaded; the inner group keeps its inherited -e and fails
-# fast, so PIPESTATUS[0] still carries the real build rc.
+# Keep the outer shell alive for log upload; fail fast inside the build.
 set +e
-{
+(
+  set -e
   for entry in "${IMAGES[@]}"; do
     build_one "${entry%%:*}" "${entry#*:}"
   done
@@ -186,7 +185,7 @@ set +e
   publish_host_bundle
 
   echo "=== keyex EIFs built + signed + published (commit $COMMIT) ==="
-} 2>&1 | tee "$BUILD_LOG"
+) 2>&1 | tee "$BUILD_LOG"
 BUILD_RC=${PIPESTATUS[0]}
 set -e
 aws s3 cp "$BUILD_LOG" "$S3/builds/$COMMIT/build.log" >/dev/null 2>&1 || true

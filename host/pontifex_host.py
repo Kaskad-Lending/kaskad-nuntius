@@ -1,28 +1,14 @@
 #!/usr/bin/env python3
-"""Pontifex keyex host — HTTP :8081 relayer front end + enclave config loop.
+"""Relay bridge HTTP to CID17:5004 and replay untrusted enclave config hints.
 
-Fronts the two keyex enclaves on this instance over VSOCK:
-
-    relayer → HTTP:8081 → pontifex_host.py → VSOCK CID17:5004 → bridge enclave
-
-HTTP surface (bridge enclave, CID 17, port 5004):
-    GET  /health       → bridge `health`
-    GET  /attestation  → bridge `get_attestation`  (optional ?nonce=<hex>)
-    POST /sign         → bridge `sign_claim` {"recipient": "0x..."}
-
-Config loop (background): every --configure-interval seconds it re-sends the
-idempotent `configure` frame to the oracle (CID16:5005) and bridge (CID17:5004)
-with peer hints from `ec2:DescribeInstances` (same ASG) and posts approval blobs
-from `s3://<eif-bucket>/approvals/`. The registry is the arbiter; these inputs
-are untrusted hints, so a stale/empty answer only delays readiness.
-
-No secrets in code: addresses, RPC URLs, bucket and ASG tag arrive via env /
-CLI; peers and approvals are read at runtime through the instance role.
+Readiness reports key installation; diagnostics and attestations stay independent.
+Forwarded client identity requires explicitly trusted append-mode proxies.
 """
 from __future__ import annotations
 
 import argparse
 import enum
+import ipaddress
 import json
 import logging
 import os
@@ -49,6 +35,11 @@ BRIDGE_API_PORT = 5004     # configure / sign_claim / get_attestation / health
 
 FRAME_HEADER = struct.Struct(">I")   # 4-byte big-endian length prefix
 MAX_FRAME = 1 << 20                  # 1 MiB response cap
+MAX_REQUEST_FRAME = 64 * 1024        # enclave request cap
+MAX_SIGN_BODY = 4096
+MAX_NONCE_HEX = 1024                 # NSM nonce: 512 bytes
+HTTP_READ_TIMEOUT = 10.0
+READINESS_TIMEOUT = 1.0
 
 _ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
@@ -61,7 +52,13 @@ class EnclaveMethod(str, enum.Enum):
     APPROVAL = "approval"
     GET_ATTESTATION = "get_attestation"
     HEALTH = "health"
+    READINESS = "readiness"
     SIGN_CLAIM = "sign_claim"
+
+
+class ReadinessState(str, enum.Enum):
+    READY = "ready"
+    FETCHING = "fetching"
 
 
 # ─── VSOCK client ────────────────────────────────────────────
@@ -70,37 +67,65 @@ class VsockError(Exception):
     """A VSOCK round-trip failed (transport, timeout, or malformed frame)."""
 
 
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON number")
+
+
+def _json_object(body: bytes) -> dict[str, Any]:
+    value = json.loads(body.decode("utf-8"), parse_constant=_reject_json_constant)
+    if not isinstance(value, dict):
+        raise ValueError("JSON body must be an object")
+    return value
+
+
+def _set_deadline_timeout(sock: socket.socket, deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise socket.timeout("read deadline exceeded")
+    sock.settimeout(remaining)
+
+
 def vsock_call(cid: int, port: int, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
-    """One length-prefixed JSON request/response over VSOCK. Raises VsockError."""
-    body = json.dumps(payload).encode("utf-8")
-    sock = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
+    """One bounded JSON round-trip over VSOCK under a total deadline. Raises VsockError."""
+    sock: Optional[socket.socket] = None
+    deadline = time.monotonic() + timeout
     try:
+        body = json.dumps(payload, allow_nan=False).encode("utf-8")
+        if len(body) > MAX_REQUEST_FRAME:
+            raise VsockError("oversized request frame")
+        sock = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
+        _set_deadline_timeout(sock, deadline)
         sock.connect((cid, port))
+        _set_deadline_timeout(sock, deadline)
         sock.sendall(FRAME_HEADER.pack(len(body)))
+        _set_deadline_timeout(sock, deadline)
         sock.sendall(body)
 
-        header = _recv_exact(sock, FRAME_HEADER.size)
+        header = _recv_exact(sock, FRAME_HEADER.size, deadline)
         (length,) = FRAME_HEADER.unpack(header)
         if length > MAX_FRAME:
             raise VsockError(f"oversized response frame: {length} bytes")
-        return json.loads(_recv_exact(sock, length).decode("utf-8"))
+        return _json_object(_recv_exact(sock, length, deadline))
     except ConnectionRefusedError as e:
         raise VsockError("enclave not listening") from e
     except socket.timeout as e:
         raise VsockError("enclave timeout") from e
-    except (OSError, json.JSONDecodeError) as e:
+    except (ValueError, RecursionError) as e:
+        raise VsockError("malformed JSON frame") from e
+    except OSError as e:
         raise VsockError(str(e)) from e
     finally:
-        try:
-            sock.close()
-        except OSError:
-            pass
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
-def _recv_exact(sock: socket.socket, n: int) -> bytes:
+def _recv_exact(sock: socket.socket, n: int, deadline: float) -> bytes:
     buf = bytearray()
     while len(buf) < n:
+        _set_deadline_timeout(sock, deadline)
         chunk = sock.recv(n - len(buf))
         if not chunk:
             raise VsockError("connection closed mid-frame")
@@ -124,8 +149,8 @@ class RateLimiter:
 
     def allow(self, ip: str) -> bool:
         with self._lock:
-            now = time.monotonic()
             c = self._clients[ip]
+            now = time.monotonic()
             c["tokens"] = min(self.limit, c["tokens"] + (now - c["last"]) * self._rate)
             c["last"] = now
             if c["tokens"] >= 1.0:
@@ -163,6 +188,7 @@ class HostContext:
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.bridge_timeout = args.bridge_timeout
+        self.trusted_proxy_cidrs = args.trusted_proxy_cidrs
         self.rate = RateLimiter(args.rate_limit, args.rate_window)
         self.sign_cache = SignCache(args.sign_cache_ttl)
 
@@ -171,42 +197,104 @@ class PontifexHandler(BaseHTTPRequestHandler):
     ctx: HostContext  # injected on the server instance
 
     protocol_version = "HTTP/1.1"
+    timeout = HTTP_READ_TIMEOUT
 
     def _client_ip(self) -> str:
-        return self.client_address[0]
+        return getattr(self, "_request_client_ip", self.client_address[0])
+
+    def _proxy_client_ip(self) -> str:
+        peer = self.client_address[0]
+        if not self.ctx.trusted_proxy_cidrs:
+            return peer
+        peer_ip = ipaddress.ip_address(peer)
+        if not any(peer_ip in cidr for cidr in self.ctx.trusted_proxy_cidrs):
+            return peer
+        forwarded = self.headers.get_all("X-Forwarded-For", [])
+        if not forwarded:
+            return peer
+        if len(forwarded) != 1 or any(c in forwarded[0] for c in "\r\n%"):
+            raise ValueError("malformed forwarded chain")
+        # ALB append mode puts its observed client last; validate the whole chain.
+        clients = [ipaddress.ip_address(token.strip(" \t"))
+                   for token in forwarded[0].split(",")]
+        return str(clients[-1])
 
     def _send(self, status: int, data: dict[str, Any]) -> None:
         body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if status >= 400:
+            self.close_connection = True
+            self.send_header("Connection", "close")
         self.end_headers()
         try:
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def _gated(self) -> bool:
-        if self.ctx.rate.allow(self._client_ip()):
+    def _gated(self, *, readiness: bool = False) -> bool:
+        self._request_client_ip = self.client_address[0]
+        try:
+            self._request_client_ip = self._proxy_client_ip()
+        except ValueError:
+            self._send(400, {"error": "bad_forwarded_for"})
+            return False
+        if readiness or self.ctx.rate.allow(self._client_ip()):
             return True
         self._send(429, {"error": "rate_limited"})
         return False
 
     def do_GET(self) -> None:  # noqa: N802
-        if not self._gated():
+        readiness = self.path in ("/bridge/ready", "/ready")
+        if not self._gated(readiness=readiness) or not self._bodyless_get():
+            return
+        if readiness:
+            self._readiness()
             return
         path = self.path.split("?", 1)[0].rstrip("/")
-        if path == "/health" or path == "":
+        if path in ("", "/health", "/bridge/health"):
             self._proxy_bridge(EnclaveMethod.HEALTH, {}, ok_key="state")
-        elif path == "/attestation":
+        elif path in ("/attestation", "/bridge/attestation"):
             self._attestation()
         else:
             self._send(404, {"error": "not_found"})
 
+    def _bodyless_get(self) -> bool:
+        lengths = self.headers.get_all("Content-Length", [])
+        try:
+            if (len(lengths) > 1 or self.headers.get("Transfer-Encoding") is not None
+                    or self.headers.defects):
+                raise ValueError("ambiguous request framing")
+            if lengths:
+                raw = lengths[0].strip(" \t")
+                if not raw.isascii() or not raw.isdecimal() or int(raw) != 0:
+                    raise ValueError("GET body not supported")
+        except ValueError:
+            self._send(400, {"error": "bad_length"})
+            return False
+        return True
+
+    def _readiness(self) -> None:
+        try:
+            resp = vsock_call(
+                BRIDGE_CID, BRIDGE_API_PORT, {"method": EnclaveMethod.READINESS.value},
+                min(self.ctx.bridge_timeout, READINESS_TIMEOUT),
+            )
+        except VsockError:
+            self._send(503, {"error": "enclave_unreachable"})
+            return
+        if resp == {"state": ReadinessState.READY.value}:
+            self._send(200, resp)
+        elif resp == {"state": ReadinessState.FETCHING.value}:
+            self._send(503, resp)
+        else:
+            self._send(503, {"error": "bad_enclave_response"})
+
     def do_POST(self) -> None:  # noqa: N802
         if not self._gated():
             return
-        if self.path.split("?", 1)[0].rstrip("/") == "/sign":
+        if self.path.split("?", 1)[0].rstrip("/") in ("/sign", "/bridge/sign"):
             self._sign()
         else:
             self._send(404, {"error": "not_found"})
@@ -216,31 +304,56 @@ class PontifexHandler(BaseHTTPRequestHandler):
         query = self.path.split("?", 1)
         if len(query) == 2:
             for part in query[1].split("&"):
-                if part.startswith("nonce="):
+                if part == "nonce" or part.startswith("nonce="):
                     nonce = part[len("nonce="):]
-                    if not _HEX_RE.match(nonce):
+                    if ("nonce" in payload or len(nonce) > MAX_NONCE_HEX
+                            or len(nonce) % 2 or not _HEX_RE.fullmatch(nonce)):
                         self._send(400, {"error": "bad_nonce"})
                         return
                     payload["nonce"] = nonce
         self._proxy_bridge(EnclaveMethod.GET_ATTESTATION, payload, ok_key="attestation")
 
-    def _sign(self) -> None:
+    def _read_body(self, length: int) -> bytes:
+        deadline = time.monotonic() + self.timeout
+        body = bytearray()
         try:
-            length = int(self.headers.get("Content-Length", "0"))
+            while len(body) < length:
+                _set_deadline_timeout(self.connection, deadline)
+                chunk = self.rfile.read1(length - len(body))
+                if not chunk:
+                    raise ValueError("incomplete request body")
+                body.extend(chunk)
+        finally:
+            self.connection.settimeout(self.timeout)
+        return bytes(body)
+
+    def _sign(self) -> None:
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1 or self.headers.get("Transfer-Encoding") is not None:
+            self._send(400, {"error": "bad_length"})
+            return
+        try:
+            raw_length = lengths[0].strip()
+            if not raw_length.isascii() or not raw_length.isdecimal():
+                raise ValueError("non-decimal content length")
+            length = int(raw_length)
         except ValueError:
             self._send(400, {"error": "bad_length"})
             return
-        if length <= 0 or length > 4096:
+        if length <= 0 or length > MAX_SIGN_BODY:
             self._send(400, {"error": "bad_length"})
             return
         try:
-            req = json.loads(self.rfile.read(length).decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            req = _json_object(self._read_body(length))
+        except socket.timeout:
+            self._send(408, {"error": "request_timeout"})
+            return
+        except (ValueError, RecursionError):
             self._send(400, {"error": "bad_json"})
             return
 
         recipient = req.get("recipient")
-        if not isinstance(recipient, str) or not _ADDR_RE.match(recipient):
+        if not isinstance(recipient, str) or not _ADDR_RE.fullmatch(recipient):
             self._send(400, {"error": "bad_recipient"})
             return
         recipient = recipient.lower()
@@ -262,9 +375,21 @@ class PontifexHandler(BaseHTTPRequestHandler):
             self._send(502, {"error": "enclave_unreachable"})
             return
 
+        if not isinstance(resp, dict):
+            self._send(502, {"error": "bad_enclave_response"})
+            return
         if "error" in resp:
+            if not isinstance(resp["error"], str) or not resp["error"]:
+                self._send(502, {"error": "bad_enclave_response"})
+                return
             # sign_claim refusal path — pass the enclave's code through as 409.
             self._send(409, resp)
+            return
+        if not (all(isinstance(resp.get(key), str) and resp[key]
+                    for key in ("signature", "cumulativeBurned", "signer"))
+                and all(type(resp.get(key)) is int and resp[key] >= 0
+                        for key in ("deadline", "igraBlock"))):
+            self._send(502, {"error": "bad_enclave_response"})
             return
         self.ctx.sign_cache.put(recipient, resp)
         self._send(200, resp)
@@ -280,8 +405,17 @@ class PontifexHandler(BaseHTTPRequestHandler):
             log.warning("proxy vsock failure method=%s err=%s", method.value, e)
             self._send(503, {"error": "enclave_unreachable"})
             return
-        status = 200 if ok_key in resp and "error" not in resp else 503
-        self._send(status, resp)
+        if not isinstance(resp, dict):
+            self._send(503, {"error": "bad_enclave_response"})
+        elif "error" in resp:
+            if isinstance(resp["error"], str) and resp["error"]:
+                self._send(503, resp)
+            else:
+                self._send(503, {"error": "bad_enclave_response"})
+        elif not isinstance(resp.get(ok_key), str) or not resp[ok_key]:
+            self._send(503, {"error": "bad_enclave_response"})
+        else:
+            self._send(200, resp)
 
     def log_message(self, fmt: str, *fmt_args: Any) -> None:  # noqa: A002
         log.info("http %s - %s", self._client_ip(), fmt % fmt_args)
@@ -290,13 +424,14 @@ class PontifexHandler(BaseHTTPRequestHandler):
 # ─── Config push loop ────────────────────────────────────────
 
 class ConfigPusher(threading.Thread):
-    """Re-sends idempotent `configure` to both enclaves and posts pending
-    approvals. Peer hints come from EC2 (same ASG); approvals from S3. Every
-    input is an untrusted hint — the registry decides what an enclave installs."""
+    """Replay config and approval hints each cycle; enclaves validate them.
+
+    Peer hints come from EC2 (same ASG); owner-signed approvals come from S3.
+    """
 
     def __init__(self, args: argparse.Namespace, stop: threading.Event) -> None:
         super().__init__(name="config-pusher", daemon=True)
-        self._stop = stop
+        self._stop_event = stop
         self._interval = args.configure_interval
         self._enclave_timeout = args.bridge_timeout
         self._asg_tag = args.asg_tag
@@ -305,15 +440,14 @@ class ConfigPusher(threading.Thread):
         self._registry = args.oracle_registry
         self._entry = args.bridge_entry
         self._rh_rpcs = args.rh_rpc
-        self._seen_approvals: set[str] = set()
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 self._tick()
             except Exception as e:  # never let the loop die
                 log.error("config tick failed: %s", e)
-            self._stop.wait(self._interval)
+            self._stop_event.wait(self._interval)
 
     def _tick(self) -> None:
         oracle_ips = self._discover_oracle_ips()
@@ -345,26 +479,28 @@ class ConfigPusher(threading.Thread):
     def _push_approvals(self) -> None:
         if not self._eif_bucket:
             return
+        # Replay each cycle: enclave approvals are volatile and deduplicated.
         for key in self._list_s3(f"s3://{self._eif_bucket}/approvals/"):
-            if key in self._seen_approvals or not key.endswith(".json"):
-                continue
-            blob = self._read_s3(f"s3://{self._eif_bucket}/{key}")
-            if blob is None:
+            if not key.endswith(".json"):
                 continue
             try:
+                blob = self._read_s3(f"s3://{self._eif_bucket}/{key}")
+                if blob is None:
+                    continue
                 approval = json.loads(blob)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
                 log.warning("approval %s not JSON, skipping", key)
-                self._seen_approvals.add(key)
                 continue
-            # Oracle image verifies + accepts; a rejected blob is retried never.
+            if not isinstance(approval, dict):
+                log.warning("approval %s not an object, skipping", key)
+                continue
             try:
                 resp = vsock_call(ORACLE_CID, ORACLE_CONFIG_PORT, {
-                    "method": EnclaveMethod.APPROVAL.value,
                     **approval,
+                    "method": EnclaveMethod.APPROVAL.value,
                 }, self._enclave_timeout)
-                log.info("approval %s → %s", key, resp)
-                self._seen_approvals.add(key)
+                log.info("approval %s accepted=%s", key,
+                         isinstance(resp, dict) and resp.get("accepted") is True)
             except VsockError as e:
                 log.info("approval %s deferred (oracle not ready): %s", key, e)
 
@@ -457,6 +593,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Pontifex keyex host front end")
     p.add_argument("--port", type=int, default=int(os.environ.get("PONTIFEX_HOST_PORT", "8081")))
     p.add_argument("--bind", default=os.environ.get("PONTIFEX_HOST_BIND", "0.0.0.0"))
+    p.add_argument("--trusted-proxy-cidrs", type=_parse_proxy_cidrs,
+                   default=os.environ.get("PONTIFEX_TRUSTED_PROXY_CIDRS", ""),
+                   help="comma-separated append-mode proxy CIDRs; empty uses direct peer IPs")
     p.add_argument("--bridge-timeout", type=float,
                    default=float(os.environ.get("PONTIFEX_BRIDGE_TIMEOUT", "10")))
     p.add_argument("--rate-limit", type=int,
@@ -478,6 +617,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--no-config-loop", action="store_true",
                    help="serve HTTP only; skip the configure/approval pusher")
     return p.parse_args(argv)
+
+
+def _parse_proxy_cidrs(value: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    if not value:
+        return ()
+    try:
+        return tuple(ipaddress.ip_network(cidr.strip()) for cidr in value.split(","))
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("expected comma-separated proxy CIDRs") from e
 
 
 def _split_env(name: str) -> list[str]:

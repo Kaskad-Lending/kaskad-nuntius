@@ -5,7 +5,9 @@
 //! that does not touch the chain testable without NSM or a network.
 
 use alloy_primitives::{hex, U256};
-use keyex::api::{Ack, Attestation, BridgeHealth, BridgeRequest, SignClaimResponse};
+use keyex::api::{
+    Ack, Attestation, BridgeHealth, BridgeReadiness, BridgeRequest, SignClaimResponse,
+};
 use keyex::chain::{self, ChainView, Finality, Registry, RpcChainView};
 use keyex::claim::ClaimError;
 use serde::Serialize;
@@ -69,7 +71,17 @@ pub async fn handle<A: Attestor>(
         BridgeRequest::SignClaim { recipient } => to_vec(&sign_claim(state, ctx, &recipient).await),
         BridgeRequest::GetAttestation { nonce } => get_attestation(state, attestor, nonce),
         BridgeRequest::Health => to_vec(&health(state, ctx).await),
+        BridgeRequest::Readiness => readiness(state.key().is_some()),
     }
+}
+
+/// Encode local key readiness without consulting chain or configuration state.
+pub(crate) fn readiness(key_installed: bool) -> Vec<u8> {
+    to_vec(&if key_installed {
+        BridgeReadiness::Ready
+    } else {
+        BridgeReadiness::Fetching
+    })
 }
 
 /// Validate and store the host configuration. One-shot: a booted signer refuses
@@ -507,6 +519,37 @@ mod tests {
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["error"], "attestation_unavailable");
         assert_eq!(att.calls.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn readiness_depends_only_on_key_installation() {
+        let (c, b) = (client(), baked());
+        let mut st = BridgeState::new([0; 48], 1);
+        let out = handle(
+            BridgeRequest::Readiness,
+            &mut st,
+            &ctx(&c, &b),
+            &PanicAttestor,
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_slice::<BridgeReadiness>(&out).unwrap(),
+            BridgeReadiness::Fetching
+        );
+
+        st = booted_state(Address::from([0x33; 20]));
+        let out = handle(
+            BridgeRequest::Readiness,
+            &mut st,
+            &ctx(&c, &b),
+            &PanicAttestor,
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_slice::<BridgeReadiness>(&out).unwrap(),
+            BridgeReadiness::Ready
+        );
+        assert!(st.config().is_none());
     }
 
     #[tokio::test]

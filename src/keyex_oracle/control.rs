@@ -150,19 +150,17 @@ fn handle_oracle_request(req: OracleRequest, ctx: &ControlCtx) -> Vec<u8> {
     match req {
         OracleRequest::Configure {
             registry,
-            rh_rpcs,
+            rh_rpcs: _, // RPC authority stays baked; the host supplies only peer hints.
             oracle_peers,
         } => {
             match registry.trim().parse::<Address>() {
                 Ok(a) if a == ctx.registry => {
-                    let https: Vec<String> = rh_rpcs
-                        .into_iter()
-                        .filter(|u| u.starts_with("https://"))
-                        .collect();
-                    if let Ok(mut st) = ctx.state.lock() {
-                        st.set_config(https, oracle_peers);
-                    }
-                    encode(&Ack { ok: true })
+                    let ok = ctx
+                        .state
+                        .lock()
+                        .map(|mut st| st.set_peer_hints(oracle_peers))
+                        .is_ok();
+                    encode(&Ack { ok })
                 }
                 // Registry mismatch: the host cannot redirect the enclave's registry.
                 _ => encode(&Ack { ok: false }),
@@ -336,9 +334,20 @@ fn err_reply(code: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use alloy_primitives::U256;
     use k256::ecdsa::SigningKey;
+    use keyex::api::BootState;
     use keyex::approval::approval_digest;
+    use keyex::chain::{ChainError, ChainView};
+    use keyex::driver::{Backoff, Genesis, Installed};
+    use keyex::peer::{FetchedKey, PeerSource};
+    use keyex::policy::FetchKind;
     use sha3::{Digest, Keccak256};
+
+    use crate::keyex_oracle::run_boot_with_discovery;
 
     fn v1_label() -> [u8; 32] {
         Keccak256::digest(b"kaskad/pontifex/v1").into()
@@ -423,5 +432,372 @@ mod tests {
         assert!(process_approval(&td, &sigs, 46630, &owners, 3).is_err());
         // A single signature cannot meet a threshold of 2.
         assert!(process_approval(&td, &sigs[..1], 46630, &owners, 2).is_err());
+    }
+
+    fn test_context() -> ControlCtx {
+        ControlCtx {
+            state: Arc::new(Mutex::new(OracleKeyexState::new())),
+            pcr0: [0x42; 48],
+            version: 1,
+            owners: vec![Address::from([0x11; 20])],
+            threshold: 1,
+            chain_id: 46630,
+            registry: Address::from([0x22; 20]),
+        }
+    }
+
+    fn configure(ctx: &ControlCtx, peers: Vec<String>) {
+        let response = handle_oracle_request(
+            OracleRequest::Configure {
+                registry: ctx.registry.to_string(),
+                rh_rpcs: vec!["https://attacker.invalid/rpc".into()],
+                oracle_peers: peers,
+            },
+            ctx,
+        );
+        assert!(serde_json::from_slice::<Ack>(&response).unwrap().ok);
+    }
+
+    fn test_key() -> SigningKey {
+        SigningKey::random(&mut rand::rngs::OsRng)
+    }
+
+    fn address(key: &SigningKey) -> Address {
+        keyex::sig::address_from_key(key.verifying_key())
+    }
+
+    struct TestGenesis {
+        state: Arc<Mutex<OracleKeyexState>>,
+        key: SigningKey,
+        calls: AtomicUsize,
+    }
+
+    impl TestGenesis {
+        fn new(ctx: &ControlCtx) -> Self {
+            Self {
+                state: Arc::clone(&ctx.state),
+                key: test_key(),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Genesis for TestGenesis {
+        fn generate(&self) -> Result<SigningKey> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.state.lock().unwrap().publish_candidate(
+                address(&self.key),
+                self.key
+                    .verifying_key()
+                    .to_encoded_point(false)
+                    .as_bytes()
+                    .to_vec(),
+            );
+            Ok(self.key.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestRegistry {
+        registered: Mutex<Vec<Address>>,
+        failing: std::sync::atomic::AtomicBool,
+    }
+
+    impl ChainView for TestRegistry {
+        async fn registered(&self, who: Address) -> Result<bool, ChainError> {
+            if self.failing.load(Ordering::SeqCst) {
+                return Err(ChainError::Rpc);
+            }
+            Ok(self.registered.lock().unwrap().contains(&who))
+        }
+
+        async fn signer_count(&self) -> Result<U256, ChainError> {
+            if self.failing.load(Ordering::SeqCst) {
+                return Err(ChainError::Rpc);
+            }
+            Ok(U256::from(self.registered.lock().unwrap().len()))
+        }
+    }
+
+    struct TestPeers {
+        state: Arc<Mutex<OracleKeyexState>>,
+        keys: HashMap<String, SigningKey>,
+        visited: Mutex<Vec<String>>,
+    }
+
+    impl TestPeers {
+        fn new(ctx: &ControlCtx, keys: Vec<(&str, SigningKey)>) -> Self {
+            Self {
+                state: Arc::clone(&ctx.state),
+                keys: keys.into_iter().map(|(p, k)| (p.to_owned(), k)).collect(),
+                visited: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl PeerSource for TestPeers {
+        async fn fetch(&self, endpoint: &str, kind: FetchKind) -> Result<Option<FetchedKey>> {
+            assert!(
+                self.state.try_lock().is_ok(),
+                "state locked across peer I/O"
+            );
+            assert_eq!(kind, FetchKind::RootFromRoot);
+            self.visited.lock().unwrap().push(endpoint.to_owned());
+            let key = self
+                .keys
+                .get(endpoint)
+                .ok_or_else(|| eyre::eyre!("test peer unavailable"))?;
+            Ok(Some(FetchedKey {
+                address: address(key),
+                key: key.clone(),
+            }))
+        }
+    }
+
+    struct ScriptedBackoff<F> {
+        update: F,
+        calls: AtomicUsize,
+    }
+
+    impl<F: Fn(usize)> ScriptedBackoff<F> {
+        fn new(update: F) -> Self {
+            Self {
+                update,
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl<F: Fn(usize)> Backoff for ScriptedBackoff<F> {
+        async fn wait(&self) {
+            let turn = self.calls.fetch_add(1, Ordering::SeqCst);
+            assert!(turn < 8, "runtime boot failed to converge");
+            (self.update)(turn);
+        }
+    }
+
+    fn assert_peer(installed: Installed, expected: &SigningKey) {
+        match installed {
+            Installed::Peer { address: peer, key } => {
+                assert_eq!(peer, address(expected));
+                assert_eq!(address(&key), peer);
+            }
+            Installed::Candidate(_) => panic!("expected registered peer, not genesis"),
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_genesis_without_config_or_with_empty_config_mints_once_across_retries() {
+        for configured in [false, true] {
+            let ctx = test_context();
+            if configured {
+                configure(&ctx, Vec::new());
+            }
+            let genesis = TestGenesis::new(&ctx);
+            let source = TestPeers::new(&ctx, Vec::new());
+            let view = TestRegistry::default();
+            let backoff = ScriptedBackoff::new(|turn| {
+                assert_eq!(genesis.calls.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    ctx.state.lock().unwrap().health().0,
+                    BootState::WaitingRegistration
+                );
+                match turn {
+                    0 => view.failing.store(true, Ordering::SeqCst),
+                    1 => view.failing.store(false, Ordering::SeqCst),
+                    2 => view.registered.lock().unwrap().push(address(&genesis.key)),
+                    _ => panic!("candidate registration was not consumed"),
+                }
+            });
+            let installed =
+                run_boot_with_discovery(&ctx.state, &[], &source, &view, &genesis, &backoff)
+                    .await
+                    .unwrap();
+            match installed {
+                Installed::Candidate(key) => assert_eq!(address(&key), address(&genesis.key)),
+                Installed::Peer { .. } => panic!("genesis must install its held candidate"),
+            }
+            assert_eq!(genesis.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(backoff.calls.load(Ordering::SeqCst), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_late_discovery_supersedes_pending_candidate() {
+        let ctx = test_context();
+        let peer = test_key();
+        let genesis = TestGenesis::new(&ctx);
+        let source = TestPeers::new(&ctx, vec![("live.example:8443", peer.clone())]);
+        let view = TestRegistry::default();
+        let backoff = ScriptedBackoff::new(|turn| {
+            assert_eq!(genesis.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                ctx.state.lock().unwrap().signer_addr(),
+                Some(address(&genesis.key))
+            );
+            match turn {
+                0 => {
+                    view.registered.lock().unwrap().push(address(&peer));
+                    configure(&ctx, vec!["stale.example".into()]);
+                }
+                1 => configure(
+                    &ctx,
+                    vec![
+                        "bad\r\npeer".into(),
+                        "LIVE.EXAMPLE".into(),
+                        "live.example:8443".into(),
+                    ],
+                ),
+                _ => panic!("latest discovery was not consumed"),
+            }
+        });
+        let installed =
+            run_boot_with_discovery(&ctx.state, &[], &source, &view, &genesis, &backoff)
+                .await
+                .unwrap();
+        assert_peer(installed, &peer);
+        assert_eq!(genesis.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *source.visited.lock().unwrap(),
+            ["stale.example:8443", "live.example:8443"]
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_restart_with_nonzero_registry_acquires_late_peer_without_genesis() {
+        let ctx = test_context();
+        let peer = test_key();
+        let genesis = TestGenesis::new(&ctx);
+        let source = TestPeers::new(&ctx, vec![("live.example:8443", peer.clone())]);
+        let view = TestRegistry::default();
+        view.registered.lock().unwrap().push(address(&peer));
+        let backoff = ScriptedBackoff::new(|turn| {
+            assert_eq!(turn, 0);
+            assert_eq!(genesis.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(ctx.state.lock().unwrap().health().0, BootState::Fetching);
+            configure(&ctx, vec!["live.example".into()]);
+        });
+        let installed =
+            run_boot_with_discovery(&ctx.state, &[], &source, &view, &genesis, &backoff)
+                .await
+                .unwrap();
+        assert_peer(installed, &peer);
+        assert_eq!(genesis.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_baked_peer_works_without_config_and_survives_host_poisoning() {
+        for poisoned in [false, true] {
+            let ctx = test_context();
+            if poisoned {
+                configure(
+                    &ctx,
+                    (0..64).map(|i| format!("stale-{i}.example")).collect(),
+                );
+            }
+            let peer = test_key();
+            let genesis = TestGenesis::new(&ctx);
+            let source = TestPeers::new(&ctx, vec![("baked.example:8443", peer.clone())]);
+            let view = TestRegistry::default();
+            view.registered.lock().unwrap().push(address(&peer));
+            let backoff = ScriptedBackoff::new(|_| panic!("baked peer must install immediately"));
+            let installed = run_boot_with_discovery(
+                &ctx.state,
+                &["baked.example".into()],
+                &source,
+                &view,
+                &genesis,
+                &backoff,
+            )
+            .await
+            .unwrap();
+            assert_peer(installed, &peer);
+            assert_eq!(genesis.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(source.visited.lock().unwrap()[0], "baked.example:8443");
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_configure_cannot_replace_registry_or_approval_authority() {
+        let ctx = test_context();
+        configure(&ctx, vec!["healthy.example".into()]);
+        let response = handle_oracle_request(
+            OracleRequest::Configure {
+                registry: Address::from([0x33; 20]).to_string(),
+                rh_rpcs: vec!["https://attacker.invalid".into()],
+                oracle_peers: vec!["attacker.example".into()],
+            },
+            &ctx,
+        );
+        assert!(!serde_json::from_slice::<Ack>(&response).unwrap().ok);
+        assert_eq!(
+            ctx.state.lock().unwrap().peer_snapshot(&[]),
+            ["healthy.example:8443"]
+        );
+
+        let attacker = test_key();
+        let request: OracleRequest = serde_json::from_value(serde_json::json!({
+            "method": "configure",
+            "registry": ctx.registry.to_string(),
+            "rhRpcs": ["https://attacker.invalid"],
+            "oraclePeers": ["attacker.example"],
+            "owners": [address(&attacker).to_string()],
+            "threshold": 0,
+            "chainId": 1,
+            "pcr0": "0x00",
+            "ancestors": ["0x00"],
+            "version": 99,
+        }))
+        .unwrap();
+        let response = handle_oracle_request(request, &ctx);
+        assert!(serde_json::from_slice::<Ack>(&response).unwrap().ok);
+        assert_eq!(ctx.registry, Address::from([0x22; 20]));
+        assert_eq!(ctx.owners, [Address::from([0x11; 20])]);
+        assert_eq!((ctx.threshold, ctx.chain_id, ctx.version), (1, 46630, 1));
+        assert_eq!(ctx.pcr0, [0x42; 48]);
+        let td = canonical_typed_data();
+        let digest = approval_digest(&parse_approval_request(&td, ctx.chain_id).unwrap());
+        let signature = keyex::sig::sign_recoverable(&attacker, &digest).unwrap();
+        let response = handle_oracle_request(
+            OracleRequest::Approval {
+                typed_data: td,
+                signatures: vec![hex::encode(signature)],
+            },
+            &ctx,
+        );
+        assert!(
+            !serde_json::from_slice::<ApprovalResult>(&response)
+                .unwrap()
+                .accepted
+        );
+        assert!(ctx.state.lock().unwrap().approvals().is_empty());
+
+        let peer = test_key();
+        let genesis = TestGenesis::new(&ctx);
+        let source = TestPeers::new(
+            &ctx,
+            vec![
+                ("attacker.example:8443", attacker),
+                ("healthy.example:8443", peer.clone()),
+            ],
+        );
+        let view = TestRegistry::default();
+        view.registered.lock().unwrap().push(address(&peer));
+        let backoff = ScriptedBackoff::new(|turn| {
+            assert_eq!(turn, 0);
+            assert_eq!(genesis.calls.load(Ordering::SeqCst), 0);
+            assert!(ctx.state.lock().unwrap().signer_addr().is_none());
+            configure(&ctx, vec!["healthy.example".into()]);
+        });
+        let installed =
+            run_boot_with_discovery(&ctx.state, &[], &source, &view, &genesis, &backoff)
+                .await
+                .unwrap();
+        assert_peer(installed, &peer);
+        assert_eq!(genesis.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *source.visited.lock().unwrap(),
+            ["attacker.example:8443", "healthy.example:8443"]
+        );
     }
 }

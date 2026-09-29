@@ -21,6 +21,9 @@ resource "aws_lb" "nitro" {
   security_groups    = [aws_security_group.alb.id]
   subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id]
 
+  xff_header_processing_mode = "append"
+  enable_xff_client_port     = false
+
   tags = { Name = "${var.name_prefix}-alb" }
 }
 
@@ -48,6 +51,13 @@ resource "aws_security_group" "alb" {
   egress {
     from_port   = 8080
     to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    from_port   = 8081
+    to_port     = 8081
     protocol    = "tcp"
     cidr_blocks = [var.vpc_cidr]
   }
@@ -124,4 +134,65 @@ resource "aws_lb_listener" "http_forward" {
 resource "aws_autoscaling_attachment" "nitro" {
   autoscaling_group_name = aws_autoscaling_group.prod.name
   lb_target_group_arn    = aws_lb_target_group.nitro.arn
+}
+
+resource "aws_lb_target_group" "bridge" {
+  name     = "${var.name_prefix}-bridge"
+  port     = 8081
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+
+  health_check {
+    path                = "/bridge/ready"
+    protocol            = "HTTP"
+    port                = "8081"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    timeout             = 5
+    interval            = 30
+    matcher             = "200"
+  }
+
+  tags = { Name = "${var.name_prefix}-bridge" }
+}
+
+resource "aws_autoscaling_attachment" "bridge" {
+  autoscaling_group_name = aws_autoscaling_group.prod.name
+  lb_target_group_arn    = aws_lb_target_group.bridge.arn
+}
+
+resource "aws_lb_listener_rule" "bridge_read" {
+  listener_arn = var.domain_name != "" ? aws_lb_listener.https[0].arn : aws_lb_listener.http_forward[0].arn
+  priority     = 10
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.bridge.arn
+  }
+
+  condition {
+    http_request_method { values = ["GET"] }
+  }
+
+  condition {
+    path_pattern { values = ["/bridge/health", "/bridge/attestation"] }
+  }
+}
+
+resource "aws_lb_listener_rule" "bridge_sign" {
+  listener_arn = var.domain_name != "" ? aws_lb_listener.https[0].arn : aws_lb_listener.http_forward[0].arn
+  priority     = 11
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.bridge.arn
+  }
+
+  condition {
+    http_request_method { values = ["POST"] }
+  }
+
+  condition {
+    path_pattern { values = ["/bridge/sign"] }
+  }
 }

@@ -67,6 +67,22 @@ resource "aws_security_group" "prod" {
     security_groups = [aws_security_group.alb.id]
   }
 
+  ingress {
+    description     = "Bridge API from ALB"
+    from_port       = 8081
+    to_port         = 8081
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  egress {
+    description = "Galleon HTTPS JSON-RPC"
+    from_port   = 8545
+    to_port     = 8545
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   egress {
     description = "HTTPS (RPC, APIs)"
     from_port   = 443

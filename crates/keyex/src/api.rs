@@ -26,6 +26,7 @@ pub enum BridgeRequest {
         nonce: Option<String>,
     },
     Health,
+    Readiness,
 }
 
 /// Oracle (CID 16, port 5005) keyex requests, tagged by `method`. The existing
@@ -113,6 +114,14 @@ pub struct BridgeHealth {
     pub igra_finalized: u64,
     #[serde(rename = "rhFinalized")]
     pub rh_finalized: u64,
+}
+
+/// `readiness` reports only local key installation, not chain registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum BridgeReadiness {
+    Ready,
+    Fetching,
 }
 
 /// The success body of `sign_claim`.
@@ -219,6 +228,42 @@ mod tests {
 
         let h: BridgeRequest = serde_json::from_value(json!({"method": "health"})).unwrap();
         assert_eq!(h, BridgeRequest::Health);
+    }
+
+    #[test]
+    fn bridge_readiness_is_a_fixed_read_only_method() {
+        let request = json!({"method": "readiness"});
+        assert_eq!(
+            serde_json::from_value::<BridgeRequest>(request.clone()).unwrap(),
+            BridgeRequest::Readiness
+        );
+        assert_eq!(
+            serde_json::to_value(BridgeRequest::Readiness).unwrap(),
+            request
+        );
+        let with_host_fields = json!({"method": "readiness", "state": "ready", "ready": true});
+        assert_eq!(
+            serde_json::from_value::<BridgeRequest>(with_host_fields).unwrap(),
+            BridgeRequest::Readiness
+        );
+    }
+
+    #[test]
+    fn bridge_readiness_has_only_ready_and_fetching_states() {
+        for (reply, wire) in [
+            (BridgeReadiness::Ready, json!({"state": "ready"})),
+            (BridgeReadiness::Fetching, json!({"state": "fetching"})),
+        ] {
+            assert_eq!(serde_json::to_value(reply).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<BridgeReadiness>(wire).unwrap(),
+                reply
+            );
+        }
+        assert!(serde_json::from_value::<BridgeReadiness>(
+            json!({"state": "waiting_registration"})
+        )
+        .is_err());
     }
 
     #[test]

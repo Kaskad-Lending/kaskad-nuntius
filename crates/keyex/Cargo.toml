@@ -34,11 +34,12 @@ x509-cert = "0.2"
 # RngCore/CryptoRng trait for the injected nonce CSPRNG (NsmRng in the enclave).
 rand_core = "0.6"
 # Async framing over the TLS stream.
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "sync"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time"] }
 # Boot-driver progress logs (driver.rs); warn-level, logs peer index only (R-8).
 tracing = "0.1"
 
 [dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["test-util"] }
 hex = "0.4"
 # CSPRNG for nonce generation in tests (the enclave uses nitro-common NsmRng).
 rand = "0.8"
