@@ -45,6 +45,15 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Reject developer-absolute paths in tracked sources
+        # A fixture read from a workstation home directory passes only there.
+        run: |
+          set -euo pipefail
+          if git grep -n -E "/(home|Users)/" -- . ; then
+            echo "tracked source references a developer-absolute path" >&2
+            exit 1
+          fi
+
       - name: Test host bootstrap and publication gates
         run: python3 -m unittest discover -s host -p 'test_*.py' -v
 
