@@ -33,6 +33,7 @@ resource "aws_launch_template" "prod" {
 
   user_data = base64encode(templatefile("${path.module}/user-data-prod.sh", {
     eif_bucket          = var.eif_bucket_name
+    eif_release_suffix  = var.eif_release_suffix
     aws_region          = var.aws_region
     kms_release_alias   = aws_kms_alias.release.name
     oracle_cpu_count    = var.enclave_cpu_count

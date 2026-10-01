@@ -89,6 +89,17 @@ variable "eif_bucket_name" {
   default     = "kaskad-nitro-us-eif"
 }
 
+variable "eif_release_suffix" {
+  description = "Release prefix suffix, e.g. \"-mainnet\" boots from oracle-mainnet/. Empty = oracle/."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = can(regex("^(|-[a-z0-9-]+)$", var.eif_release_suffix))
+    error_message = "eif_release_suffix must be empty or start with '-' followed by lowercase alnum/dash."
+  }
+}
+
 # ─── ALB / DNS ────────────────────────────────────────────────
 
 variable "domain_name" {

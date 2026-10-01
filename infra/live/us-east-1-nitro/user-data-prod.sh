@@ -137,10 +137,10 @@ SVC
 # Untrusted host scripts + systemd units from S3 (published by build-eif.sh).
 # No signature check: a compromised host can only drop/delay bytes, never forge
 # (TLS to RPCs and RA-TLS to peers both terminate INSIDE the enclave boundary).
-aws s3 cp "s3://$${BUCKET}/host/http_connect_proxy.py" "$${KASKAD_DIR}/http_connect_proxy.py" --region "$${REGION}"
-aws s3 cp "s3://$${BUCKET}/host/pontifex_host.py"      "$${KASKAD_DIR}/pontifex_host.py"      --region "$${REGION}"
-aws s3 cp "s3://$${BUCKET}/host/pull_api.py"           "$${KASKAD_DIR}/pull_api.py"           --region "$${REGION}"
-aws s3 cp "s3://$${BUCKET}/host/genesis_capture.py"    "$${KASKAD_DIR}/genesis_capture.py"    --region "$${REGION}"
+aws s3 cp "s3://$${BUCKET}/host${eif_release_suffix}/http_connect_proxy.py" "$${KASKAD_DIR}/http_connect_proxy.py" --region "$${REGION}"
+aws s3 cp "s3://$${BUCKET}/host${eif_release_suffix}/pontifex_host.py"      "$${KASKAD_DIR}/pontifex_host.py"      --region "$${REGION}"
+aws s3 cp "s3://$${BUCKET}/host${eif_release_suffix}/pull_api.py"           "$${KASKAD_DIR}/pull_api.py"           --region "$${REGION}"
+aws s3 cp "s3://$${BUCKET}/host${eif_release_suffix}/genesis_capture.py"    "$${KASKAD_DIR}/genesis_capture.py"    --region "$${REGION}"
 chmod +x "$${KASKAD_DIR}"/*.py
 
 # Design A: enclaves boot inline below (tf-sized allocator), so kaskad-enclaves
@@ -148,9 +148,9 @@ chmod +x "$${KASKAD_DIR}"/*.py
 # start after the enclaves; egress + RA-TLS relays start before.
 for u in kaskad-egress-connect kaskad-egress-vsock kaskad-oracle-ratls \
          kaskad-pull-api kaskad-pontifex-host kaskad-genesis-capture; do
-  aws s3 cp "s3://$${BUCKET}/host/systemd/$${u}.service" "/etc/systemd/system/$${u}.service" --region "$${REGION}"
+  aws s3 cp "s3://$${BUCKET}/host${eif_release_suffix}/systemd/$${u}.service" "/etc/systemd/system/$${u}.service" --region "$${REGION}"
 done
-aws s3 cp "s3://$${BUCKET}/host/systemd/kaskad-genesis-capture.timer" \
+aws s3 cp "s3://$${BUCKET}/host${eif_release_suffix}/systemd/kaskad-genesis-capture.timer" \
   /etc/systemd/system/kaskad-genesis-capture.timer --region "$${REGION}"
 systemctl daemon-reload
 
@@ -183,8 +183,8 @@ EOF
 systemctl enable --now kaskad-egress-connect.service kaskad-egress-vsock.service
 systemctl enable --now kaskad-oracle-ratls.service
 
-fetch_and_verify oracle   oracle
-fetch_and_verify pontifex pontifex
+fetch_and_verify "oracle${eif_release_suffix}"   oracle
+fetch_and_verify "pontifex${eif_release_suffix}" pontifex
 
 # Oracle first: the bridge's boot fetch of k_bridge needs the oracle's handover
 # server already listening on the local VSOCK.
