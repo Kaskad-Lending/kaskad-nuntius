@@ -40,9 +40,12 @@ resource "aws_launch_template" "prod" {
     oracle_memory_mib   = var.enclave_memory_mib
     pontifex_cpu_count  = var.pontifex_cpu_count
     pontifex_memory_mib = var.pontifex_memory_mib
-    # Allocator pool must cover BOTH enclaves at once (+512 MiB host/hugepage margin).
-    allocator_cpu_count  = var.enclave_cpu_count + var.pontifex_cpu_count
-    allocator_memory_mib = var.enclave_memory_mib + var.pontifex_memory_mib + 512
+    enable_pontifex     = var.enable_pontifex
+    # Allocator pool must cover every enclave that will boot, at once (+512 MiB
+    # host/hugepage margin). Reserving for a bridge that never boots would strand
+    # two cores and 512 MiB away from the parent.
+    allocator_cpu_count  = var.enclave_cpu_count + (var.enable_pontifex ? var.pontifex_cpu_count : 0)
+    allocator_memory_mib = var.enclave_memory_mib + (var.enable_pontifex ? var.pontifex_memory_mib : 0) + 512
     # Host relay-plane config (untrusted hints).
     vpc_cidr        = var.vpc_cidr
     oracle_registry = var.oracle_registry

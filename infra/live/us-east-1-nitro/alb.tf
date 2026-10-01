@@ -157,6 +157,9 @@ resource "aws_lb_target_group" "bridge" {
 }
 
 resource "aws_autoscaling_attachment" "bridge" {
+  # An oracle-only host never serves 8081, so attaching it would park a
+  # permanently unhealthy target in the bridge group.
+  count                  = var.enable_pontifex ? 1 : 0
   autoscaling_group_name = aws_autoscaling_group.prod.name
   lb_target_group_arn    = aws_lb_target_group.bridge.arn
 }
