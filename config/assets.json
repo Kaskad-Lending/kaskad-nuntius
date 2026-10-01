@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "_note": "This file is baked into the enclave EIF via include_str! and is therefore measured in PCR0. Any change to its content produces a different PCR0 and requires on-chain re-registration of the oracle. Keys under `sources` MUST match a registered PriceSource::name() — otherwise the mapping is silently ignored for that source. Each source carries the quote currency of its pair; USDT-quoted samples are multiplied by USDT/USD before aggregation, so USDT/USD itself must stay USD-quoted. `deviation_threshold_bps` is a hard cap on one venue's distance from the median (0 = MAD only). `exchange_hostnames` is the allowlist of hostnames the enclave's HttpClient may connect to — startup validates that every source's hardcoded URL hostname appears here.",
+  "_note": "This file is baked into the enclave EIF via include_str! and is therefore measured in PCR0. Any change to its content produces a different PCR0 and requires on-chain re-registration of the oracle. Keys under `sources` MUST match a registered PriceSource::name() \u2014 otherwise the mapping is silently ignored for that source. Each source carries the quote currency of its pair; USDT-quoted samples are multiplied by USDT/USD before aggregation, so USDT/USD itself must stay USD-quoted. `deviation_threshold_bps` is a hard cap on one venue's distance from the median (0 = MAD only). `exchange_hostnames` is the allowlist of hostnames the enclave's HttpClient may connect to \u2014 startup validates that every source's hardcoded URL hostname appears here.",
   "exchange_hostnames": [
     "api.binance.com",
     "www.okx.com",
@@ -288,6 +288,14 @@
         "coingecko": {
           "pair": "bittensor",
           "quote": "USD"
+        },
+        "bitget": {
+          "pair": "TAOUSDT",
+          "quote": "USDT"
+        },
+        "htx": {
+          "pair": "taousdt",
+          "quote": "USDT"
         }
       }
     },
@@ -400,6 +408,10 @@
         "coingecko": {
           "pair": "nvidia-xstock",
           "quote": "USD"
+        },
+        "mexc": {
+          "pair": "NVDAXUSDT",
+          "quote": "USDT"
         }
       }
     },
@@ -428,6 +440,14 @@
         "coingecko": {
           "pair": "tesla-xstock",
           "quote": "USD"
+        },
+        "mexc": {
+          "pair": "TSLAXUSDT",
+          "quote": "USDT"
+        },
+        "kucoin": {
+          "pair": "TSLAX-USDT",
+          "quote": "USDT"
         }
       }
     }
