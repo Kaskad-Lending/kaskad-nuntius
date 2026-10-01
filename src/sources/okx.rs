@@ -32,7 +32,7 @@ struct OkxTicker {
 #[async_trait]
 impl PriceSource for Okx {
     async fn fetch_price(&self, asset: &AssetConfig) -> Result<Option<PricePoint>> {
-        let inst_id = match asset.sources.get(self.name()) {
+        let inst_id = match asset.pair(self.name()) {
             Some(s) => s.as_str(),
             None => return Ok(None),
         };

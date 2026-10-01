@@ -77,6 +77,11 @@ struct PriceResponse {
     /// on ≥50 % of sources — treat as a security event.
     #[serde(skip_serializing_if = "Option::is_none")]
     equal_weight_fallbacks: Option<u64>,
+    /// Monotonic counter of cycles that converted USDT-quoted samples
+    /// while assuming the peg, because no USDT/USD rate was available. A
+    /// climb here during a depeg is the case that misprices feeds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usdt_rate_assumed: Option<u64>,
     /// `health` endpoint reports whether a fresh attestation doc is
     /// currently retrievable (cache-hit OR successful re-fetch). When
     /// `false`, `get_price` / `get_prices` fail closed.
@@ -283,6 +288,7 @@ fn attestation_unavailable_response() -> PriceResponse {
         num_assets: None,
         attestation_doc: None,
         equal_weight_fallbacks: None,
+        usdt_rate_assumed: None,
         attestation_healthy: Some(false),
     }
 }
@@ -332,6 +338,7 @@ fn process_request(
                 num_assets: Some(count),
                 attestation_doc: None,
                 equal_weight_fallbacks: None,
+                usdt_rate_assumed: None,
                 attestation_healthy: None,
             }
         }
@@ -351,6 +358,7 @@ fn process_request(
                         num_assets: None,
                         attestation_doc: None,
                         equal_weight_fallbacks: None,
+                        usdt_rate_assumed: None,
                         attestation_healthy: None,
                     }
                 }
@@ -367,6 +375,7 @@ fn process_request(
                         num_assets: None,
                         attestation_doc: None,
                         equal_weight_fallbacks: None,
+                        usdt_rate_assumed: None,
                         attestation_healthy: None,
                     },
                     Err(e) => PriceResponse {
@@ -378,6 +387,7 @@ fn process_request(
                         num_assets: None,
                         attestation_doc: None,
                         equal_weight_fallbacks: None,
+                        usdt_rate_assumed: None,
                         attestation_healthy: None,
                     },
                 },
@@ -390,6 +400,7 @@ fn process_request(
                     num_assets: None,
                     attestation_doc: None,
                     equal_weight_fallbacks: None,
+                    usdt_rate_assumed: None,
                     attestation_healthy: None,
                 },
             }
@@ -413,6 +424,7 @@ fn process_request(
                 num_assets: None,
                 attestation_doc: doc.as_ref().map(hex::encode),
                 equal_weight_fallbacks: None,
+                usdt_rate_assumed: None,
                 attestation_healthy: None,
             }
         }
@@ -441,6 +453,7 @@ fn process_request(
                 // so off-chain monitors can alert on a climb without
                 // parsing enclave console logs (audit EXPLOIT-3).
                 equal_weight_fallbacks: Some(crate::aggregator::equal_weight_fallback_count()),
+                usdt_rate_assumed: Some(crate::aggregator::usdt_rate_assumed_count()),
                 attestation_healthy,
             }
         }
@@ -453,6 +466,7 @@ fn process_request(
             num_assets: None,
             attestation_doc: None,
             equal_weight_fallbacks: None,
+            usdt_rate_assumed: None,
             attestation_healthy: None,
         },
     }

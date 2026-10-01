@@ -20,7 +20,7 @@ use eyre::Result;
 use crate::types::{AssetConfig, PricePoint};
 
 /// Trait for all price data sources. The source looks up its specific
-/// symbol for `asset` via `asset.sources.get(self.name())` — when the
+/// symbol for `asset` via `asset.pair(self.name())` — when the
 /// key is absent, the source MUST return `Ok(None)` to be transparent
 /// about lack of coverage.
 #[async_trait]

@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "_note": "This file is baked into the enclave EIF via include_str! and is therefore measured in PCR0. Any change to its content produces a different PCR0 and requires on-chain re-registration of the oracle. Keys under `sources` MUST match a registered PriceSource::name() — otherwise the mapping is silently ignored for that source. `exchange_hostnames` is the allowlist of hostnames the enclave's HttpClient may connect to — startup validates that every source's hardcoded URL hostname appears here.",
+  "version": 2,
+  "_note": "This file is baked into the enclave EIF via include_str! and is therefore measured in PCR0. Any change to its content produces a different PCR0 and requires on-chain re-registration of the oracle. Keys under `sources` MUST match a registered PriceSource::name() — otherwise the mapping is silently ignored for that source. Each source carries the quote currency of its pair; USDT-quoted samples are multiplied by USDT/USD before aggregation, so USDT/USD itself must stay USD-quoted. `deviation_threshold_bps` is a hard cap on one venue's distance from the median (0 = MAD only). `exchange_hostnames` is the allowlist of hostnames the enclave's HttpClient may connect to — startup validates that every source's hardcoded URL hostname appears here.",
   "exchange_hostnames": [
     "api.binance.com",
     "www.okx.com",
@@ -25,20 +25,62 @@
       "deviation_threshold_bps": 50,
       "heartbeat_seconds": 3600,
       "sources": {
-        "binance":    "ETHUSDT",
-        "okx":        "ETH-USDT",
-        "bybit":      "ETHUSDT",
-        "coinbase":   "ETH-USD",
-        "coingecko":  "ethereum",
-        "mexc":       "ETHUSDT",
-        "kucoin":     "ETH-USDT",
-        "gateio":     "ETH_USDT",
-        "kraken":     "XETHZUSD",
-        "bitget":     "ETHUSDT",
-        "bitfinex":   "tETHUSD",
-        "bitstamp":   "ethusd",
-        "crypto_com": "ETH_USDT",
-        "htx":        "ethusdt"
+        "binance": {
+          "pair": "ETHUSDT",
+          "quote": "USDT"
+        },
+        "okx": {
+          "pair": "ETH-USDT",
+          "quote": "USDT"
+        },
+        "bybit": {
+          "pair": "ETHUSDT",
+          "quote": "USDT"
+        },
+        "coinbase": {
+          "pair": "ETH-USD",
+          "quote": "USD"
+        },
+        "coingecko": {
+          "pair": "ethereum",
+          "quote": "USD"
+        },
+        "mexc": {
+          "pair": "ETHUSDT",
+          "quote": "USDT"
+        },
+        "kucoin": {
+          "pair": "ETH-USDT",
+          "quote": "USDT"
+        },
+        "gateio": {
+          "pair": "ETH_USDT",
+          "quote": "USDT"
+        },
+        "kraken": {
+          "pair": "XETHZUSD",
+          "quote": "USD"
+        },
+        "bitget": {
+          "pair": "ETHUSDT",
+          "quote": "USDT"
+        },
+        "bitfinex": {
+          "pair": "tETHUSD",
+          "quote": "USD"
+        },
+        "bitstamp": {
+          "pair": "ethusd",
+          "quote": "USD"
+        },
+        "crypto_com": {
+          "pair": "ETH_USDT",
+          "quote": "USDT"
+        },
+        "htx": {
+          "pair": "ethusdt",
+          "quote": "USDT"
+        }
       }
     },
     {
@@ -47,20 +89,62 @@
       "deviation_threshold_bps": 50,
       "heartbeat_seconds": 3600,
       "sources": {
-        "binance":    "BTCUSDT",
-        "okx":        "BTC-USDT",
-        "bybit":      "BTCUSDT",
-        "coinbase":   "BTC-USD",
-        "coingecko":  "bitcoin",
-        "mexc":       "BTCUSDT",
-        "kucoin":     "BTC-USDT",
-        "gateio":     "BTC_USDT",
-        "kraken":     "XXBTZUSD",
-        "bitget":     "BTCUSDT",
-        "bitfinex":   "tBTCUSD",
-        "bitstamp":   "btcusd",
-        "crypto_com": "BTC_USDT",
-        "htx":        "btcusdt"
+        "binance": {
+          "pair": "BTCUSDT",
+          "quote": "USDT"
+        },
+        "okx": {
+          "pair": "BTC-USDT",
+          "quote": "USDT"
+        },
+        "bybit": {
+          "pair": "BTCUSDT",
+          "quote": "USDT"
+        },
+        "coinbase": {
+          "pair": "BTC-USD",
+          "quote": "USD"
+        },
+        "coingecko": {
+          "pair": "bitcoin",
+          "quote": "USD"
+        },
+        "mexc": {
+          "pair": "BTCUSDT",
+          "quote": "USDT"
+        },
+        "kucoin": {
+          "pair": "BTC-USDT",
+          "quote": "USDT"
+        },
+        "gateio": {
+          "pair": "BTC_USDT",
+          "quote": "USDT"
+        },
+        "kraken": {
+          "pair": "XXBTZUSD",
+          "quote": "USD"
+        },
+        "bitget": {
+          "pair": "BTCUSDT",
+          "quote": "USDT"
+        },
+        "bitfinex": {
+          "pair": "tBTCUSD",
+          "quote": "USD"
+        },
+        "bitstamp": {
+          "pair": "btcusd",
+          "quote": "USD"
+        },
+        "crypto_com": {
+          "pair": "BTC_USDT",
+          "quote": "USDT"
+        },
+        "htx": {
+          "pair": "btcusdt",
+          "quote": "USDT"
+        }
       }
     },
     {
@@ -69,41 +153,98 @@
       "deviation_threshold_bps": 200,
       "heartbeat_seconds": 1800,
       "sources": {
-        "bybit":     "KASUSDT",
-        "coingecko": "kaspa",
-        "mexc":      "KASUSDT",
-        "kucoin":    "KAS-USDT",
-        "gateio":    "KAS_USDT",
-        "bitget":    "KASUSDT",
-        "htx":       "kasusdt"
+        "bybit": {
+          "pair": "KASUSDT",
+          "quote": "USDT"
+        },
+        "coingecko": {
+          "pair": "kaspa",
+          "quote": "USD"
+        },
+        "mexc": {
+          "pair": "KASUSDT",
+          "quote": "USDT"
+        },
+        "kucoin": {
+          "pair": "KAS-USDT",
+          "quote": "USDT"
+        },
+        "gateio": {
+          "pair": "KAS_USDT",
+          "quote": "USDT"
+        },
+        "bitget": {
+          "pair": "KASUSDT",
+          "quote": "USDT"
+        },
+        "htx": {
+          "pair": "kasusdt",
+          "quote": "USDT"
+        }
       }
     },
     {
       "symbol": "USDC/USD",
       "min_sources": 2,
-      "deviation_threshold_bps": 10,
+      "deviation_threshold_bps": 50,
       "heartbeat_seconds": 86400,
       "sources": {
-        "binance":   "USDCUSDT",
-        "okx":       "USDC-USDT",
-        "coingecko": "usd-coin",
-        "kraken":    "USDCUSD",
-        "bitget":    "USDCUSDT",
-        "bitfinex":  "tUDCUSD",
-        "bitstamp":  "usdcusd",
-        "htx":       "usdcusdt"
+        "binance": {
+          "pair": "USDCUSDT",
+          "quote": "USDT"
+        },
+        "okx": {
+          "pair": "USDC-USDT",
+          "quote": "USDT"
+        },
+        "coingecko": {
+          "pair": "usd-coin",
+          "quote": "USD"
+        },
+        "kraken": {
+          "pair": "USDCUSD",
+          "quote": "USD"
+        },
+        "bitget": {
+          "pair": "USDCUSDT",
+          "quote": "USDT"
+        },
+        "bitfinex": {
+          "pair": "tUDCUSD",
+          "quote": "USD"
+        },
+        "bitstamp": {
+          "pair": "usdcusd",
+          "quote": "USD"
+        },
+        "htx": {
+          "pair": "usdcusdt",
+          "quote": "USDT"
+        }
       }
     },
     {
       "symbol": "USDT/USD",
       "min_sources": 2,
-      "deviation_threshold_bps": 10,
+      "deviation_threshold_bps": 50,
       "heartbeat_seconds": 86400,
       "sources": {
-        "coinbase":  "USDT-USD",
-        "kraken":    "USDTUSD",
-        "bitstamp":  "usdtusd",
-        "coingecko": "tether"
+        "coinbase": {
+          "pair": "USDT-USD",
+          "quote": "USD"
+        },
+        "kraken": {
+          "pair": "USDTUSD",
+          "quote": "USD"
+        },
+        "bitstamp": {
+          "pair": "usdtusd",
+          "quote": "USD"
+        },
+        "coingecko": {
+          "pair": "tether",
+          "quote": "USD"
+        }
       }
     },
     {
@@ -112,8 +253,14 @@
       "deviation_threshold_bps": 300,
       "heartbeat_seconds": 3600,
       "sources": {
-        "igralabs":  "IGRA",
-        "coingecko": "igra"
+        "igralabs": {
+          "pair": "IGRA",
+          "quote": "USD"
+        },
+        "coingecko": {
+          "pair": "igra",
+          "quote": "USD"
+        }
       }
     },
     {
@@ -122,11 +269,26 @@
       "deviation_threshold_bps": 200,
       "heartbeat_seconds": 1800,
       "sources": {
-        "binance":   "TAOUSDT",
-        "mexc":      "TAOUSDT",
-        "kucoin":    "TAO-USDT",
-        "gateio":    "TAO_USDT",
-        "coingecko": "bittensor"
+        "binance": {
+          "pair": "TAOUSDT",
+          "quote": "USDT"
+        },
+        "mexc": {
+          "pair": "TAOUSDT",
+          "quote": "USDT"
+        },
+        "kucoin": {
+          "pair": "TAO-USDT",
+          "quote": "USDT"
+        },
+        "gateio": {
+          "pair": "TAO_USDT",
+          "quote": "USDT"
+        },
+        "coingecko": {
+          "pair": "bittensor",
+          "quote": "USD"
+        }
       }
     },
     {
@@ -135,8 +297,138 @@
       "deviation_threshold_bps": 1000,
       "heartbeat_seconds": 1800,
       "sources": {
-        "mexc":      "TIBBIRUSDT",
-        "coingecko": "ribbita-by-virtuals"
+        "mexc": {
+          "pair": "TIBBIRUSDT",
+          "quote": "USDT"
+        },
+        "coingecko": {
+          "pair": "ribbita-by-virtuals",
+          "quote": "USD"
+        }
+      }
+    },
+    {
+      "symbol": "USDG/USD",
+      "min_sources": 2,
+      "deviation_threshold_bps": 50,
+      "heartbeat_seconds": 86400,
+      "sources": {
+        "kraken": {
+          "pair": "USDGUSD",
+          "quote": "USD"
+        },
+        "bitstamp": {
+          "pair": "usdgusd",
+          "quote": "USD"
+        },
+        "coingecko": {
+          "pair": "global-dollar",
+          "quote": "USD"
+        },
+        "okx": {
+          "pair": "USDG-USDT",
+          "quote": "USDT"
+        },
+        "gateio": {
+          "pair": "USDG_USDT",
+          "quote": "USDT"
+        },
+        "kucoin": {
+          "pair": "USDG-USDT",
+          "quote": "USDT"
+        }
+      }
+    },
+    {
+      "symbol": "PONS/USD",
+      "min_sources": 3,
+      "deviation_threshold_bps": 300,
+      "heartbeat_seconds": 1800,
+      "sources": {
+        "okx": {
+          "pair": "PONS-USDT",
+          "quote": "USDT"
+        },
+        "bybit": {
+          "pair": "PONSUSDT",
+          "quote": "USDT"
+        },
+        "bitget": {
+          "pair": "PONSUSDT",
+          "quote": "USDT"
+        },
+        "gateio": {
+          "pair": "PONS_USDT",
+          "quote": "USDT"
+        },
+        "kucoin": {
+          "pair": "PONS-USDT",
+          "quote": "USDT"
+        },
+        "mexc": {
+          "pair": "PONSUSDT",
+          "quote": "USDT"
+        },
+        "coingecko": {
+          "pair": "pons",
+          "quote": "USD"
+        }
+      }
+    },
+    {
+      "symbol": "NVDA/USD",
+      "min_sources": 3,
+      "deviation_threshold_bps": 500,
+      "heartbeat_seconds": 3600,
+      "sources": {
+        "binance": {
+          "pair": "NVDABUSDT",
+          "quote": "USDT"
+        },
+        "okx": {
+          "pair": "XNVDA-USDT",
+          "quote": "USDT"
+        },
+        "bybit": {
+          "pair": "NVDAXUSDT",
+          "quote": "USDT"
+        },
+        "gateio": {
+          "pair": "NVDAX_USDT",
+          "quote": "USDT"
+        },
+        "coingecko": {
+          "pair": "nvidia-xstock",
+          "quote": "USD"
+        }
+      }
+    },
+    {
+      "symbol": "TSLA/USD",
+      "min_sources": 3,
+      "deviation_threshold_bps": 500,
+      "heartbeat_seconds": 3600,
+      "sources": {
+        "binance": {
+          "pair": "TSLABUSDT",
+          "quote": "USDT"
+        },
+        "okx": {
+          "pair": "XTSLA-USDT",
+          "quote": "USDT"
+        },
+        "bybit": {
+          "pair": "TSLAXUSDT",
+          "quote": "USDT"
+        },
+        "gateio": {
+          "pair": "TSLAX_USDT",
+          "quote": "USDT"
+        },
+        "coingecko": {
+          "pair": "tesla-xstock",
+          "quote": "USD"
+        }
       }
     }
   ]
