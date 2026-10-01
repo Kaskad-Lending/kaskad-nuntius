@@ -248,7 +248,7 @@ impl Genesis for NsmGenesis {
 /// The control handler runs on a `spawn_blocking` thread, so blocking on the
 /// runtime here is legal and keeps the seam synchronous and dyn-safe.
 struct SafeQuorum {
-    transport: Arc<transport::ProxyTransport>,
+    transport: Arc<transport::FailoverTransport>,
     safe: alloy_primitives::Address,
     runtime: tokio::runtime::Handle,
 }
@@ -298,12 +298,9 @@ pub async fn boot_and_serve() -> Result<Box<dyn crate::signer::OracleSigner>> {
         .timeout(Duration::from_secs(8))
         .connect_timeout(Duration::from_secs(4))
         .build()?;
-    let rh_url = cfg
-        .rh_rpcs
-        .first()
-        .cloned()
-        .ok_or_else(|| eyre!("no baked RH RPC"))?;
-    let rh = Arc::new(transport::ProxyTransport::new(client, rh_url));
+    // Every baked endpoint, not just the first: RH's own node prunes state and
+    // cannot serve an eth_call at the finalized height.
+    let rh = Arc::new(transport::FailoverTransport::new(client, &cfg.rh_rpcs)?);
 
     // Serve control before boot so discovery and registration can arrive later.
     let ctrl = control::ControlCtx {
