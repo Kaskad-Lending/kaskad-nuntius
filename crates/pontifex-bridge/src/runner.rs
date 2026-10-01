@@ -20,7 +20,7 @@ use crate::config::{baked_ancestor_pcrs, baked_igra_rpcs, BakedIdentity};
 use crate::nitro::{own_pcr0, NsmAttestor};
 use crate::serve::{create_listener, serve_loop, Serve};
 use crate::state::BridgeState;
-use crate::transport::ProxyTransport;
+use crate::transport::{Failover, ProxyTransport};
 use keyex::driver::{step, Backoff, BootDeps, BootLoopState, Genesis, Installed, StepOutcome};
 use keyex::peer::{PeerSource, RatlsPeerSource};
 
@@ -74,7 +74,16 @@ where
                 continue;
             }
         };
-        let rh = transport(&cfg.rh_rpcs[0]);
+        // Every configured endpoint, not just the first: RH's own node prunes
+        // state and cannot serve an eth_call at the finalized height.
+        let endpoints = cfg.rh_rpcs.iter().map(|u| transport(u)).collect();
+        let rh = match Failover::from_endpoints(endpoints) {
+            Ok(rh) => rh,
+            Err(_) => {
+                backoff.wait().await;
+                continue;
+            }
+        };
         let view = RpcChainView {
             transport: &rh,
             registry: cfg.entry,
