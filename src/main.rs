@@ -187,13 +187,24 @@ async fn main() -> Result<()> {
 
     let client = http_client::HttpClient::new(enclave_mode, config.exchange_hostnames.clone());
 
+    // Every coingecko id in one list: the source batches them into a single
+    // request per cycle instead of one per asset.
+    let coingecko_ids: Vec<String> = config
+        .assets
+        .iter()
+        .filter_map(|a| a.pair("coingecko").cloned())
+        .collect();
+
     // (config loaded above — used here for source registration.)
     let price_sources: Vec<Box<dyn PriceSource>> = vec![
         Box::new(sources::binance::Binance::new(client.clone())),
         Box::new(sources::okx::Okx::new(client.clone())),
         Box::new(sources::bybit::Bybit::new(client.clone())),
         Box::new(sources::coinbase::Coinbase::new(client.clone())),
-        Box::new(sources::coingecko::CoinGecko::new(client.clone())),
+        Box::new(sources::coingecko::CoinGecko::new(
+            client.clone(),
+            coingecko_ids.clone(),
+        )),
         Box::new(sources::mexc::Mexc::new(client.clone())),
         Box::new(sources::kucoin::Kucoin::new(client.clone())),
         Box::new(sources::gateio::GateIo::new(client.clone())),
