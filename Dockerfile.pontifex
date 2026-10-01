@@ -5,7 +5,8 @@
 # Bump the digests in lockstep with the oracle Dockerfile.
 FROM rust:1.91.1-alpine3.20@sha256:1f1428db130caff5a0ae90d268a9dda7ba5fd6dad69792ab23483a31f11c1338 AS builder
 
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconf
+# No apk in the builder stage either: the pinned rust image already ships gcc and
+# musl-dev, and openssl-sys is absent from Cargo.lock (rustls/ring, not OpenSSL).
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
@@ -53,7 +54,10 @@ RUN cargo build --release --locked --target x86_64-unknown-linux-musl -p pontife
 
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
-RUN apk add --no-cache ca-certificates iproute2
+# No apk in the runtime stage. TLS roots are compiled in (reqwest/tokio-tungstenite
+# are rustls-tls-webpki-roots in Cargo.toml — nothing reads /etc/ssl), and busybox
+# /sbin/ip covers `ip link set lo up`. Zero mirror dependency: PCR0 stays a
+# function of the source tree and the digest-pinned base alone.
 
 COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/pontifex-bridge /usr/local/bin/pontifex-bridge
 
@@ -77,5 +81,15 @@ fi
 exec /usr/local/bin/pontifex-bridge
 EOF
 RUN chmod +x /entrypoint.sh
+
+# Deterministic PCR0: nitro-cli stores every file's mtime in the enclave CPIO, so
+# a file this build created must not carry a wall-clock time. The pruned paths are
+# docker's own build-time mounts, not part of the committed layer — measured: the
+# only entries left unstamped are those three, and PCR0/1/2 reproduce across builds.
+ARG SOURCE_DATE_EPOCH
+RUN [ -n "$SOURCE_DATE_EPOCH" ] || { echo "FATAL: SOURCE_DATE_EPOCH build-arg required"; exit 1; }; \
+    find / -xdev \( -path /proc -o -path /sys -o -path /dev \
+      -o -path /etc/hosts -o -path /etc/resolv.conf -o -path /etc/hostname \) -prune \
+      -o -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 
 ENTRYPOINT ["/entrypoint.sh"]

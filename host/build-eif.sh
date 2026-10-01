@@ -15,6 +15,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 COMMIT="${COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
 
+# Every file in the enclave rootfs is stamped with this one mtime: nitro-cli
+# stores mtimes in the application CPIO, so a wall-clock time would make PCR2
+# — and with it PCR0 — unreproducible. The Dockerfiles require the build-arg.
+SOURCE_DATE_EPOCH=1700000000
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -85,6 +90,17 @@ sign_raw() {
   [ -s "$2" ] || { echo "FATAL: empty signature for $1" >&2; exit 1; }
 }
 
+# build_measure OUT_EIF OUT_JSON — one cold docker build + build-enclave.
+# Reads build_one's locals (bash dynamic scope): buildargs, dockerfile, tag.
+# nitro-cli is deterministic for a fixed image (measured: 3 runs, identical
+# PCR0/1/2), so reproducibility rests entirely on the docker build being
+# deterministic — which is what SOURCE_DATE_EPOCH and the pinned bases buy.
+build_measure() {
+  sudo docker build "${buildargs[@]}" -f "$dockerfile" -t "$tag" .
+  sudo nitro-cli build-enclave --docker-uri "$tag" --output-file "$1" > "$2"
+  sudo chown "$(id -u):$(id -g)" "$1"
+}
+
 S3="s3://$EIF_BUCKET"
 
 # Release prefix suffix: a second network publishes to oracle$REL_SUFFIX/ instead of
@@ -126,12 +142,12 @@ build_one() {
   done
   local buildargs=()
   for av in "${_args[@]}"; do buildargs+=(--build-arg "$av=${!av:-}"); done
+  buildargs+=(--build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH")
 
   echo "=== build $name ($dockerfile) ==="
-  sudo docker build "${buildargs[@]}" -f "$dockerfile" -t "$tag" .
-  sudo nitro-cli build-enclave --docker-uri "$tag" --output-file "$eif" \
-    > "$WORK/$name.build.json"
-  sudo chown "$(id -u):$(id -g)" "$eif"
+  echo "    EIF_CONFIG=$EIF_CONFIG"
+  for av in "${_args[@]}"; do printf '    %s=%s\n' "$av" "${!av:-<empty>}"; done
+  build_measure "$eif" "$WORK/$name.build.json"
   cat "$WORK/$name.build.json"
 
   # PCR0/1/2 straight from build-enclave JSON.
@@ -143,6 +159,29 @@ build_one() {
   for v in "$pcr0" "$pcr1" "$pcr2"; do
     [[ "$v" =~ ^[0-9a-f]{96}$ ]] || { echo "FATAL: $name bad PCR: $v" >&2; exit 1; }
   done
+
+  # EIF_VERIFY_REPRODUCIBLE=1: rebuild cold and require the same measurement.
+  # PCR0 pinned on-chain is only an audit anchor if a third party can re-derive
+  # it from this commit; a mismatch here means something unmeasured leaked in.
+  if [ -n "${EIF_VERIFY_REPRODUCIBLE:-}" ]; then
+    echo "=== $name: reproducibility check — cold rebuild"
+    sudo docker rmi -f "$tag" >/dev/null 2>&1 || true
+    sudo docker builder prune -af >/dev/null 2>&1 || true
+    build_measure "$WORK/$name.rebuild.eif" "$WORK/$name.rebuild.json"
+    local r
+    for r in PCR0 PCR1 PCR2; do
+      local want have
+      want=$(jq -r ".Measurements.$r" "$WORK/$name.build.json")
+      have=$(jq -r ".Measurements.$r" "$WORK/$name.rebuild.json")
+      [ "$want" = "$have" ] || { echo "FATAL: $name $r not reproducible: $want vs $have" >&2; exit 1; }
+    done
+    if cmp -s "$eif" "$WORK/$name.rebuild.eif"; then
+      echo "$name: reproducible — EIF byte-identical"
+    else
+      echo "$name: reproducible — PCR0/1/2 match; EIF bytes differ only in unmeasured metadata"
+    fi
+    rm -f "$WORK/$name.rebuild.eif" "$WORK/$name.rebuild.json"
+  fi
 
   # Remember the oracle PCR0 so the pontifex build (built next) pins it as parent.
   [ "$name" = oracle ] && ORACLE_PCR0="$pcr0"
@@ -182,15 +221,18 @@ build_one() {
 # publish_host_bundle — copy the host relay plane to S3 so the prod launch
 # template can fetch it at boot. Untrusted: no signature (a compromised host can
 # only drop/delay bytes — TLS to RPCs and RA-TLS to peers both terminate inside
-# the enclave; only the EIFs are release-signed).
+# the enclave; only the EIFs are release-signed). Suffixed like the EIF release
+# prefix: a suffixed network must not push its host plane onto another network's
+# frozen prefix, since host↔enclave protocol changes travel with the commit.
 publish_host_bundle() {
-  echo "=== publish host bundle ==="
-  retry 3 5 aws s3 cp host/http_connect_proxy.py "$S3/host/http_connect_proxy.py"
-  retry 3 5 aws s3 cp host/pontifex_host.py      "$S3/host/pontifex_host.py"
-  retry 3 5 aws s3 cp host/genesis_capture.py    "$S3/host/genesis_capture.py"
-  retry 3 5 aws s3 cp enclave/pull_api.py        "$S3/host/pull_api.py"
-  retry 3 5 aws s3 cp --recursive host/systemd/  "$S3/host/systemd/"
-  echo "host bundle published to $S3/host/"
+  local hp="host$REL_SUFFIX"
+  echo "=== publish host bundle ($hp) ==="
+  retry 3 5 aws s3 cp host/http_connect_proxy.py "$S3/$hp/http_connect_proxy.py"
+  retry 3 5 aws s3 cp host/pontifex_host.py      "$S3/$hp/pontifex_host.py"
+  retry 3 5 aws s3 cp host/genesis_capture.py    "$S3/$hp/genesis_capture.py"
+  retry 3 5 aws s3 cp enclave/pull_api.py        "$S3/$hp/pull_api.py"
+  retry 3 5 aws s3 cp --recursive host/systemd/  "$S3/$hp/systemd/"
+  echo "host bundle published to $S3/$hp/"
 }
 
 # Run the whole build piped to tee so the full transcript — not just SSM's
