@@ -41,7 +41,7 @@ type IgraLabsResponse = Vec<IgraLabsTicker>;
 #[async_trait]
 impl PriceSource for IgraLabs {
     async fn fetch_price(&self, asset: &AssetConfig) -> Result<Option<PricePoint>> {
-        let wanted = match asset.sources.get(self.name()) {
+        let wanted = match asset.pair(self.name()) {
             Some(s) => s.as_str(),
             None => return Ok(None),
         };

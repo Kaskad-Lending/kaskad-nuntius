@@ -21,7 +21,7 @@ type CoinGeckoResponse = HashMap<String, HashMap<String, f64>>;
 #[async_trait]
 impl PriceSource for CoinGecko {
     async fn fetch_price(&self, asset: &AssetConfig) -> Result<Option<PricePoint>> {
-        let coin_id = match asset.sources.get(self.name()) {
+        let coin_id = match asset.pair(self.name()) {
             Some(s) => s.as_str(),
             None => return Ok(None),
         };

@@ -21,20 +21,64 @@ pub struct AssetConfig {
     /// rejection before the cycle will sign (per-asset Data Quorum).
     pub min_sources: usize,
 
+    /// Minimum band, in bps of the median, below which a sample is never
+    /// treated as an outlier. Widens the MAD gate for assets whose honest
+    /// cross-venue spread is wide (equities gap on earnings); it can only
+    /// keep samples, never drop extra ones.
     pub deviation_threshold_bps: u16,
     #[allow(dead_code)]
     pub heartbeat_seconds: u64,
 
-    /// Map of source name (must equal `PriceSource::name()`) to the
-    /// source-specific symbol/pair identifier. A source whose name is
-    /// absent from this map does NOT contribute to this asset.
-    pub sources: HashMap<String, String>,
+    /// Map of source name (must equal `PriceSource::name()`) to that
+    /// source's pair and the currency the pair is denominated in. A
+    /// source whose name is absent from this map does NOT contribute to
+    /// this asset.
+    pub sources: HashMap<String, SourceMapping>,
 }
+
+/// Currency a venue pair is denominated in. `Usdt` samples are multiplied
+/// by the USDT/USD rate before aggregation, so a depeg moves the feed
+/// instead of silently mispricing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum Quote {
+    #[serde(rename = "USD")]
+    Usd,
+    #[serde(rename = "USDT")]
+    Usdt,
+}
+
+/// One venue's pair for an asset. `quote` is mandatory: a mapping added
+/// without it fails to parse at boot rather than defaulting to a guess.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceMapping {
+    pub pair: String,
+    pub quote: Quote,
+}
+
+/// Canonical symbol of the rate used to convert `Quote::Usdt` samples.
+pub const USDT_USD_SYMBOL: &str = "USDT/USD";
 
 impl AssetConfig {
     pub fn id(&self) -> B256 {
         use sha3::{Digest, Keccak256};
         B256::from_slice(&Keccak256::digest(self.symbol.as_bytes()))
+    }
+
+    /// Venue pair for `source`, or None when the source does not cover
+    /// this asset.
+    pub fn pair(&self, source: &str) -> Option<&String> {
+        self.sources.get(source).map(|m| &m.pair)
+    }
+
+    /// Quote currency of `source`'s pair for this asset.
+    pub fn quote(&self, source: &str) -> Option<Quote> {
+        self.sources.get(source).map(|m| m.quote)
+    }
+
+    /// True when at least one mapping is USDT-denominated.
+    pub fn has_usdt_quoted_source(&self) -> bool {
+        self.sources.values().any(|m| m.quote == Quote::Usdt)
     }
 }
 
@@ -102,6 +146,25 @@ pub fn load_assets() -> Result<AssetsConfig> {
                 a.deviation_threshold_bps
             );
         }
+        for (name, m) in &a.sources {
+            if m.pair.is_empty() {
+                eyre::bail!("asset {}: source {} has an empty pair", a.symbol, name);
+            }
+        }
+    }
+    // USDT-denominated samples are converted with the USDT/USD feed, so
+    // that feed must exist and must itself be free of USDT-quoted
+    // sources — otherwise the conversion would depend on its own output.
+    let usdt = parsed.assets.iter().find(|a| a.symbol == USDT_USD_SYMBOL);
+    let needs_rate = parsed.assets.iter().any(|a| a.has_usdt_quoted_source());
+    match usdt {
+        None if needs_rate => {
+            eyre::bail!("assets.json has USDT-quoted sources but no {USDT_USD_SYMBOL} asset")
+        }
+        Some(a) if a.has_usdt_quoted_source() => {
+            eyre::bail!("{USDT_USD_SYMBOL} must be quoted in USD only — it IS the conversion rate")
+        }
+        _ => {}
     }
     Ok(parsed)
 }
@@ -131,6 +194,89 @@ mod tests {
                 a.symbol
             );
         }
+    }
+
+    /// Every USDT-quoted sample is multiplied by the USDT/USD rate, so
+    /// that asset must exist and must itself be USD-only.
+    #[test]
+    fn usdt_usd_is_present_and_usd_only() {
+        let cfg = load_assets().expect("assets.json must parse");
+        let usdt = cfg
+            .assets
+            .iter()
+            .find(|a| a.symbol == USDT_USD_SYMBOL)
+            .expect("USDT/USD must be configured — it is the conversion rate");
+        assert!(
+            !usdt.has_usdt_quoted_source(),
+            "USDT/USD must be quoted in USD only"
+        );
+        assert!(
+            cfg.assets.iter().any(|a| a.has_usdt_quoted_source()),
+            "no USDT-quoted source left — the conversion path is dead code"
+        );
+    }
+
+    /// Reject a quote currency the aggregator does not know how to
+    /// convert, rather than silently treating it as USD.
+    #[test]
+    fn unknown_quote_currency_is_rejected() {
+        let err = serde_json::from_str::<SourceMapping>(r#"{"pair":"ETHEUR","quote":"EUR"}"#)
+            .expect_err("EUR must not parse");
+        assert!(err.to_string().contains("EUR"), "{err}");
+    }
+
+    /// A source entry must carry both fields; the old bare-string form
+    /// cannot silently mean "USD".
+    #[test]
+    fn bare_string_source_is_rejected() {
+        serde_json::from_str::<SourceMapping>(r#""ETHUSDT""#)
+            .expect_err("the v1 bare-pair form must not parse");
+        serde_json::from_str::<SourceMapping>(r#"{"pair":"ETHUSDT"}"#)
+            .expect_err("a mapping without a quote must not parse");
+    }
+
+    /// The reserves the Kaskad markets list must all have a feed. Losing
+    /// one here means an unpriceable reserve after an enclave rebuild.
+    #[test]
+    fn every_listed_reserve_symbol_has_a_feed() {
+        const REQUIRED: &[&str] = &[
+            "ETH/USD",
+            "BTC/USD",
+            "KAS/USD",
+            "USDC/USD",
+            "USDT/USD",
+            "IGRA/USD",
+            "TAO/USD",
+            "TIBBIR/USD",
+            "USDG/USD",
+            "PONS/USD",
+            "NVDA/USD",
+            "TSLA/USD",
+        ];
+        let cfg = load_assets().expect("assets.json must parse");
+        for want in REQUIRED {
+            assert!(
+                cfg.assets.iter().any(|a| a.symbol == *want),
+                "{want} has no price feed"
+            );
+        }
+        assert_eq!(
+            cfg.assets.len(),
+            REQUIRED.len(),
+            "an asset was added without extending this list"
+        );
+    }
+
+    /// Asset ids are keccak256 of the symbol and index on-chain storage; a
+    /// collision would overwrite another feed.
+    #[test]
+    fn asset_ids_are_unique() {
+        let cfg = load_assets().expect("assets.json must parse");
+        let mut ids: Vec<_> = cfg.assets.iter().map(|a| a.id()).collect();
+        let total = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "duplicate asset id");
     }
 
     /// Drift-guard: each source module hardcodes its HTTPS URL. The

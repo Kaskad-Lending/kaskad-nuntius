@@ -615,6 +615,38 @@ mod tests {
     /// books' own timestamps.
     const FIXTURE_TS_MS: i64 = 1_700_000_000_000;
 
+    /// Drift-guard for the COB fast path: every pair in
+    /// `config/exchanges.json` must be USDT-quoted, because the COB mid is
+    /// converted to USD with the USDT/USD rate unconditionally. Adding a
+    /// USD-quoted feed here without teaching the conversion path about it
+    /// would double-apply the rate.
+    #[test]
+    fn collector_pairs_are_usdt_quoted() {
+        let venues: serde_json::Value =
+            serde_json::from_str(crate::types::EXCHANGES_JSON).expect("exchanges.json must parse");
+        let mut checked = 0usize;
+        for v in venues.as_array().expect("exchanges.json is an array") {
+            let name = v["name"].as_str().expect("venue name");
+            for pair in v["pairs"].as_array().expect("venue pairs") {
+                let pair = pair.as_str().expect("pair is a string").to_ascii_uppercase();
+                let quote = pair
+                    .rsplit(['-', '_', '/'])
+                    .next()
+                    .expect("non-empty pair")
+                    .to_string();
+                let quote = if quote == pair {
+                    // Concatenated form (BTCUSDT): only the suffix is known.
+                    pair.strip_suffix("USDT").map(|_| "USDT".to_string()).unwrap_or(pair.clone())
+                } else {
+                    quote
+                };
+                assert_eq!(quote, "USDT", "{name} pair {pair} is not USDT-quoted");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 18, "expected every venue to declare pairs, saw {checked}");
+    }
+
     fn make_book(source: &str, bids: &[(f64, f64)], asks: &[(f64, f64)]) -> OrderBookSnapshot {
         OrderBookSnapshot {
             source: source.to_string(),
