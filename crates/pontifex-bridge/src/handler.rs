@@ -15,7 +15,7 @@ use serde::Serialize;
 use crate::claimflow::{build_grant, ClaimInputs};
 use crate::config::{BakedIdentity, BridgeConfig, IGRA_FINALITY};
 use crate::state::BridgeState;
-use crate::transport::ProxyTransport;
+use crate::transport::{FailoverTransport, ProxyTransport};
 
 /// Produce a COSE attestation document binding an optional nonce and the signer's
 /// public key. Returns `None` on NSM failure so the caller fails closed.
@@ -129,14 +129,14 @@ async fn sign_claim(
         Some(c) => c.clone(),
         None => return ClaimError::NotReady.into(),
     };
-    let rh_url = match cfg.rh_rpcs.first() {
-        Some(u) => u.clone(),
-        None => return ClaimError::NotReady.into(),
-    };
 
     let high_water = state.high_water(recipient);
     let igra = ProxyTransport::new(ctx.client.clone(), ctx.igra_url);
-    let rh = ProxyTransport::new(ctx.client.clone(), rh_url);
+    // Failover: a pruned endpoint must not turn a valid claim into NotReady.
+    let rh = match FailoverTransport::new(ctx.client.clone(), &cfg.rh_rpcs) {
+        Ok(rh) => rh,
+        Err(_) => return ClaimError::NotReady.into(),
+    };
     let forbidden = cfg.forbidden();
     let inputs = ClaimInputs {
         recipient,
@@ -195,8 +195,7 @@ async fn health(state: &BridgeState, ctx: &HandlerCtx<'_>) -> BridgeHealth {
         if let Ok(b) = chain::finalized_block(&igra, IGRA_FINALITY).await {
             igra_finalized = b.number;
         }
-        if let Some(rh_url) = cfg.rh_rpcs.first() {
-            let rh = ProxyTransport::new(ctx.client.clone(), rh_url.clone());
+        if let Ok(rh) = FailoverTransport::new(ctx.client.clone(), &cfg.rh_rpcs) {
             if let Ok(b) = chain::finalized_block(&rh, Finality::Tag).await {
                 rh_finalized = b.number;
             }
