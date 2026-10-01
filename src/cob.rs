@@ -628,7 +628,10 @@ mod tests {
         for v in venues.as_array().expect("exchanges.json is an array") {
             let name = v["name"].as_str().expect("venue name");
             for pair in v["pairs"].as_array().expect("venue pairs") {
-                let pair = pair.as_str().expect("pair is a string").to_ascii_uppercase();
+                let pair = pair
+                    .as_str()
+                    .expect("pair is a string")
+                    .to_ascii_uppercase();
                 let quote = pair
                     .rsplit(['-', '_', '/'])
                     .next()
@@ -636,7 +639,9 @@ mod tests {
                     .to_string();
                 let quote = if quote == pair {
                     // Concatenated form (BTCUSDT): only the suffix is known.
-                    pair.strip_suffix("USDT").map(|_| "USDT".to_string()).unwrap_or(pair.clone())
+                    pair.strip_suffix("USDT")
+                        .map(|_| "USDT".to_string())
+                        .unwrap_or(pair.clone())
                 } else {
                     quote
                 };
@@ -644,7 +649,10 @@ mod tests {
                 checked += 1;
             }
         }
-        assert!(checked >= 18, "expected every venue to declare pairs, saw {checked}");
+        assert!(
+            checked >= 18,
+            "expected every venue to declare pairs, saw {checked}"
+        );
     }
 
     fn make_book(source: &str, bids: &[(f64, f64)], asks: &[(f64, f64)]) -> OrderBookSnapshot {

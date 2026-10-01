@@ -25,6 +25,19 @@ IMAGES=(
   "pontifex:Dockerfile.pontifex"
 )
 
+# EIF_IMAGES=oracle builds a subset, in the order listed above. The bridge pins
+# the oracle's PCR0, so "pontifex" alone needs PONTIFEX_ANCESTOR_PCRS set in the
+# config; dropping "oracle" from a full run is otherwise an error.
+if [ -n "${EIF_IMAGES:-}" ]; then
+  _want=",$(echo "$EIF_IMAGES" | tr ' ' ',')," _keep=()
+  for entry in "${IMAGES[@]}"; do
+    case "$_want" in *",${entry%%:*},"*) _keep+=("$entry") ;; esac
+  done
+  [ ${#_keep[@]} -gt 0 ] || { echo "FATAL: EIF_IMAGES='$EIF_IMAGES' matches no image" >&2; exit 1; }
+  IMAGES=("${_keep[@]}")
+  echo "image subset: ${IMAGES[*]%%:*}"
+fi
+
 # Baked identity (public addresses/RPCs/chain-ids, no secrets): sourced here and
 # passed per image as --build-arg; option_env! bakes them into PCR0 at compile
 # time. Reproducible: PCR0 = f(source commit + this file). Override the path with
@@ -36,8 +49,8 @@ EIF_CONFIG="${EIF_CONFIG:-host/eif-config/robinhood-testnet.env}"
 echo "baked identity: $EIF_CONFIG"
 
 # Per-image build args; *_REQ must be non-empty (mirrors from_baked() in Rust).
-ORACLE_ARGS=(KEYEX_ORACLE_REGISTRY KEYEX_ORACLE_RH_RPCS KEYEX_ORACLE_OWNERS KEYEX_ORACLE_THRESHOLD KEYEX_ORACLE_CHAIN_ID KEYEX_ORACLE_VERSION KEYEX_ORACLE_ANCESTORS KEYEX_ORACLE_PEERS)
-ORACLE_REQ=(KEYEX_ORACLE_REGISTRY KEYEX_ORACLE_RH_RPCS KEYEX_ORACLE_OWNERS KEYEX_ORACLE_THRESHOLD KEYEX_ORACLE_CHAIN_ID KEYEX_ORACLE_VERSION)
+ORACLE_ARGS=(KEYEX_ORACLE_REGISTRY KEYEX_ORACLE_RH_RPCS KEYEX_ORACLE_SAFE KEYEX_ORACLE_OWNERS KEYEX_ORACLE_THRESHOLD KEYEX_ORACLE_CHAIN_ID KEYEX_ORACLE_VERSION KEYEX_ORACLE_ANCESTORS KEYEX_ORACLE_PEERS)
+ORACLE_REQ=(KEYEX_ORACLE_REGISTRY KEYEX_ORACLE_RH_RPCS KEYEX_ORACLE_SAFE KEYEX_ORACLE_OWNERS KEYEX_ORACLE_THRESHOLD KEYEX_ORACLE_CHAIN_ID KEYEX_ORACLE_VERSION)
 PONTIFEX_ARGS=(PONTIFEX_EXIT PONTIFEX_KSKD PONTIFEX_ENTRY PONTIFEX_CHAIN_ID PONTIFEX_IGRA_RPCS PONTIFEX_VERSION PONTIFEX_ANCESTOR_PCRS)
 # PONTIFEX_ANCESTOR_PCRS is required but auto-filled from the oracle build below,
 # so it need not be in the .env; the req check runs after that injection.
@@ -73,6 +86,15 @@ sign_raw() {
 }
 
 S3="s3://$EIF_BUCKET"
+
+# Release prefix suffix: a second network publishes to oracle$REL_SUFFIX/ instead of
+# over the live one. The .sig files exist ONLY under the mutable release prefix, so
+# clobbering it destroys the other network's release. Staging is keyed by commit.
+REL_SUFFIX="${EIF_RELEASE_SUFFIX:-}"
+case "$REL_SUFFIX" in
+  ""|-[a-z0-9]*) ;;
+  *) echo "FATAL: EIF_RELEASE_SUFFIX must start with '-' and be lowercase alnum" >&2; exit 1 ;;
+esac
 
 build_one() {
   local name="$1" dockerfile="$2"
@@ -140,11 +162,13 @@ build_one() {
   retry 3 5 aws s3 cp "$WORK/$name.eif.sha384" "$S3/staging/$COMMIT/$name.eif.sha384"
   retry 3 5 aws s3 cp "$WORK/$name.pcrs.json" "$S3/staging/$COMMIT/$name.pcrs.json"
 
-  retry 3 5 aws s3 cp "$eif"                     "$S3/$name/latest.eif"
-  retry 3 5 aws s3 cp "$WORK/$name.eif.sha384"     "$S3/$name/latest.eif.sha384"
-  retry 3 5 aws s3 cp "$WORK/$name.eif.sha384.sig" "$S3/$name/latest.eif.sha384.sig"
-  retry 3 5 aws s3 cp "$WORK/$name.pcr0.json"      "$S3/$name/pcr0.json"
-  retry 3 5 aws s3 cp "$WORK/$name.pcr0.json.sig"  "$S3/$name/pcr0.json.sig"
+  local rel="$name$REL_SUFFIX"
+  retry 3 5 aws s3 cp "$eif"                     "$S3/$rel/latest.eif"
+  retry 3 5 aws s3 cp "$WORK/$name.eif.sha384"     "$S3/$rel/latest.eif.sha384"
+  retry 3 5 aws s3 cp "$WORK/$name.eif.sha384.sig" "$S3/$rel/latest.eif.sha384.sig"
+  retry 3 5 aws s3 cp "$WORK/$name.pcr0.json"      "$S3/$rel/pcr0.json"
+  retry 3 5 aws s3 cp "$WORK/$name.pcr0.json.sig"  "$S3/$rel/pcr0.json.sig"
+  echo "release published to $S3/$rel/"
 
   # Reclaim the oracle build cache + image before pontifex builds, so two musl
   # release trees need not co-reside on the 30G builder volume. Cache-independent

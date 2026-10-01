@@ -14,6 +14,12 @@ const SEL_BURNED: [u8; 4] = [0xa7, 0x50, 0x9b, 0x83]; // burned(address)
 const SEL_IS_VALID_SIGNER: [u8; 4] = [0xd5, 0xf5, 0x05, 0x82]; // isValidSigner(address) — oracle
 const SEL_VALID_SIGNER: [u8; 4] = [0xba, 0x6f, 0x8b, 0x0e]; // validSigner(address) — bridge
 const SEL_SIGNER_COUNT: [u8; 4] = [0x7c, 0xa5, 0x48, 0xc6]; // signerCount()
+const SEL_GET_OWNERS: [u8; 4] = [0xa0, 0xe6, 0x7e, 0x2b]; // getOwners() — Safe
+const SEL_GET_THRESHOLD: [u8; 4] = [0xe7, 0x52, 0x35, 0xb8]; // getThreshold() — Safe
+
+/// Upper bound on a Safe owner-array read. Bounds the memory a hostile RPC can
+/// make the enclave allocate; no real Safe approaches it.
+const MAX_SAFE_OWNERS: usize = 64;
 
 /// JSON-RPC transport seam. `rpc` returns the already-unwrapped `result` value,
 /// or `Err` when the transport failed or the response carried a JSON-RPC error.
@@ -206,6 +212,48 @@ pub async fn signer_count<T: EthTransport>(
     Ok(U256::from_be_bytes(w))
 }
 
+/// `Safe.getOwners()` + `Safe.getThreshold()` at ONE pinned block, so an owner
+/// change landing between the two reads cannot produce a mixed pair. The owner
+/// array is strictly decoded: malformed or oversized is a refusal, not a guess.
+pub async fn safe_quorum<T: EthTransport>(
+    t: &T,
+    safe: Address,
+    finality: Finality,
+) -> Result<(Vec<Address>, U256), ChainError> {
+    let block = finalized_block(t, finality).await?;
+    let raw = eth_call_bytes(t, safe, &SEL_GET_OWNERS, CallBlock::Number(block.number)).await?;
+    let owners = decode_address_array(&raw).ok_or(ChainError::Rpc)?;
+    let w = eth_call_word(t, safe, &SEL_GET_THRESHOLD, CallBlock::Number(block.number)).await?;
+    Ok((owners, U256::from_be_bytes(w)))
+}
+
+/// Decode an ABI-encoded `address[]` return buffer. Rejects a head offset other
+/// than 0x20, a length that overruns the buffer or exceeds [`MAX_SAFE_OWNERS`],
+/// and any word with dirty high bytes.
+fn decode_address_array(raw: &[u8]) -> Option<Vec<Address>> {
+    if raw.len() < 64 {
+        return None;
+    }
+    let offset = U256::from_be_slice(&raw[..32]);
+    if offset != U256::from(32u64) {
+        return None;
+    }
+    let len_word = U256::from_be_slice(&raw[32..64]);
+    let len = usize::try_from(len_word).ok()?;
+    if len > MAX_SAFE_OWNERS || raw.len() < 64 + len * 32 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        let w = &raw[64 + i * 32..96 + i * 32];
+        if w[..12] != [0u8; 12] {
+            return None;
+        }
+        out.push(Address::from_slice(&w[12..]));
+    }
+    Some(out)
+}
+
 /// The registry as the boot state machine sees it: membership + population,
 /// abstracted over which registry (oracle `isValidSigner` vs bridge
 /// `validSigner`) and finality. The only seam the boot rules are tested against.
@@ -252,6 +300,22 @@ async fn eth_call_word<T: EthTransport>(
     data: &[u8],
     block: CallBlock,
 ) -> Result<[u8; 32], ChainError> {
+    let bytes = eth_call_bytes(t, to, data, block).await?;
+    if bytes.len() < 32 {
+        return Err(ChainError::Rpc);
+    }
+    let mut w = [0u8; 32];
+    w.copy_from_slice(&bytes[..32]);
+    Ok(w)
+}
+
+/// `eth_call` returning the whole return buffer, pinned to `block`.
+async fn eth_call_bytes<T: EthTransport>(
+    t: &T,
+    to: Address,
+    data: &[u8],
+    block: CallBlock,
+) -> Result<Vec<u8>, ChainError> {
     let block_id = match block {
         CallBlock::Number(number) => json!(format!("0x{number:x}")),
         CallBlock::CanonicalHash(hash) => json!({
@@ -268,13 +332,7 @@ async fn eth_call_word<T: EthTransport>(
         .await
         .map_err(|_| ChainError::Rpc)?;
     let s = resp.as_str().ok_or(ChainError::Rpc)?;
-    let bytes = decode_hex(s).ok_or(ChainError::Rpc)?;
-    if bytes.len() < 32 {
-        return Err(ChainError::Rpc);
-    }
-    let mut w = [0u8; 32];
-    w.copy_from_slice(&bytes[..32]);
-    Ok(w)
+    decode_hex(s).ok_or(ChainError::Rpc)
 }
 
 /// `selector ‖ left-padded(address)` — a single-address ABI calldata.
@@ -313,6 +371,97 @@ fn parse_b256(v: &Value) -> Option<B256> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ABI-encode an `address[]` return buffer the way a Safe would.
+    fn encode_addr_array(addrs: &[Address]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&U256::from(32u64).to_be_bytes::<32>());
+        out.extend_from_slice(&U256::from(addrs.len() as u64).to_be_bytes::<32>());
+        for a in addrs {
+            out.extend_from_slice(&[0u8; 12]);
+            out.extend_from_slice(a.as_slice());
+        }
+        out
+    }
+
+    /// The hand-written Safe selectors must equal keccak of their signatures.
+    #[test]
+    fn safe_selectors_match_their_signatures() {
+        use sha3::{Digest, Keccak256};
+        for (sel, sig) in [
+            (SEL_GET_OWNERS, &b"getOwners()"[..]),
+            (SEL_GET_THRESHOLD, &b"getThreshold()"[..]),
+        ] {
+            let h: [u8; 32] = Keccak256::digest(sig).into();
+            assert_eq!(
+                sel,
+                h[..4],
+                "selector drift for {}",
+                String::from_utf8_lossy(sig)
+            );
+        }
+    }
+
+    /// Captured from the real RH 46630 governing Safe 1.4.1 (`getOwners()`), so
+    /// the decoder is pinned against live Safe output, not only our own encoder.
+    #[test]
+    fn address_array_decodes_a_real_safe_response() {
+        let raw = hex::decode(concat!(
+            "0000000000000000000000000000000000000000000000000000000000000020",
+            "0000000000000000000000000000000000000000000000000000000000000005",
+            "00000000000000000000000020f1a0eeee03a811f2e9d9ff87dca6f498843b9b",
+            "000000000000000000000000c0de1337044be1b6a85058e9227e09bfb02420b2",
+            "000000000000000000000000df5f4fd90246ca0da83fff90e674cd0ce5e13eef",
+            "000000000000000000000000a780038f47c702f55aac8f01c44e36d05ec459dd",
+            "0000000000000000000000002baa832d87f82d751c1428be262993bf324eb233",
+        ))
+        .unwrap();
+        let owners = decode_address_array(&raw).expect("real Safe response must decode");
+        assert_eq!(owners.len(), 5);
+        assert_eq!(
+            owners[0],
+            "0x20f1a0eeEe03a811F2E9d9fF87Dca6f498843b9b"
+                .parse::<Address>()
+                .unwrap()
+        );
+        assert_eq!(
+            owners[4],
+            "0x2BAa832d87F82D751c1428be262993bF324eb233"
+                .parse::<Address>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn address_array_roundtrips() {
+        let addrs = vec![Address::from([1u8; 20]), Address::from([2u8; 20])];
+        assert_eq!(
+            decode_address_array(&encode_addr_array(&addrs)),
+            Some(addrs)
+        );
+        assert_eq!(decode_address_array(&encode_addr_array(&[])), Some(vec![]));
+    }
+
+    #[test]
+    fn address_array_rejects_hostile_encodings() {
+        let good = encode_addr_array(&[Address::from([1u8; 20])]);
+        // Truncated buffer.
+        assert!(decode_address_array(&good[..64]).is_none());
+        assert!(decode_address_array(&good[..40]).is_none());
+        // Head offset other than 0x20.
+        let mut bad = good.clone();
+        bad[31] = 0x40;
+        assert!(decode_address_array(&bad).is_none());
+        // Length beyond the cap.
+        let mut huge = good.clone();
+        huge[63] = 0xFF;
+        assert!(decode_address_array(&huge).is_none());
+        // Dirty high bytes in an address word.
+        let mut dirty = good.clone();
+        dirty[64] = 0xAA;
+        assert!(decode_address_array(&dirty).is_none());
+    }
+
     use std::collections::VecDeque;
     use std::sync::Mutex;
 

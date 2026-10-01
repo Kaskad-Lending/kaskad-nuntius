@@ -61,7 +61,7 @@ pub use real::RatlsPeerSource;
 mod real {
     use std::future::Future;
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
 
     use crate::policy::FetchKind;
     use crate::ratls::{
@@ -195,18 +195,14 @@ mod real {
             let mut rng = NsmRng::new()?;
             let nonce = fresh_nonce(&mut rng);
             // Clock read per fetch, not once at construction: a long-lived source
-            // must judge each peer cert's validity against the current time.
-            let now_unix_secs = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            // must judge each peer cert's validity against the current time. The
+            // NSM stamps it, so a lying host cannot move the validity window.
+            let now_unix_secs = self.nsm.now_unix_secs()?;
             let verifier = NsmPeerVerifier { now_unix_secs };
-            // My attestation answers the peer's nonce and binds my TLS point; a
-            // failed NSM call yields an empty doc → the peer fails verification.
-            let attest = |peer_nonce: &[u8; NONCE_LEN], my_point: &[u8]| -> Vec<u8> {
+            // My attestation answers the peer's nonce and binds my TLS point.
+            let attest = |peer_nonce: &[u8; NONCE_LEN], my_point: &[u8]| -> Result<Vec<u8>> {
                 self.nsm
                     .attestation(None, Some(peer_nonce.to_vec()), Some(my_point.to_vec()))
-                    .unwrap_or_default()
             };
 
             let target = with_default_port(endpoint);
@@ -330,7 +326,7 @@ mod real {
                 S: AsyncRead + AsyncWrite + Unpin,
             {
                 let nonce = [0x33; NONCE_LEN];
-                let attest = |_: &[u8; NONCE_LEN], _: &[u8]| b"client-doc".to_vec();
+                let attest = |_: &[u8; NONCE_LEN], _: &[u8]| Ok(b"client-doc".to_vec());
                 fetch_via_proxy(
                     connect,
                     TARGET,

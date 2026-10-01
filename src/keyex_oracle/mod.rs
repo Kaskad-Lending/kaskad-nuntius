@@ -243,6 +243,32 @@ impl Genesis for NsmGenesis {
     }
 }
 
+/// Live owner set read straight off the governing Safe, for every approval.
+///
+/// The control handler runs on a `spawn_blocking` thread, so blocking on the
+/// runtime here is legal and keeps the seam synchronous and dyn-safe.
+struct SafeQuorum {
+    transport: Arc<transport::ProxyTransport>,
+    safe: alloy_primitives::Address,
+    runtime: tokio::runtime::Handle,
+}
+
+impl control::LiveQuorum for SafeQuorum {
+    fn read(&self) -> std::result::Result<(Vec<alloy_primitives::Address>, usize), String> {
+        let (owners, threshold) = self
+            .runtime
+            .block_on(keyex::chain::safe_quorum(
+                &*self.transport,
+                self.safe,
+                Finality::Tag,
+            ))
+            .map_err(|e| format!("multisig read failed: {e:?}"))?;
+        let threshold =
+            usize::try_from(threshold).map_err(|_| "multisig threshold out of range".to_owned())?;
+        Ok((owners, threshold))
+    }
+}
+
 /// This image's measured PCR0 (48 bytes). A signer with an unknown identity must
 /// not boot.
 fn own_pcr0(nsm: &Nsm) -> Result<[u8; 48]> {
@@ -263,22 +289,6 @@ pub async fn boot_and_serve() -> Result<Box<dyn crate::signer::OracleSigner>> {
     let pcr0 = own_pcr0(&Nsm::new()?)?;
     let state = Arc::new(Mutex::new(OracleKeyexState::new()));
 
-    // Serve control before boot so discovery and registration can arrive later.
-    let ctrl = control::ControlCtx {
-        state: Arc::clone(&state),
-        pcr0,
-        version: cfg.version,
-        owners: cfg.owners.clone(),
-        threshold: cfg.threshold,
-        chain_id: cfg.chain_id,
-        registry: cfg.registry,
-    };
-    spawn_blocking_listener(async move {
-        if let Err(e) = control::serve_control(ctrl).await {
-            error!(error = %e, "keyex control channel exited");
-        }
-    });
-
     // Enclave JSON-RPC egress tunnels through the untrusted host proxy; timeouts
     // stop a hung proxy from wedging a boot read forever.
     let client = reqwest::Client::builder()
@@ -293,9 +303,31 @@ pub async fn boot_and_serve() -> Result<Box<dyn crate::signer::OracleSigner>> {
         .first()
         .cloned()
         .ok_or_else(|| eyre!("no baked RH RPC"))?;
-    let rh = transport::ProxyTransport::new(client, rh_url);
+    let rh = Arc::new(transport::ProxyTransport::new(client, rh_url));
+
+    // Serve control before boot so discovery and registration can arrive later.
+    let ctrl = control::ControlCtx {
+        state: Arc::clone(&state),
+        pcr0,
+        version: cfg.version,
+        owners: cfg.owners.clone(),
+        threshold: cfg.threshold,
+        quorum: Arc::new(SafeQuorum {
+            transport: Arc::clone(&rh),
+            safe: cfg.safe,
+            runtime: tokio::runtime::Handle::current(),
+        }),
+        chain_id: cfg.chain_id,
+        registry: cfg.registry,
+    };
+    spawn_blocking_listener(async move {
+        if let Err(e) = control::serve_control(ctrl).await {
+            error!(error = %e, "keyex control channel exited");
+        }
+    });
+
     let view = RpcChainView {
-        transport: &rh,
+        transport: &*rh,
         registry: cfg.registry,
         kind: Registry::Oracle,
         finality: Finality::Tag,
@@ -317,7 +349,10 @@ pub async fn boot_and_serve() -> Result<Box<dyn crate::signer::OracleSigner>> {
     // Extract the transferable bytes and the identity before the key is moved into
     // the signer; scrub the local copy once installed.
     let mut root_bytes = [0u8; 32];
-    root_bytes.copy_from_slice(&key.to_bytes());
+    // `to_bytes()` hands back a GenericArray with no Drop — scrub it by hand.
+    let mut field = key.to_bytes();
+    root_bytes.copy_from_slice(&field);
+    field[..].zeroize();
     let addr = keyex::sig::address_from_key(key.verifying_key());
     let installed = signer::KeyexSigner::from_key(key);
     let pubkey = installed.pubkey_bytes().to_vec();

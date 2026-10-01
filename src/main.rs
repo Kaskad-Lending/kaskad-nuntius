@@ -522,11 +522,7 @@ async fn main() -> Result<()> {
 
             // 2. Outlier rejection (by price)
             let before = prices.len();
-            aggregator::reject_outliers_with_cap(
-                &mut prices,
-                3.0,
-                asset.deviation_threshold_bps,
-            );
+            aggregator::reject_outliers_with_cap(&mut prices, 3.0, asset.deviation_threshold_bps);
             if prices.len() < before {
                 info!(
                     asset = %asset.symbol,

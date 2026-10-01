@@ -206,11 +206,28 @@ resource "aws_iam_role_policy" "github_ci" {
           StringEquals = { "ec2:ResourceTag/Name" = "${var.name_prefix}-builder" }
         }
       },
+      # SendCommand is root on the target. Scope it to the builder by tag, the
+      # same condition BuilderLifecycle above already uses; an unscoped
+      # Resource would hand CI root on the prod ASG as well.
       {
-        Sid    = "BuilderSSM"
+        Sid      = "BuilderSSMSend"
+        Effect   = "Allow"
+        Action   = ["ssm:SendCommand"]
+        Resource = ["arn:aws:ec2:${var.aws_region}:*:instance/*"]
+        Condition = {
+          StringEquals = { "ssm:resourceTag/Name" = "${var.name_prefix}-builder" }
+        }
+      },
+      {
+        Sid      = "BuilderSSMDocument"
+        Effect   = "Allow"
+        Action   = ["ssm:SendCommand"]
+        Resource = ["arn:aws:ssm:${var.aws_region}::document/AWS-RunShellScript"]
+      },
+      {
+        Sid    = "BuilderSSMRead"
         Effect = "Allow"
         Action = [
-          "ssm:SendCommand",
           "ssm:GetCommandInvocation",
           "ssm:ListCommands",
           "ssm:ListCommandInvocations",

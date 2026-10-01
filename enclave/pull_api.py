@@ -42,6 +42,9 @@ RATE_WINDOW = 60       # seconds
 MAX_CONCURRENT = 64
 _concurrency = threading.Semaphore(MAX_CONCURRENT)
 
+# Per-connection read timeout, applied by `PullAPIHandler.timeout`.
+HTTP_READ_TIMEOUT = 15
+
 # Real-client-IP resolution behind the ALB.
 #
 # Direct connections to :8080 are blocked at the host security group —
@@ -77,18 +80,26 @@ def get_client_ip(handler):
         # honour `X-Forwarded-For` (spoofable in this case).
         return str(peer)
 
-    xff = handler.headers.get("X-Forwarded-For", "").strip()
-    if not xff:
+    # The ALB runs `xff_header_processing_mode = "append"`, so it appends the
+    # address it observed to whatever the client sent: the LAST entry is the
+    # only one the ALB vouches for. Taking the first would let a caller set
+    # the header and mint a fresh rate-limit bucket per request.
+    forwarded = handler.headers.get_all("X-Forwarded-For", [])
+    if not forwarded:
         return str(peer)
-    # AWS ALB format: "<client>, <proxy1>, <proxy2>". First entry is the
-    # original client. Trim + validate as IP; on malformed header, fall
-    # back to the peer (ALB) so we still rate-limit, just less precisely.
-    first = xff.split(",")[0].strip()
+    # More than one header, or control characters, means a splitting attempt:
+    # refuse to parse and rate-limit on the ALB instead.
+    if len(forwarded) != 1 or any(c in forwarded[0] for c in "\r\n%"):
+        return str(peer)
     try:
-        ipaddress.ip_address(first)
-        return first
+        # Validate the whole chain: one bad hop invalidates the header.
+        chain = [ipaddress.ip_address(tok.strip(" \t")) for tok in forwarded[0].split(",")]
     except ValueError:
         return str(peer)
+    if not chain:
+        return str(peer)
+    return str(chain[-1])
+
 
 # ─── Rate Limiter ────────────────────────────────────────────
 
@@ -181,6 +192,11 @@ def recv_exact(sock, n):
 
 class PullAPIHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the pull API."""
+
+    # Slowloris guard. The concurrency semaphore is acquired in `do_GET`, i.e.
+    # only after the request line is parsed, so a client that connects and stays
+    # silent never reaches it. This bounds that wait.
+    timeout = HTTP_READ_TIMEOUT
 
     def do_GET(self):
         # Concurrency gate: non-blocking acquire — if MAX_CONCURRENT

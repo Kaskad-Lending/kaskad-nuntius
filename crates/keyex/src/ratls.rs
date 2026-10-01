@@ -260,11 +260,13 @@ pub fn server_config(provider: Arc<CryptoProvider>, cert: &EphemeralCert) -> Res
 /// The enclave passes the real NSM `Request::Attestation`; tests pass a fake.
 /// Off hardware the real fresh-nonce document cannot be produced (slice 12).
 pub trait AttestFn {
-    fn attest(&self, nonce: &[u8; NONCE_LEN], my_point: &[u8]) -> Vec<u8>;
+    /// `Err` aborts the exchange; a caller must never substitute a placeholder
+    /// document for a failed attestation.
+    fn attest(&self, nonce: &[u8; NONCE_LEN], my_point: &[u8]) -> Result<Vec<u8>>;
 }
 
-impl<F: Fn(&[u8; NONCE_LEN], &[u8]) -> Vec<u8>> AttestFn for F {
-    fn attest(&self, nonce: &[u8; NONCE_LEN], my_point: &[u8]) -> Vec<u8> {
+impl<F: Fn(&[u8; NONCE_LEN], &[u8]) -> Result<Vec<u8>>> AttestFn for F {
+    fn attest(&self, nonce: &[u8; NONCE_LEN], my_point: &[u8]) -> Result<Vec<u8>> {
         self(nonce, my_point)
     }
 }
@@ -398,7 +400,7 @@ where
         .map_err(|_| eyre!("peer nonce is not {NONCE_LEN} bytes"))?;
 
     // My attestation answers the PEER's nonce and binds MY TLS point.
-    let my_doc = attest_fn.attest(&peer_nonce, my_point);
+    let my_doc = attest_fn.attest(&peer_nonce, my_point)?;
     write_frame(stream, &my_doc).await?;
     let peer_doc = read_frame(stream).await?;
     Ok((peer_nonce, peer_doc))
@@ -892,8 +894,8 @@ mod tests {
             nonce: Some(client_nonce.to_vec()),
             public_key: server_cert.public_point.clone(),
         };
-        let srv_attest = |_n: &[u8; NONCE_LEN], _p: &[u8]| b"srv-doc".to_vec();
-        let cli_attest = |_n: &[u8; NONCE_LEN], _p: &[u8]| b"cli-doc".to_vec();
+        let srv_attest = |_n: &[u8; NONCE_LEN], _p: &[u8]| Ok(b"srv-doc".to_vec());
+        let cli_attest = |_n: &[u8; NONCE_LEN], _p: &[u8]| Ok(b"cli-doc".to_vec());
 
         let own = ImageIdentity {
             pcr0: shared,
@@ -985,8 +987,8 @@ mod tests {
             nonce: Some(client_nonce.to_vec()),
             public_key: server_cert.public_point.clone(),
         };
-        let srv_attest = |_n: &[u8; NONCE_LEN], _p: &[u8]| b"srv-doc".to_vec();
-        let cli_attest = |_n: &[u8; NONCE_LEN], _p: &[u8]| b"cli-doc".to_vec();
+        let srv_attest = |_n: &[u8; NONCE_LEN], _p: &[u8]| Ok(b"srv-doc".to_vec());
+        let cli_attest = |_n: &[u8; NONCE_LEN], _p: &[u8]| Ok(b"cli-doc".to_vec());
 
         let own = ImageIdentity {
             pcr0: shared,
@@ -1126,7 +1128,7 @@ mod tests {
             read_frame(&mut cli_side).await.unwrap()
         });
 
-        let attest = |_n: &[u8; NONCE_LEN], _s: &[u8]| b"server-doc".to_vec();
+        let attest = |_n: &[u8; NONCE_LEN], _s: &[u8]| Ok(b"server-doc".to_vec());
         let own = ImageIdentity {
             pcr0: pcr(0xAA),
             version: 5,
@@ -1159,6 +1161,62 @@ mod tests {
         );
         assert_eq!(
             client_frame.as_slice(),
+            [TAG_DECLINE],
+            "no key may reach the wire"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_wipes_and_declines_when_its_own_attestation_fails() {
+        // A verifier that would otherwise grant: only the failed local attestation
+        // stops the key from reaching the wire.
+        let verifier = FakeVerifier {
+            pcr0: pcr(0xAA),
+            nonce: Some(nonce(0x11).to_vec()),
+            public_key: b"peer-point".to_vec(),
+        };
+        let (mut srv_side, mut cli_side) = duplex(16 * 1024);
+        let wiped = Arc::new(AtomicBool::new(false));
+        let spy = SpyKey {
+            bytes: [9u8; 32],
+            wiped: wiped.clone(),
+        };
+
+        let peer = tokio::spawn(async move {
+            write_frame(&mut cli_side, &nonce(0x55)).await.unwrap();
+            let _server_nonce = read_frame(&mut cli_side).await.unwrap();
+            read_frame(&mut cli_side).await.unwrap()
+        });
+
+        let attest = |_n: &[u8; NONCE_LEN], _s: &[u8]| Err(eyre!("nsm device gone"));
+        let own = ImageIdentity {
+            pcr0: pcr(0xAA),
+            version: 5,
+        };
+        let out = server_exchange(
+            Channel {
+                stream: &mut srv_side,
+                my_nonce: &nonce(0x11),
+                my_point: b"server-point",
+                peer_point: b"peer-point",
+                verifier: &verifier,
+                attest_fn: &attest,
+            },
+            HandoverInputs {
+                own: &own,
+                role: EnclaveRole::Oracle,
+                own_key_is_candidate: false,
+                approvals: &[],
+            },
+            spy,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, ServerExchange::Refused(ExchangeRefusal::Protocol));
+        assert!(wiped.load(Ordering::SeqCst), "own key must be wiped");
+        assert_eq!(
+            peer.await.unwrap().as_slice(),
             [TAG_DECLINE],
             "no key may reach the wire"
         );
@@ -1221,7 +1279,7 @@ mod tests {
             read_frame(&mut cli_side).await.unwrap()
         });
 
-        let attest = |_n: &[u8; NONCE_LEN], _s: &[u8]| b"server-doc".to_vec();
+        let attest = |_n: &[u8; NONCE_LEN], _s: &[u8]| Ok(b"server-doc".to_vec());
         let verifier = NsmPeerVerifier { now_unix_secs: NOW };
         let own = ImageIdentity {
             pcr0: pcr(0xAA),
@@ -1286,7 +1344,7 @@ mod tests {
             nonce: Some(nonce(0x33).to_vec()),
             public_key: b"srv-point".to_vec(),
         };
-        let attest = |_n: &[u8; NONCE_LEN], _s: &[u8]| b"client-doc".to_vec();
+        let attest = |_n: &[u8; NONCE_LEN], _s: &[u8]| Ok(b"client-doc".to_vec());
         let out = client_exchange(
             Channel {
                 stream: &mut cli_side,
@@ -1325,7 +1383,7 @@ mod tests {
             nonce: Some(nonce(0x33).to_vec()),
             public_key: b"attested-other".to_vec(),
         };
-        let attest = |_n: &[u8; NONCE_LEN], _s: &[u8]| b"client-doc".to_vec();
+        let attest = |_n: &[u8; NONCE_LEN], _s: &[u8]| Ok(b"client-doc".to_vec());
         let out = client_exchange(
             Channel {
                 stream: &mut cli_side,
