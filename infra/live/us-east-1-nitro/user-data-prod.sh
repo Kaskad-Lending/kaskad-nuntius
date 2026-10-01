@@ -1,8 +1,9 @@
 #!/bin/bash
 # kaskad-nitro-us prod host bootstrap (launch-template user-data). Host prep +
-# relay plane, then fetch + release-signature-verify + run BOTH keyex enclaves:
-# oracle CID 16 (price + keyex genesis) and pontifex bridge CID 17 (fetches
-# k_bridge from the co-located oracle over the egress -> oracle-ratls path).
+# relay plane, then fetch + release-signature-verify + run the keyex enclaves:
+# oracle CID 16 (price + keyex genesis) always, and pontifex bridge CID 17
+# (fetches k_bridge from the co-located oracle over the egress -> oracle-ratls
+# path) when enable_pontifex is set — the EU region runs oracle-only.
 # The host is untrusted: relay scripts carry no signature (the enclave verifies
 # every peer over RA-TLS, every burn on-chain, every image by attestation); only
 # the EIFs are release-signed. No key sealing — keyex custody is the enclave
@@ -15,8 +16,8 @@ dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel awscli \
   amazon-cloudwatch-agent jq socat python3 openssl
 usermod -aG ne root
 
-# Enclave allocator pool. Sized to cover BOTH enclaves at once (oracle +
-# pontifex), else the second run-enclave has no CPUs/memory left to claim.
+# Enclave allocator pool. Sized by terraform to cover every enclave this host
+# will boot, else the second run-enclave has no CPUs/memory left to claim.
 # The `---` doc-start and memory_mib-first order mirror the live oracle's
 # proven allocator.yaml; without `---` the allocator parses memory_mib as
 # missing and refuses to start.
@@ -183,13 +184,18 @@ EOF
 systemctl enable --now kaskad-egress-connect.service kaskad-egress-vsock.service
 systemctl enable --now kaskad-oracle-ratls.service
 
-fetch_and_verify "oracle${eif_release_suffix}"   oracle
-fetch_and_verify "pontifex${eif_release_suffix}" pontifex
-
 # Oracle first: the bridge's boot fetch of k_bridge needs the oracle's handover
-# server already listening on the local VSOCK.
-run_enclave oracle   16 ${oracle_cpu_count}   ${oracle_memory_mib}
-run_enclave pontifex 17 ${pontifex_cpu_count} ${pontifex_memory_mib}
+# server already listening on the local VSOCK. ENABLE_PONTIFEX=false is the
+# oracle-only host (the EU region, and US before a bridge release exists).
+ENABLE_PONTIFEX=${enable_pontifex}
+
+fetch_and_verify "oracle${eif_release_suffix}" oracle
+run_enclave oracle 16 ${oracle_cpu_count} ${oracle_memory_mib}
+
+if [ "$${ENABLE_PONTIFEX}" = "true" ]; then
+  fetch_and_verify "pontifex${eif_release_suffix}" pontifex
+  run_enclave pontifex 17 ${pontifex_cpu_count} ${pontifex_memory_mib}
+fi
 
 # Refresh public attestations without restarting the enclave or rotating its key.
 systemctl start --no-block kaskad-genesis-capture.service
@@ -198,7 +204,9 @@ systemctl enable --now kaskad-genesis-capture.timer
 # Front-ends last: pull API (8080 -> CID16:5001) and pontifex host (8081 ->
 # bridge VSOCK CID17:5004). Both retry until their enclave answers.
 systemctl enable --now kaskad-pull-api.service
-systemctl enable --now kaskad-pontifex-host.service
+if [ "$${ENABLE_PONTIFEX}" = "true" ]; then
+  systemctl enable --now kaskad-pontifex-host.service
+fi
 
 nitro-cli describe-enclaves | tee "$${KASKAD_DIR}/enclave-status.json"
-echo "=== keyex enclaves running: oracle CID16, pontifex CID17 + relay plane up ==="
+echo "=== keyex enclaves running: oracle CID16, pontifex=$${ENABLE_PONTIFEX} + relay plane up ==="

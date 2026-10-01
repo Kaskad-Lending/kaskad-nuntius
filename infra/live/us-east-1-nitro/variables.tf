@@ -100,6 +100,12 @@ variable "eif_release_suffix" {
   }
 }
 
+variable "enable_pontifex" {
+  description = "Boot the bridge enclave beside the oracle. False = oracle-only host (the EU region, and the US host before the bridge release exists)."
+  type        = bool
+  default     = true
+}
+
 # ─── ALB / DNS ────────────────────────────────────────────────
 
 variable "domain_name" {
