@@ -1,8 +1,9 @@
 //! Trust-critical oracle config, baked at EIF build time (fail-loud), never
 //! host-supplied: which RH KaskadPriceOracle registry the key registers into,
-//! which owners may approve a handover, the approval threshold, the chain the
-//! approval domain binds, this image's version, its optional ancestor PCRs and
-//! sibling oracle peers. No secret is baked — only public addresses/RPCs.
+//! which multisig governs it, which owners may approve a handover, the approval
+//! threshold, the chain the approval domain binds, this image's version, its
+//! optional ancestor PCRs and sibling oracle peers. No secret is baked — only
+//! public addresses/RPCs.
 
 use alloy_primitives::{hex, Address};
 use eyre::{eyre, Result};
@@ -15,9 +16,14 @@ pub struct BakedOracleConfig {
     pub registry: Address,
     /// Robinhood JSON-RPC endpoints (https only), tried in order.
     pub rh_rpcs: Vec<String>,
-    /// Owners whose EIP-712 signatures approve a key handover to a newer image.
+    /// Governing Safe on the same chain. Its live `getOwners()`/`getThreshold()`
+    /// narrow the baked ceiling at approval time, so a leaked owner key is
+    /// revoked by one multisig transaction instead of an image rebuild.
+    pub safe: Address,
+    /// Baked owner ceiling: the approval path accepts only these, and only those
+    /// of them the Safe still lists.
     pub owners: Vec<Address>,
-    /// Approval quorum: distinct owners required.
+    /// Baked quorum floor: the live Safe threshold may raise it, never lower it.
     pub threshold: usize,
     /// Robinhood chain id (46630 testnet / 4663 mainnet) — the approval domain's chainId.
     pub chain_id: u64,
@@ -52,6 +58,7 @@ impl BakedOracleConfig {
                 "KEYEX_ORACLE_REGISTRY",
                 option_env!("KEYEX_ORACLE_REGISTRY"),
             )?,
+            safe: baked_addr_nonzero("KEYEX_ORACLE_SAFE", option_env!("KEYEX_ORACLE_SAFE"))?,
             rh_rpcs: baked_rpcs("KEYEX_ORACLE_RH_RPCS", option_env!("KEYEX_ORACLE_RH_RPCS"))?,
             owners,
             threshold,

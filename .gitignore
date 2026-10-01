@@ -15,3 +15,4 @@ docs/pr-timeline-*.md
 scratchpad/
 __pycache__/
 *.pyc
+.cache/

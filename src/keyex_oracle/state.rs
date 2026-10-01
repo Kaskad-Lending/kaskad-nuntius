@@ -154,6 +154,11 @@ impl OracleKeyexState {
         self.root_key
     }
 
+    /// Presence test that never copies the key — lets callers refuse early.
+    pub fn has_root_key(&self) -> bool {
+        self.root_key.is_some()
+    }
+
     pub fn approvals(&self) -> Vec<VerifiedApproval> {
         self.approvals.clone()
     }
@@ -196,6 +201,9 @@ mod tests {
             version: 1,
             mode: ApprovalMode::Carry,
             label: [0u8; 32],
+            role: keyex::policy::EnclaveRole::Oracle,
+            expiry: 1_900_000_000,
+            nonce: [0u8; 32],
         }
     }
 

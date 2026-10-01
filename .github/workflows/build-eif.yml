@@ -131,7 +131,8 @@ jobs:
       - name: Zip source and upload to S3
         run: |
           set -euo pipefail
-          zip -rq source.zip . -x "*.git*" "target/*" "infra/.terraform/*"
+          zip -rq source.zip . -x "*.git*" "target/*" "infra/.terraform/*" \
+            "*.tfstate" "*.tfstate.*" "*.tfvars" "*.pem" "*.key" ".env*"
           aws s3 cp source.zip "s3://${EIF_BUCKET}/builds/${{ github.sha }}/source.zip"
 
       - name: Build both EIFs via SSM

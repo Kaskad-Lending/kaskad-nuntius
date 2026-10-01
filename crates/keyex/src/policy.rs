@@ -10,11 +10,26 @@
 use crate::approval::{ApprovalMode, ApprovalRequest};
 
 /// Which image is asking. Oracle holds `K_root` and can derive child keys;
-/// bridge holds only a child key and never derives.
+/// bridge holds only a child key and never derives. Discriminants are wire
+/// values bound into the approval digest, so 0 stays unused: a missing field
+/// decodes to 0 and must fail, not alias a role.
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnclaveRole {
-    Oracle,
-    Bridge,
+    Oracle = 1,
+    Bridge = 2,
+}
+
+impl TryFrom<u8> for EnclaveRole {
+    type Error = eyre::Report;
+
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            1 => Ok(EnclaveRole::Oracle),
+            2 => Ok(EnclaveRole::Bridge),
+            other => Err(eyre::eyre!("invalid EnclaveRole: {other}")),
+        }
+    }
 }
 
 /// Every reason a server refuses to hand its key over. Closed set → real enum.
@@ -30,6 +45,8 @@ pub enum HandoffRefusal {
     VersionNotNewer,
     /// This enclave holds only an unregistered genesis candidate key.
     CandidateKeyNoHandoff,
+    /// An approval names this peer but is scoped to the other enclave role.
+    RoleMismatch,
 }
 
 /// The server's decision about its own key.
@@ -60,6 +77,10 @@ pub struct VerifiedApproval {
     pub version: u64,
     pub mode: ApprovalMode,
     pub label: [u8; 32],
+    /// Role the owners scoped this approval to.
+    pub role: EnclaveRole,
+    pub expiry: u64,
+    pub nonce: [u8; 32],
 }
 
 impl VerifiedApproval {
@@ -71,6 +92,9 @@ impl VerifiedApproval {
             version: req.version,
             mode: req.mode,
             label: req.label,
+            role: req.role,
+            expiry: req.expiry,
+            nonce: req.nonce,
         }
     }
 }
@@ -87,6 +111,7 @@ impl VerifiedApproval {
 /// - `peer.pcr0 == own.pcr0` → OwnKey;
 /// - CARRY approval for peer.pcr0 with `version > own` → OwnKey; not newer → VersionNotNewer;
 /// - CHILD approval for peer.pcr0 → Child(label) if Oracle, else ChildRequestedByBridge;
+/// - an approval scoped to the other role → RoleMismatch;
 /// - FRESH → FreshNeverHandsOff; otherwise PcrMismatchNoApproval.
 pub fn decide_handover(
     own: &ImageIdentity,
@@ -109,8 +134,15 @@ pub fn decide_handover(
     // Different image: only an owner approval naming this peer.pcr0 authorizes it.
     let mut saw_carry_not_newer = false;
     let mut saw_fresh = false;
+    let mut saw_role_mismatch = false;
     for a in approvals {
         if &a.pcr0 != peer_pcr0 {
+            continue;
+        }
+        // An approval is scoped to one role. A CARRY minted for the bridge must
+        // not reach the oracle, where it would hand over K_root instead of a child.
+        if a.role != role {
+            saw_role_mismatch = true;
             continue;
         }
         match a.mode {
@@ -134,9 +166,13 @@ pub fn decide_handover(
         }
     }
 
-    // Most specific refusal first: rollback beats a bare FRESH beats no approval.
+    // Most specific refusal first: rollback beats a wrong role beats a bare
+    // FRESH beats no approval.
     if saw_carry_not_newer {
         return KeyDecision::Refuse(HandoffRefusal::VersionNotNewer);
+    }
+    if saw_role_mismatch {
+        return KeyDecision::Refuse(HandoffRefusal::RoleMismatch);
     }
     if saw_fresh {
         return KeyDecision::Refuse(HandoffRefusal::FreshNeverHandsOff);
@@ -254,8 +290,17 @@ mod tests {
         }
     }
 
-    fn appr(pcr0: [u8; 48], version: u64, mode: ApprovalMode, label: [u8; 32]) -> VerifiedApproval {
+    fn appr(
+        role: EnclaveRole,
+        pcr0: [u8; 48],
+        version: u64,
+        mode: ApprovalMode,
+        label: [u8; 32],
+    ) -> VerifiedApproval {
         VerifiedApproval {
+            role,
+            expiry: 1_900_000_000,
+            nonce: [0u8; 32],
             pcr0,
             version,
             mode,
@@ -284,15 +329,13 @@ mod tests {
         // CARRY (peer.pcr0, version > own) → OwnKey (image upgrade).
         let me = own(5);
         let peer = pcr(0xBB);
-        let a = appr(peer, 6, ApprovalMode::Carry, [0u8; 32]);
-        assert_eq!(
-            decide_handover(&me, EnclaveRole::Oracle, &peer, false, &[a]),
-            KeyDecision::OwnKey
-        );
-        assert_eq!(
-            decide_handover(&me, EnclaveRole::Bridge, &peer, false, &[a]),
-            KeyDecision::OwnKey
-        );
+        for role in [EnclaveRole::Oracle, EnclaveRole::Bridge] {
+            let a = appr(role, peer, 6, ApprovalMode::Carry, [0u8; 32]);
+            assert_eq!(
+                decide_handover(&me, role, &peer, false, &[a]),
+                KeyDecision::OwnKey
+            );
+        }
     }
 
     #[test]
@@ -302,8 +345,8 @@ mod tests {
         let me = own(5);
         let peer = pcr(0xBB);
         for ver in [5u64, 4, 0] {
-            let a = appr(peer, ver, ApprovalMode::Carry, [0u8; 32]);
             for role in [EnclaveRole::Oracle, EnclaveRole::Bridge] {
+                let a = appr(role, peer, ver, ApprovalMode::Carry, [0u8; 32]);
                 assert_eq!(
                     decide_handover(&me, role, &peer, false, &[a]),
                     KeyDecision::Refuse(HandoffRefusal::VersionNotNewer),
@@ -319,13 +362,36 @@ mod tests {
         let me = own(5);
         let peer = pcr(0xCC);
         let label = v1_label();
-        let a = appr(peer, 5, ApprovalMode::Child, label);
         assert_eq!(
-            decide_handover(&me, EnclaveRole::Oracle, &peer, false, &[a]),
+            decide_handover(
+                &me,
+                EnclaveRole::Oracle,
+                &peer,
+                false,
+                &[appr(
+                    EnclaveRole::Oracle,
+                    peer,
+                    5,
+                    ApprovalMode::Child,
+                    label
+                )]
+            ),
             KeyDecision::Child(label)
         );
         assert_eq!(
-            decide_handover(&me, EnclaveRole::Bridge, &peer, false, &[a]),
+            decide_handover(
+                &me,
+                EnclaveRole::Bridge,
+                &peer,
+                false,
+                &[appr(
+                    EnclaveRole::Bridge,
+                    peer,
+                    5,
+                    ApprovalMode::Child,
+                    label
+                )]
+            ),
             KeyDecision::Refuse(HandoffRefusal::ChildRequestedByBridge)
         );
     }
@@ -335,8 +401,8 @@ mod tests {
         // FRESH approvals never hand a live key over.
         let me = own(5);
         let peer = pcr(0xDD);
-        let a = appr(peer, 9, ApprovalMode::Fresh, [0u8; 32]);
         for role in [EnclaveRole::Oracle, EnclaveRole::Bridge] {
+            let a = appr(role, peer, 9, ApprovalMode::Fresh, [0u8; 32]);
             assert_eq!(
                 decide_handover(&me, role, &peer, false, &[a]),
                 KeyDecision::Refuse(HandoffRefusal::FreshNeverHandsOff)
@@ -345,12 +411,88 @@ mod tests {
     }
 
     #[test]
+    fn approval_scoped_to_other_role_is_refused() {
+        // A CARRY minted for the bridge must not hand the oracle's root over,
+        // and vice versa. Scope is per-approval, not per-channel.
+        let me = own(5);
+        let peer = pcr(0xBB);
+        for (signed_for, presented_to) in [
+            (EnclaveRole::Bridge, EnclaveRole::Oracle),
+            (EnclaveRole::Oracle, EnclaveRole::Bridge),
+        ] {
+            let a = appr(signed_for, peer, 6, ApprovalMode::Carry, [0u8; 32]);
+            assert_eq!(
+                decide_handover(&me, presented_to, &peer, false, &[a]),
+                KeyDecision::Refuse(HandoffRefusal::RoleMismatch),
+                "{signed_for:?} approval must not act on {presented_to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn child_scoped_to_other_role_derives_nothing() {
+        // The role gate runs before the mode switch, so a bridge-scoped CHILD
+        // cannot reach the oracle's derivation path.
+        let me = own(5);
+        let peer = pcr(0xCC);
+        let a = appr(
+            EnclaveRole::Bridge,
+            peer,
+            5,
+            ApprovalMode::Child,
+            v1_label(),
+        );
+        assert_eq!(
+            decide_handover(&me, EnclaveRole::Oracle, &peer, false, &[a]),
+            KeyDecision::Refuse(HandoffRefusal::RoleMismatch)
+        );
+    }
+
+    #[test]
+    fn rollback_refusal_outranks_role_mismatch() {
+        // Two flawed approvals at once: the anti-rollback refusal is reported,
+        // so a stale-version attempt is never masked by a role complaint.
+        let me = own(5);
+        let peer = pcr(0xBB);
+        let stale = appr(EnclaveRole::Oracle, peer, 5, ApprovalMode::Carry, [0u8; 32]);
+        let wrong_role = appr(EnclaveRole::Bridge, peer, 6, ApprovalMode::Carry, [0u8; 32]);
+        assert_eq!(
+            decide_handover(&me, EnclaveRole::Oracle, &peer, false, &[stale, wrong_role]),
+            KeyDecision::Refuse(HandoffRefusal::VersionNotNewer)
+        );
+    }
+
+    #[test]
+    fn role_mismatch_outranks_bare_fresh() {
+        let me = own(5);
+        let peer = pcr(0xBB);
+        let fresh = appr(EnclaveRole::Oracle, peer, 9, ApprovalMode::Fresh, [0u8; 32]);
+        let wrong_role = appr(EnclaveRole::Bridge, peer, 6, ApprovalMode::Carry, [0u8; 32]);
+        assert_eq!(
+            decide_handover(&me, EnclaveRole::Oracle, &peer, false, &[fresh, wrong_role]),
+            KeyDecision::Refuse(HandoffRefusal::RoleMismatch)
+        );
+    }
+
+    #[test]
     fn candidate_key_handed_to_nobody() {
         // A candidate (genesis) key is handed to nobody — overrides same-PCR0,
         // CARRY, and CHILD alike.
         let me = own(5);
-        let carry = appr(pcr(0xBB), 6, ApprovalMode::Carry, [0u8; 32]);
-        let child = appr(pcr(0xCC), 5, ApprovalMode::Child, v1_label());
+        let carry = appr(
+            EnclaveRole::Oracle,
+            pcr(0xBB),
+            6,
+            ApprovalMode::Carry,
+            [0u8; 32],
+        );
+        let child = appr(
+            EnclaveRole::Oracle,
+            pcr(0xCC),
+            5,
+            ApprovalMode::Child,
+            v1_label(),
+        );
         // same-pcr0 peer
         assert_eq!(
             decide_handover(&me, EnclaveRole::Oracle, &me.pcr0, true, &[]),
@@ -382,7 +524,13 @@ mod tests {
         // A valid CARRY for a different image does not authorize this peer.
         let me = own(5);
         let peer = pcr(0xEE);
-        let a = appr(pcr(0xBB), 6, ApprovalMode::Carry, [0u8; 32]);
+        let a = appr(
+            EnclaveRole::Oracle,
+            pcr(0xBB),
+            6,
+            ApprovalMode::Carry,
+            [0u8; 32],
+        );
         assert_eq!(
             decide_handover(&me, EnclaveRole::Oracle, &peer, false, &[a]),
             KeyDecision::Refuse(HandoffRefusal::PcrMismatchNoApproval)
@@ -511,10 +659,13 @@ mod tests {
             version: 6,
             mode: ApprovalMode::Carry,
             label: [0u8; 32],
+            role: EnclaveRole::Oracle,
+            expiry: 1_900_000_000,
+            nonce: [0u8; 32],
             chain_id: 46630,
         };
         let sigs = vec![sign(&o1, &req), sign(&o2, &req), sign(&o3, &req)];
-        verify_approvals(&req, &sigs, &owners, 3).expect("quorum verifies");
+        verify_approvals(&req, &sigs, &owners, 3, 1_800_000_000).expect("quorum verifies");
         let va = VerifiedApproval::from_request(&req);
         assert_eq!(
             decide_handover(&me, EnclaveRole::Oracle, &peer, false, &[va]),

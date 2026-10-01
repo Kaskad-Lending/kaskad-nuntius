@@ -72,6 +72,13 @@ impl Nsm {
         }
     }
 
+    /// Wall-clock seconds taken from a fresh attestation document. The NSM
+    /// stamps the timestamp, so it does not depend on the host clock.
+    pub fn now_unix_secs(&self) -> Result<u64> {
+        let doc = self.attestation(None, None, None)?;
+        Ok(crate::attest::parse_attestation_doc(&doc)?.timestamp / 1000)
+    }
+
     /// Read one PCR slot.
     pub fn describe_pcr(&self, index: u16) -> Result<PcrDescription> {
         match nsm_process_request(self.fd, Request::DescribePCR { index }) {

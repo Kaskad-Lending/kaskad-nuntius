@@ -1,8 +1,8 @@
 //! Keyex control channel (VSOCK/TCP port 5005), blocking, mirroring the bridge
 //! serve loop. It serves the operator during boot: attest the genesis candidate
 //! (so it can be registered on-chain), accept owner-signed handover approvals,
-//! confirm the baked registry, and report health. All handlers are synchronous —
-//! there is no chain I/O on this path.
+//! confirm the baked registry, and report health. Handlers are synchronous; the
+//! approval path does one blocking multisig read through the [`LiveQuorum`] seam.
 
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::{AsRawFd, FromRawFd};
@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use alloy_primitives::Address;
 use eyre::Result;
 use keyex::api::{Ack, ApprovalResult, Attestation, KeyexHealth as HealthReply, OracleRequest};
-use keyex::approval::{verify_approvals, ApprovalMode, ApprovalRequest};
-use keyex::policy::VerifiedApproval;
+use keyex::approval::{effective_quorum, verify_approvals, ApprovalMode, ApprovalRequest};
+use keyex::policy::{approval_version_matches_new_image, EnclaveRole, VerifiedApproval};
 use nitro_common::nsm::Nsm;
 use nitro_common::vsock::{read_frame_deadline, write_frame, MAX_FRAME};
 use serde_json::Value;
@@ -37,13 +37,23 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 const DOMAIN_NAME: &str = "Kaskad Keyex";
 const DOMAIN_VERSION: &str = "1";
 
+/// The governing multisig's live owner set and threshold, read fresh on every
+/// approval. Synchronous because the control handler runs on a blocking thread,
+/// and a cached snapshot would keep a revoked owner alive for its lifetime.
+pub trait LiveQuorum: Send + Sync {
+    fn read(&self) -> Result<(Vec<Address>, usize), String>;
+}
+
 /// Everything a control handler needs, shared read-only across connections.
 pub struct ControlCtx {
     pub state: Arc<Mutex<OracleKeyexState>>,
     pub pcr0: [u8; 48],
     pub version: u64,
+    /// Baked owner ceiling; the live multisig read can only narrow it.
     pub owners: Vec<Address>,
+    /// Baked quorum floor; the live multisig read can only raise it.
     pub threshold: usize,
+    pub quorum: Arc<dyn LiveQuorum>,
     pub chain_id: u64,
     pub registry: Address,
 }
@@ -170,25 +180,13 @@ fn handle_oracle_request(req: OracleRequest, ctx: &ControlCtx) -> Vec<u8> {
             typed_data,
             signatures,
         } => {
-            match process_approval(
-                &typed_data,
-                &signatures,
-                ctx.chain_id,
-                &ctx.owners,
-                ctx.threshold,
-            ) {
-                Ok(va) => {
-                    if let Ok(mut st) = ctx.state.lock() {
-                        st.add_approval(va);
-                    }
-                    encode(&ApprovalResult {
-                        accepted: true,
-                        reason: None,
-                    })
-                }
-                Err(reason) => encode(&ApprovalResult {
+            // Expiry is checked against the NSM-signed clock, never the host's.
+            // No clock → no approval.
+            match Nsm::new().and_then(|n| n.now_unix_secs()) {
+                Ok(now) => approval_reply(ctx, &typed_data, &signatures, now),
+                Err(_) => encode(&ApprovalResult {
                     accepted: false,
-                    reason: Some(reason),
+                    reason: Some("nsm_clock_unavailable".into()),
                 }),
             }
         }
@@ -239,6 +237,60 @@ fn health_reply(ctx: &ControlCtx) -> Vec<u8> {
     })
 }
 
+/// Verify one approval against the live quorum and record it. `now` is the
+/// NSM-signed clock, passed in so the whole decision is testable off-enclave.
+fn approval_reply(
+    ctx: &ControlCtx,
+    typed_data: &Value,
+    signatures: &[String],
+    now: u64,
+) -> Vec<u8> {
+    let (owners, threshold) = match resolve_quorum(ctx) {
+        Ok(v) => v,
+        Err(reason) => {
+            return encode(&ApprovalResult {
+                accepted: false,
+                reason: Some(reason),
+            })
+        }
+    };
+    match process_approval(
+        typed_data,
+        signatures,
+        ctx.chain_id,
+        &owners,
+        threshold,
+        now,
+        &ctx.pcr0,
+        ctx.version,
+    ) {
+        Ok(va) => {
+            if let Ok(mut st) = ctx.state.lock() {
+                st.add_approval(va);
+            }
+            encode(&ApprovalResult {
+                accepted: true,
+                reason: None,
+            })
+        }
+        Err(reason) => encode(&ApprovalResult {
+            accepted: false,
+            reason: Some(reason),
+        }),
+    }
+}
+
+/// Narrow the baked owner ceiling by the multisig's live state.
+///
+/// A failed read is a refusal, never a fallback to the ceiling: the whole point
+/// of the read is that revoking a leaked owner key must take effect without an
+/// image rebuild, and an RPC that can suppress it would undo that.
+fn resolve_quorum(ctx: &ControlCtx) -> std::result::Result<(Vec<Address>, usize), String> {
+    let (live_owners, live_threshold) = ctx.quorum.read()?;
+    effective_quorum(&ctx.owners, ctx.threshold, &live_owners, live_threshold)
+        .map_err(|e| e.to_string())
+}
+
 /// Parse an EIP-712 typedData approval into an [`ApprovalRequest`], cross-checking
 /// the domain against the baked name/version/chain. Pure — the KAT test binds it
 /// to the on-chain KskdEntry digest.
@@ -263,25 +315,46 @@ fn parse_approval_request(td: &Value, expected_chain_id: u64) -> Result<Approval
     let mode =
         ApprovalMode::try_from(mode_u8).map_err(|_| format!("invalid approval mode {mode_u8}"))?;
     let label = parse_hex_bytes::<32>(msg.get("label"))?;
+    let role_u8 = parse_u8_flexible(msg.get("role"))?;
+    let role =
+        EnclaveRole::try_from(role_u8).map_err(|_| format!("invalid approval role {role_u8}"))?;
+    let expiry = parse_u64_flexible(msg.get("expiry"))?;
+    let nonce = parse_hex_bytes::<32>(msg.get("nonce"))?;
     Ok(ApprovalRequest {
         pcr0,
         version,
         mode,
         label,
+        role,
+        expiry,
+        nonce,
         chain_id: expected_chain_id,
     })
 }
 
 /// Verify an approval message reached owner quorum. Malformed signatures are
 /// dropped (not fatal); [`verify_approvals`] enforces distinct-owner threshold.
+#[allow(clippy::too_many_arguments)]
 fn process_approval(
     td: &Value,
     sigs_hex: &[String],
     expected_chain_id: u64,
     owners: &[Address],
     threshold: usize,
+    now_unix_secs: u64,
+    own_pcr0: &[u8; 48],
+    own_version: u64,
 ) -> Result<VerifiedApproval, String> {
     let req = parse_approval_request(td, expected_chain_id)?;
+    // An approval naming OUR PCR0 states a version for it; PCR0 is a function of
+    // the whole image, so a disagreement means the owners signed for a different
+    // build than the one running. Refuse rather than act on the mismatch.
+    if &req.pcr0 == own_pcr0 && !approval_version_matches_new_image(req.version, own_version) {
+        return Err(format!(
+            "approval names own pcr0 at version {} but this image is version {}",
+            req.version, own_version
+        ));
+    }
     let mut sigs: Vec<[u8; 65]> = Vec::with_capacity(sigs_hex.len());
     for s in sigs_hex {
         let t = s.trim();
@@ -292,7 +365,7 @@ fn process_approval(
             }
         }
     }
-    verify_approvals(&req, &sigs, owners, threshold).map_err(|e| e.to_string())?;
+    verify_approvals(&req, &sigs, owners, threshold, now_unix_secs).map_err(|e| e.to_string())?;
     Ok(VerifiedApproval::from_request(&req))
 }
 
@@ -361,6 +434,17 @@ mod tests {
         p
     }
 
+    /// Test clock, inside the canonical vector's expiry window.
+    const NOW: u64 = 1_800_000_000;
+
+    fn canonical_nonce() -> [u8; 32] {
+        let mut n = [0u8; 32];
+        for (i, b) in n.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        n
+    }
+
     fn canonical_typed_data() -> Value {
         serde_json::json!({
             "domain": {"name": "Kaskad Keyex", "version": "1", "chainId": 46630},
@@ -369,6 +453,9 @@ mod tests {
                 "version": "1",
                 "mode": 1,
                 "label": format!("0x{}", hex::encode(v1_label())),
+                "role": 1,
+                "expiry": "1900000000",
+                "nonce": format!("0x{}", hex::encode(canonical_nonce())),
             }
         })
     }
@@ -380,10 +467,13 @@ mod tests {
         assert_eq!(req.version, 1);
         assert_eq!(req.mode, ApprovalMode::Carry);
         assert_eq!(req.label, v1_label());
+        assert_eq!(req.role, EnclaveRole::Oracle);
+        assert_eq!(req.expiry, 1_900_000_000);
+        assert_eq!(req.nonce, canonical_nonce());
         let digest = approval_digest(&req);
         assert_eq!(
             hex::encode(digest.as_slice()),
-            "cb8a371abea52badb34086be1ed4d34b1af468a4804f61754fb89188c441a7fc"
+            "9f1dbb456fb885648a5ce9918aae3ac642af66ca82f85b505903f674f98773f4"
         );
     }
 
@@ -427,23 +517,171 @@ mod tests {
         let sigs = vec![hex::encode(s1), format!("0x{}", hex::encode(s2))];
         let owners = vec![o1, o2];
 
-        assert!(process_approval(&td, &sigs, 46630, &owners, 2).is_ok());
+        // own pcr0 differs from the approved one: a plain third-party approval.
+        let own = [0x42u8; 48];
+        assert!(process_approval(&td, &sigs, 46630, &owners, 2, NOW, &own, 1).is_ok());
         // Threshold above the distinct-owner count must fail.
-        assert!(process_approval(&td, &sigs, 46630, &owners, 3).is_err());
+        assert!(process_approval(&td, &sigs, 46630, &owners, 3, NOW, &own, 1).is_err());
         // A single signature cannot meet a threshold of 2.
-        assert!(process_approval(&td, &sigs[..1], 46630, &owners, 2).is_err());
+        assert!(process_approval(&td, &sigs[..1], 46630, &owners, 2, NOW, &own, 1).is_err());
+        // Past the expiry the same quorum is dead.
+        assert!(process_approval(&td, &sigs, 46630, &owners, 2, 1_900_000_000, &own, 1).is_err());
+        // An approval naming OUR pcr0 must agree with OUR version.
+        let mine = canonical_pcr0();
+        assert!(process_approval(&td, &sigs, 46630, &owners, 2, NOW, &mine, 1).is_ok());
+        assert!(process_approval(&td, &sigs, 46630, &owners, 2, NOW, &mine, 2).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_unknown_role_and_missing_fields() {
+        let mut td = canonical_typed_data();
+        td["message"]["role"] = Value::from(3);
+        assert!(parse_approval_request(&td, 46630).is_err());
+
+        for field in ["role", "expiry", "nonce"] {
+            let mut td = canonical_typed_data();
+            td["message"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field)
+                .unwrap();
+            assert!(
+                parse_approval_request(&td, 46630).is_err(),
+                "missing {field} must be refused"
+            );
+        }
+    }
+
+    /// Canned multisig read: a live owner set and threshold, or a refusal.
+    struct FakeQuorum(std::result::Result<(Vec<Address>, usize), String>);
+
+    impl LiveQuorum for FakeQuorum {
+        fn read(&self) -> std::result::Result<(Vec<Address>, usize), String> {
+            self.0.clone()
+        }
     }
 
     fn test_context() -> ControlCtx {
+        context_with(
+            vec![Address::from([0x11; 20])],
+            1,
+            Ok((vec![Address::from([0x11; 20])], 1)),
+        )
+    }
+
+    fn context_with(
+        owners: Vec<Address>,
+        threshold: usize,
+        live: std::result::Result<(Vec<Address>, usize), String>,
+    ) -> ControlCtx {
         ControlCtx {
             state: Arc::new(Mutex::new(OracleKeyexState::new())),
             pcr0: [0x42; 48],
             version: 1,
-            owners: vec![Address::from([0x11; 20])],
-            threshold: 1,
+            owners,
+            threshold,
+            quorum: Arc::new(FakeQuorum(live)),
             chain_id: 46630,
             registry: Address::from([0x22; 20]),
         }
+    }
+
+    #[test]
+    fn quorum_drops_an_owner_the_multisig_revoked() {
+        let (a, b) = (Address::from([1u8; 20]), Address::from([2u8; 20]));
+        // Safe removed `b`: one survivor cannot meet the baked floor of 2.
+        let ctx = context_with(vec![a, b], 2, Ok((vec![a], 1)));
+        assert!(resolve_quorum(&ctx).is_err());
+        // With the floor at 1 the survivor still approves alone.
+        let ctx = context_with(vec![a, b], 1, Ok((vec![a], 1)));
+        assert_eq!(resolve_quorum(&ctx).unwrap(), (vec![a], 1));
+    }
+
+    #[test]
+    fn quorum_ignores_an_owner_the_rpc_invents() {
+        let (a, evil) = (Address::from([1u8; 20]), Address::from([0xee; 20]));
+        let ctx = context_with(vec![a], 1, Ok((vec![a, evil], 1)));
+        assert_eq!(resolve_quorum(&ctx).unwrap(), (vec![a], 1));
+    }
+
+    #[test]
+    fn quorum_takes_the_multisig_threshold_when_it_is_stricter() {
+        let (a, b) = (Address::from([1u8; 20]), Address::from([2u8; 20]));
+        let ctx = context_with(vec![a, b], 1, Ok((vec![a, b], 2)));
+        assert_eq!(resolve_quorum(&ctx).unwrap().1, 2);
+        // ...and never the looser one.
+        let ctx = context_with(vec![a, b], 2, Ok((vec![a, b], 1)));
+        assert_eq!(resolve_quorum(&ctx).unwrap().1, 2);
+    }
+
+    /// Sign the canonical approval with a fixed key, returning (address, sig-hex).
+    fn owner_sig(byte: u8) -> (Address, String) {
+        let k = SigningKey::from_bytes((&[byte; 32]).into()).unwrap();
+        let td = canonical_typed_data();
+        let digest = approval_digest(&parse_approval_request(&td, 46630).unwrap());
+        let sig = keyex::sig::sign_recoverable(&k, &digest).unwrap();
+        (
+            keyex::sig::address_from_key(k.verifying_key()),
+            hex::encode(sig),
+        )
+    }
+
+    fn accepted(reply: &[u8]) -> bool {
+        serde_json::from_slice::<ApprovalResult>(reply)
+            .unwrap()
+            .accepted
+    }
+
+    #[test]
+    fn approval_holds_only_while_the_multisig_still_lists_the_owners() {
+        let (a, sa) = owner_sig(1);
+        let (b, sb) = owner_sig(2);
+        let td = canonical_typed_data();
+        let sigs = vec![sa, sb];
+
+        let ctx = context_with(vec![a, b], 2, Ok((vec![a, b], 2)));
+        assert!(accepted(&approval_reply(&ctx, &td, &sigs, NOW)));
+        assert_eq!(ctx.state.lock().unwrap().approvals().len(), 1);
+
+        // The Safe removed `b`: the same file no longer meets the quorum.
+        let ctx = context_with(vec![a, b], 2, Ok((vec![a], 1)));
+        assert!(!accepted(&approval_reply(&ctx, &td, &sigs, NOW)));
+        assert!(ctx.state.lock().unwrap().approvals().is_empty());
+    }
+
+    #[test]
+    fn approval_counts_the_narrowed_owner_set_not_the_baked_one() {
+        let (a, sa) = owner_sig(1);
+        let (b, _) = owner_sig(2);
+        let td = canonical_typed_data();
+
+        // `a` alone clears the baked floor, but the Safe no longer lists `a`.
+        let ctx = context_with(vec![a, b], 1, Ok((vec![b], 1)));
+        assert!(!accepted(&approval_reply(
+            &ctx,
+            &td,
+            std::slice::from_ref(&sa),
+            NOW
+        )));
+        // Still listed → the same signature is accepted.
+        let ctx = context_with(vec![a, b], 1, Ok((vec![a], 1)));
+        assert!(accepted(&approval_reply(&ctx, &td, &[sa], NOW)));
+    }
+
+    #[test]
+    fn approval_is_refused_when_the_multisig_read_fails() {
+        let (a, sa) = owner_sig(1);
+        let td = canonical_typed_data();
+        let ctx = context_with(vec![a], 1, Err("multisig read failed: Rpc".into()));
+        assert!(!accepted(&approval_reply(&ctx, &td, &[sa], NOW)));
+        assert!(ctx.state.lock().unwrap().approvals().is_empty());
+    }
+
+    #[test]
+    fn a_failed_multisig_read_refuses_instead_of_falling_back() {
+        let a = Address::from([1u8; 20]);
+        let ctx = context_with(vec![a], 1, Err("multisig read failed: Rpc".into()));
+        assert!(resolve_quorum(&ctx).is_err());
     }
 
     fn configure(ctx: &ControlCtx, peers: Vec<String>) {

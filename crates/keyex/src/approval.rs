@@ -7,6 +7,7 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{sol, Eip712Domain, SolStruct};
 use eyre::{bail, Result};
 
+use crate::policy::EnclaveRole;
 use crate::sig::recover;
 
 sol! {
@@ -15,6 +16,9 @@ sol! {
         uint64 version;
         uint8 mode;
         bytes32 label;
+        uint8 role;
+        uint64 expiry;
+        bytes32 nonce;
     }
 }
 
@@ -41,13 +45,22 @@ impl TryFrom<u8> for ApprovalMode {
 }
 
 /// The image transition an owner quorum is approving: which PCR0, at which
-/// version, in which mode, for which label, on which chain.
+/// version, in which mode, for which label, for which enclave role, until when,
+/// under which nonce, on which chain.
 #[derive(Clone, Copy, Debug)]
 pub struct ApprovalRequest {
     pub pcr0: [u8; 48],
     pub version: u64,
     pub mode: ApprovalMode,
     pub label: [u8; 32],
+    /// Role this approval is scoped to; policy refuses a role it does not match.
+    pub role: EnclaveRole,
+    /// Unix seconds after which the approval is dead, checked against the
+    /// NSM-signed clock. Bounds replay of an approval the host keeps re-pushing.
+    pub expiry: u64,
+    /// Distinguishes two approvals that are otherwise identical, so one can be
+    /// named for revocation. NOT single-use: the enclave holds no durable state.
+    pub nonce: [u8; 32],
     pub chain_id: u64,
 }
 
@@ -70,18 +83,80 @@ pub fn approval_digest(req: &ApprovalRequest) -> B256 {
         version: req.version,
         mode: req.mode as u8,
         label: B256::from(req.label),
+        role: req.role as u8,
+        expiry: req.expiry,
+        nonce: B256::from(req.nonce),
     };
     approval.eip712_signing_hash(&domain(req.chain_id))
 }
 
-/// Verify an owner quorum signed the Approval digest. Duplicate owner sigs count once;
-/// non-owner sigs are ignored. Ok iff distinct owners ≥ threshold.
+/// Intersect the baked owner ceiling with the multisig's live owner set and take
+/// the stricter of the two thresholds.
+///
+/// The live values arrive over an RPC the untrusted host proxies, so the rule is
+/// one-directional: that RPC can only shrink the owner set or raise the quorum,
+/// never add an owner or lower the bar. This is what lets a leaked owner key be
+/// revoked by one Safe transaction — no EIF rebuild, no redeploy — while a lying
+/// RPC buys the attacker nothing but denial of service.
+///
+/// Errors when the live read is degenerate (zero threshold, empty intersection)
+/// or when the surviving owners cannot meet the surviving quorum: an
+/// unsatisfiable quorum is a refusal, never a silently relaxed one.
+pub fn effective_quorum(
+    baked_owners: &[Address],
+    baked_threshold: usize,
+    live_owners: &[Address],
+    live_threshold: usize,
+) -> Result<(Vec<Address>, usize)> {
+    if baked_threshold == 0 {
+        bail!("baked threshold is zero");
+    }
+    if live_threshold == 0 {
+        bail!("multisig reported threshold 0 — refusing to trust the read");
+    }
+    let mut owners: Vec<Address> = Vec::new();
+    for o in baked_owners {
+        if live_owners.contains(o) && !owners.contains(o) {
+            owners.push(*o);
+        }
+    }
+    if owners.is_empty() {
+        bail!("no baked owner is still an owner of the multisig");
+    }
+    let threshold = baked_threshold.max(live_threshold);
+    if owners.len() < threshold {
+        bail!(
+            "quorum unsatisfiable: {} surviving owners < threshold {}",
+            owners.len(),
+            threshold
+        );
+    }
+    Ok((owners, threshold))
+}
+
+/// Verify an owner quorum signed the Approval digest and that it has not expired.
+/// Duplicate owner sigs count once; non-owner sigs are ignored. Ok iff distinct
+/// owners ≥ threshold. `now_unix_secs` MUST come from the NSM-signed attestation
+/// clock ([`nitro_common::nsm::Nsm::now_unix_secs`]), never the host.
 pub fn verify_approvals(
     req: &ApprovalRequest,
     sigs: &[[u8; 65]],
     owners: &[Address],
     threshold: usize,
+    now_unix_secs: u64,
 ) -> Result<()> {
+    // Expiry first: cheapest gate, and it bounds the host's replay of every
+    // approval object it keeps in S3.
+    if req.expiry == 0 {
+        bail!("approval has no expiry");
+    }
+    if now_unix_secs >= req.expiry {
+        bail!(
+            "approval expired: now {} >= expiry {}",
+            now_unix_secs,
+            req.expiry
+        );
+    }
     // Fail closed on a degenerate quorum config: 0 would authorize with no
     // sigs; a threshold above the owner count can never be met.
     if threshold == 0 {
@@ -140,6 +215,18 @@ mod tests {
         p
     }
 
+    fn canonical_nonce() -> [u8; 32] {
+        let mut n = [0u8; 32];
+        for (i, b) in n.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        n
+    }
+
+    /// Test clock, and an expiry comfortably past it.
+    const NOW: u64 = 1_800_000_000;
+    const FAR: u64 = 1_900_000_000;
+
     fn req(
         pcr0: [u8; 48],
         version: u64,
@@ -152,6 +239,9 @@ mod tests {
             version,
             mode,
             label,
+            role: EnclaveRole::Oracle,
+            expiry: FAR,
+            nonce: [0u8; 32],
             chain_id,
         }
     }
@@ -185,25 +275,144 @@ mod tests {
         )
     }
 
+    /// The canonical cross-implementation vector: pcr0 = [0..48), version 1,
+    /// mode Carry, label keccak256("kaskad/pontifex/v1"), role Oracle,
+    /// expiry 1_900_000_000, nonce = [0..32), chain 46630.
+    fn canonical_request() -> ApprovalRequest {
+        ApprovalRequest {
+            pcr0: canonical_pcr0(),
+            version: 1,
+            mode: ApprovalMode::Carry,
+            label: v1_label(),
+            role: EnclaveRole::Oracle,
+            expiry: FAR,
+            nonce: canonical_nonce(),
+            chain_id: 46630,
+        }
+    }
+
     #[test]
     fn parity_with_forge() {
         // Expected digest printed by
         // kaskad-oracle-contracts/script/KeyexApprovalDigest.s.sol for the canonical vector.
         let expected =
-            hex::decode("cb8a371abea52badb34086be1ed4d34b1af468a4804f61754fb89188c441a7fc")
+            hex::decode("9f1dbb456fb885648a5ce9918aae3ac642af66ca82f85b505903f674f98773f4")
                 .unwrap();
-        let got = approval_digest(&req(
-            canonical_pcr0(),
-            1,
-            ApprovalMode::Carry,
-            v1_label(),
-            46630,
-        ));
+        let got = approval_digest(&canonical_request());
         assert_eq!(
             got.as_slice(),
             expected.as_slice(),
             "Rust↔Solidity EIP-712 parity"
         );
+    }
+
+    #[test]
+    fn expiry_zero_is_refused() {
+        // No expiry means an approval the host can replay forever.
+        let (o1, o2, o3) = (key(1), key(2), key(3));
+        let owners = vec![addr(&o1), addr(&o2), addr(&o3)];
+        let mut r = canonical_request();
+        r.expiry = 0;
+        let sigs = vec![
+            sign(&o1, &approval_digest(&r)),
+            sign(&o2, &approval_digest(&r)),
+        ];
+        assert!(verify_approvals(&r, &sigs, &owners, 2, NOW).is_err());
+    }
+
+    #[test]
+    fn expiry_boundary_is_exclusive() {
+        // Valid at expiry-1, dead at expiry — the clock is the NSM-signed one.
+        let (o1, o2, o3) = (key(1), key(2), key(3));
+        let owners = vec![addr(&o1), addr(&o2), addr(&o3)];
+        let r = canonical_request();
+        let sigs = vec![
+            sign(&o1, &approval_digest(&r)),
+            sign(&o2, &approval_digest(&r)),
+        ];
+        assert!(verify_approvals(&r, &sigs, &owners, 2, r.expiry - 1).is_ok());
+        assert!(verify_approvals(&r, &sigs, &owners, 2, r.expiry).is_err());
+        assert!(verify_approvals(&r, &sigs, &owners, 2, r.expiry + 1).is_err());
+    }
+
+    #[test]
+    fn role_expiry_and_nonce_are_signed() {
+        // Each new field is inside the digest, so a signature minted for one
+        // value does not verify under another.
+        let (o1, o2) = (key(1), key(2));
+        let owners = vec![addr(&o1), addr(&o2)];
+        let base = canonical_request();
+        let sigs = vec![
+            sign(&o1, &approval_digest(&base)),
+            sign(&o2, &approval_digest(&base)),
+        ];
+        assert!(verify_approvals(&base, &sigs, &owners, 2, NOW).is_ok());
+
+        let mut other_role = base;
+        other_role.role = EnclaveRole::Bridge;
+        assert!(verify_approvals(&other_role, &sigs, &owners, 2, NOW).is_err());
+
+        let mut other_expiry = base;
+        other_expiry.expiry = FAR + 1;
+        assert!(verify_approvals(&other_expiry, &sigs, &owners, 2, NOW).is_err());
+
+        let mut other_nonce = base;
+        other_nonce.nonce = [0xAB; 32];
+        assert!(verify_approvals(&other_nonce, &sigs, &owners, 2, NOW).is_err());
+    }
+
+    fn a(n: u8) -> Address {
+        Address::from([n; 20])
+    }
+
+    #[test]
+    fn quorum_intersects_and_takes_the_stricter_threshold() {
+        let baked = vec![a(1), a(2), a(3)];
+        // Live set drops a(3) and raises the bar: both restrictions apply.
+        let (owners, th) = effective_quorum(&baked, 2, &[a(1), a(2)], 2).unwrap();
+        assert_eq!(owners, vec![a(1), a(2)]);
+        assert_eq!(th, 2);
+
+        let (_, th) = effective_quorum(&baked, 2, &baked, 3).unwrap();
+        assert_eq!(th, 3, "a higher live threshold wins");
+
+        let (_, th) = effective_quorum(&baked, 3, &baked, 1).unwrap();
+        assert_eq!(th, 3, "a lower live threshold cannot relax the baked one");
+    }
+
+    #[test]
+    fn quorum_ignores_owners_the_rpc_invents() {
+        // An owner the multisig reports but the image never baked is not an owner.
+        let baked = vec![a(1), a(2)];
+        let (owners, th) = effective_quorum(&baked, 1, &[a(1), a(2), a(9)], 1).unwrap();
+        assert_eq!(owners, vec![a(1), a(2)]);
+        assert_eq!(th, 1);
+    }
+
+    #[test]
+    fn quorum_refuses_degenerate_reads() {
+        let baked = vec![a(1), a(2), a(3)];
+        // Threshold 0 means the read is not trustworthy.
+        assert!(effective_quorum(&baked, 2, &baked, 0).is_err());
+        // Nobody baked survives the live set.
+        assert!(effective_quorum(&baked, 1, &[a(9)], 1).is_err());
+        // Survivors cannot meet the surviving quorum.
+        assert!(effective_quorum(&baked, 3, &[a(1), a(2)], 1).is_err());
+        assert!(effective_quorum(&baked, 0, &baked, 1).is_err());
+    }
+
+    #[test]
+    fn quorum_dedups_a_repeated_baked_owner() {
+        let (owners, _) = effective_quorum(&[a(1), a(1), a(2)], 2, &[a(1), a(2)], 2).unwrap();
+        assert_eq!(owners, vec![a(1), a(2)]);
+    }
+
+    #[test]
+    fn role_tryfrom() {
+        assert_eq!(EnclaveRole::try_from(1).unwrap(), EnclaveRole::Oracle);
+        assert_eq!(EnclaveRole::try_from(2).unwrap(), EnclaveRole::Bridge);
+        assert!(EnclaveRole::try_from(0).is_err());
+        assert!(EnclaveRole::try_from(3).is_err());
     }
 
     #[test]
@@ -230,7 +439,8 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
             &two,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_ok());
 
@@ -239,7 +449,8 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
             &one,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_err());
     }
@@ -257,7 +468,8 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
             &dup,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_err());
     }
@@ -280,7 +492,8 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
             &sigs,
             &owners,
-            3
+            3,
+            NOW
         )
         .is_err());
         // threshold 2: the two owner sigs meet it, foreigner ignored.
@@ -288,7 +501,8 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
             &sigs,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_ok());
     }
@@ -309,7 +523,8 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
             &sigs,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_err());
     }
@@ -329,7 +544,8 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Fresh, label, 46630),
             &sigs,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_err());
     }
@@ -349,7 +565,8 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Child, other, 46630),
             &sigs,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_err());
     }
@@ -368,7 +585,8 @@ mod tests {
             &req(pcr0, 2, ApprovalMode::Carry, label, 46630),
             &sigs,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_err());
     }
@@ -395,7 +613,8 @@ mod tests {
             &req(y, 1, ApprovalMode::Carry, label, 46630),
             &sigs,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_err());
         // control: same pcr0 still passes
@@ -403,7 +622,8 @@ mod tests {
             &req(x, 1, ApprovalMode::Carry, label, 46630),
             &sigs,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_ok());
     }
@@ -427,7 +647,8 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Carry, label, 4663),
             &sigs,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_err());
     }
@@ -448,14 +669,16 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Child, label, 46630),
             &sigs,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_err());
         assert!(verify_approvals(
             &req(pcr0, 1, ApprovalMode::Fresh, label, 46630),
             &sigs,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_err());
     }
@@ -472,21 +695,24 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
             &[good],
             &owners,
-            0
+            0,
+            NOW
         )
         .is_err());
         assert!(verify_approvals(
             &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
             &[],
             &owners,
-            0
+            0,
+            NOW
         )
         .is_err());
         assert!(verify_approvals(
             &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
             &[],
             &[],
-            0
+            0,
+            NOW
         )
         .is_err());
     }
@@ -506,7 +732,8 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
             &sigs,
             &owners,
-            3
+            3,
+            NOW
         )
         .is_err());
     }
@@ -530,7 +757,8 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
             &[sig],
             &owners,
-            1
+            1,
+            NOW
         )
         .is_err());
     }
@@ -557,7 +785,8 @@ mod tests {
             &req(pcr0, 1, ApprovalMode::Carry, label, 46630),
             &sigs,
             &owners,
-            2
+            2,
+            NOW
         )
         .is_err());
     }

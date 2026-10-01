@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use eyre::{eyre, Result};
 use keyex::policy::{EnclaveRole, ImageIdentity};
@@ -220,35 +220,42 @@ async fn handle_handover_conn<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Refuse before any NSM work so an unauthenticated peer cannot make a
+    // pre-install enclave burn attestations.
+    if !state
+        .lock()
+        .map_err(|_| eyre!("handover: state mutex poisoned"))?
+        .has_root_key()
+    {
+        warn!("handover requested before key install — refusing");
+        return Ok(());
+    }
+
+    // Everything fallible runs BEFORE the key snapshot: no `?` may unwind while a
+    // root-key copy is live on the stack. The clock read doubles as an NSM probe,
+    // so a dead device refuses the handover before the key is ever touched.
+    let nsm = Nsm::new()?;
+    let now_unix_secs = nsm.now_unix_secs()?;
+    let mut rng = NsmRng::new()?;
+    let my_nonce = fresh_nonce(&mut rng);
+    let provider = crypto_provider();
+    let cert = generate_ephemeral_cert()?;
+    let acceptor = TlsAcceptor::from(Arc::new(server_config(provider, &cert)?));
+    let verifier = NsmPeerVerifier { now_unix_secs };
+    let attest = |peer_nonce: &[u8; NONCE_LEN], my_point: &[u8]| -> Result<Vec<u8>> {
+        nsm.attestation(None, Some(peer_nonce.to_vec()), Some(my_point.to_vec()))
+    };
+
     let (mut root_opt, approvals) = {
         let st = state
             .lock()
             .map_err(|_| eyre!("handover: state mutex poisoned"))?;
         (st.root_key(), st.approvals())
     };
+    // Racy against the early check only if install were reversible; it is not.
     let mut root_bytes = match root_opt {
         Some(rb) => rb,
-        None => {
-            warn!("handover requested before key install — refusing");
-            return Ok(());
-        }
-    };
-
-    let provider = crypto_provider();
-    let cert = generate_ephemeral_cert()?;
-    let acceptor = TlsAcceptor::from(Arc::new(server_config(provider, &cert)?));
-
-    let mut rng = NsmRng::new()?;
-    let my_nonce = fresh_nonce(&mut rng);
-    let now_unix_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let verifier = NsmPeerVerifier { now_unix_secs };
-    let nsm = Nsm::new()?;
-    let attest = |peer_nonce: &[u8; NONCE_LEN], my_point: &[u8]| -> Vec<u8> {
-        nsm.attestation(None, Some(peer_nonce.to_vec()), Some(my_point.to_vec()))
-            .unwrap_or_default()
+        None => return Ok(()),
     };
 
     let own = ImageIdentity { pcr0, version };

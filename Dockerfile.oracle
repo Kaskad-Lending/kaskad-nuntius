@@ -30,9 +30,12 @@ COPY crates/ ./crates/
 #                            registry↔PCR0 circular bootstrap is broken by
 #                            predicting the CREATE address and asserting it).
 #   KEYEX_ORACLE_RH_RPCS   = comma-separated https RH JSON-RPC endpoints.
-#   KEYEX_ORACLE_OWNERS    = comma-separated owner EOAs that may EIP-712-approve
-#                            a future key handover to a newer image.
-#   KEYEX_ORACLE_THRESHOLD = approval quorum (genesis launch = 1).
+#   KEYEX_ORACLE_SAFE      = the governing Safe. Its live getOwners()/getThreshold()
+#                            narrow the two below at approval time, so a leaked
+#                            owner key is revoked by one Safe tx, not a rebuild.
+#   KEYEX_ORACLE_OWNERS    = owner-EOA ceiling: only these may EIP-712-approve a
+#                            key handover, and only while the Safe still lists them.
+#   KEYEX_ORACLE_THRESHOLD = quorum floor; the live Safe threshold may raise it.
 #   KEYEX_ORACLE_CHAIN_ID  = 46630 (RH testnet) — the approval domain chainId.
 #   KEYEX_ORACLE_VERSION   = image version bound into every approval (genesis 1).
 # ARG defaults empty → the enclave fail-loud refuses to boot (from_baked Err);
@@ -41,6 +44,7 @@ COPY crates/ ./crates/
 # the builder stage, before `cargo build`, or option_env! never sees them.
 ARG KEYEX_ORACLE_REGISTRY=""
 ARG KEYEX_ORACLE_RH_RPCS=""
+ARG KEYEX_ORACLE_SAFE=""
 ARG KEYEX_ORACLE_OWNERS=""
 ARG KEYEX_ORACLE_THRESHOLD=""
 ARG KEYEX_ORACLE_CHAIN_ID=""
@@ -51,6 +55,7 @@ ARG KEYEX_ORACLE_ANCESTORS=""
 ARG KEYEX_ORACLE_PEERS=""
 ENV KEYEX_ORACLE_REGISTRY=${KEYEX_ORACLE_REGISTRY}
 ENV KEYEX_ORACLE_RH_RPCS=${KEYEX_ORACLE_RH_RPCS}
+ENV KEYEX_ORACLE_SAFE=${KEYEX_ORACLE_SAFE}
 ENV KEYEX_ORACLE_OWNERS=${KEYEX_ORACLE_OWNERS}
 ENV KEYEX_ORACLE_THRESHOLD=${KEYEX_ORACLE_THRESHOLD}
 ENV KEYEX_ORACLE_CHAIN_ID=${KEYEX_ORACLE_CHAIN_ID}

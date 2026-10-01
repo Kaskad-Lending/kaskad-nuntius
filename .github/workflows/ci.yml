@@ -31,7 +31,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Rust clippy
-        run: cargo clippy -- -D warnings || true  # warn-only for now
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Rust tests
         run: cargo test
