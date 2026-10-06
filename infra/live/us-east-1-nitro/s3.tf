@@ -32,3 +32,46 @@ resource "aws_s3_bucket_public_access_block" "eif" {
   ignore_public_acls      = true
   restrict_public_buckets = true
 }
+
+locals {
+  # Noncurrent-version retention per prefix; current objects never expire.
+  eif_noncurrent_days = {
+    "genesis/"      = 30 # rewritten every 10 min per host
+    "builds/"       = 90
+    "staging/"      = 90
+    "oracle-probe/" = 90
+  }
+}
+
+# Boot prefixes (eif/ content-addressed, host*/) and approvals/ keep full history.
+resource "aws_s3_bucket_lifecycle_configuration" "eif" {
+  bucket = aws_s3_bucket.eif.id
+
+  dynamic "rule" {
+    for_each = local.eif_noncurrent_days
+    content {
+      id     = "noncurrent-${trimsuffix(rule.key, "/")}"
+      status = "Enabled"
+      filter {
+        prefix = rule.key
+      }
+      noncurrent_version_expiration {
+        noncurrent_days = rule.value
+      }
+      expiration {
+        expired_object_delete_marker = true
+      }
+    }
+  }
+
+  rule {
+    id     = "abort-mpu"
+    status = "Enabled"
+    filter {}
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.eif]
+}

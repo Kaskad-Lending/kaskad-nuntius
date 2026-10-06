@@ -83,6 +83,13 @@ def s3_put(data: bytes, bucket: str, key: str, region: str) -> None:
     )
 
 
+def artifact_region() -> str:
+    """Region of the artifact bucket; falls back to the host region."""
+    return (os.environ.get("KASKAD_ARTIFACT_REGION")
+            or os.environ.get("KASKAD_AWS_REGION")
+            or "us-east-1")
+
+
 def valid_attestation(reply: dict) -> bool:
     att, signer, pcr0 = reply.get("attestation"), reply.get("signer"), reply.get("pcr0")
     return (
@@ -94,7 +101,7 @@ def valid_attestation(reply: dict) -> bool:
 
 def main() -> int:
     bucket = os.environ["KASKAD_EIF_BUCKET"]
-    region = os.environ.get("KASKAD_AWS_REGION", "us-east-1")
+    region = artifact_region()
     cid = int(os.environ.get("KASKAD_ORACLE_CID", "16"))
     port = int(os.environ.get("KASKAD_CONTROL_PORT", "5005"))
 
@@ -103,7 +110,7 @@ def main() -> int:
     except Exception as e:  # IMDS should always answer on a real instance
         log(f"FATAL: cannot read instance-id from IMDS: {e}")
         return 1
-    log(f"instance={iid} oracle_cid={cid} control_port={port} bucket={bucket}")
+    log(f"instance={iid} oracle_cid={cid} control_port={port} bucket={bucket} region={region}")
 
     deadline = time.monotonic() + POLL_DEADLINE_S
     reply = None

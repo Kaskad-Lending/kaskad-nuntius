@@ -1,9 +1,17 @@
 # ─── Prod: two-AZ ASG + Launch Template ──────────────────────
 
+# ASG launches do not inherit provider default_tags; Project gates SSM in the boundary.
+data "aws_default_tags" "current" {}
+
+locals {
+  artifact_region = coalesce(var.artifact_region, var.aws_region)
+  instance_tags   = merge(data.aws_default_tags.current.tags, { Name = "${var.name_prefix}-prod" })
+}
+
 resource "aws_launch_template" "prod" {
   name_prefix   = "${var.name_prefix}-prod-"
   image_id      = var.ami_id
-  instance_type = var.instance_type
+  instance_type = var.instance_types[0]
 
   enclave_options {
     enabled = true
@@ -35,34 +43,51 @@ resource "aws_launch_template" "prod" {
     eif_bucket          = var.eif_bucket_name
     eif_release_suffix  = var.eif_release_suffix
     aws_region          = var.aws_region
-    kms_release_alias   = aws_kms_alias.release.name
+    artifact_region     = local.artifact_region
+    oracle_sha384       = var.oracle_eif.sha384
+    oracle_pcr0         = var.oracle_eif.pcr0
+    pontifex_sha384     = try(var.pontifex_eif.sha384, "")
+    pontifex_pcr0       = try(var.pontifex_eif.pcr0, "")
+    log_group           = aws_cloudwatch_log_group.nitro.name
+    enclave_debug_mode  = var.enclave_debug_mode
     oracle_cpu_count    = var.enclave_cpu_count
     oracle_memory_mib   = var.enclave_memory_mib
     pontifex_cpu_count  = var.pontifex_cpu_count
     pontifex_memory_mib = var.pontifex_memory_mib
     enable_pontifex     = var.enable_pontifex
-    # Allocator pool must cover every enclave that will boot, at once (+512 MiB
-    # host/hugepage margin). Reserving for a bridge that never boots would strand
-    # two cores and 512 MiB away from the parent.
+    # Allocator pool covers every enclave that boots, at once (+512 MiB
+    # host/hugepage margin); reserving for an unbooted bridge strands two cores.
     allocator_cpu_count  = var.enclave_cpu_count + (var.enable_pontifex ? var.pontifex_cpu_count : 0)
     allocator_memory_mib = var.enclave_memory_mib + (var.enable_pontifex ? var.pontifex_memory_mib : 0) + 512
     # Host relay-plane config (untrusted hints).
-    vpc_cidr        = var.vpc_cidr
-    oracle_registry = var.oracle_registry
-    bridge_entry    = var.bridge_entry
-    rh_rpcs         = var.rh_rpcs
+    vpc_cidr         = var.vpc_cidr
+    edge_domain_name = var.edge_domain_name
+    oracle_registry  = var.oracle_registry
+    bridge_entry     = var.bridge_entry
+    rh_rpcs          = var.rh_rpcs
     # String literal, NOT aws_autoscaling_group.prod.name — a resource ref would
     # form an ASG -> LT -> user-data -> ASG cycle.
-    asg_name = "${var.name_prefix}-prod-asg"
+    asg_name  = "${var.name_prefix}-prod-asg"
+    peer_asgs = join(",", [for p in var.peer_asgs : "${p.region}:${p.asg_name}"])
   }))
 
   tag_specifications {
     resource_type = "instance"
-    tags          = { Name = "${var.name_prefix}-prod" }
+    tags          = local.instance_tags
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags          = local.instance_tags
   }
 
   lifecycle {
     create_before_destroy = true
+
+    precondition {
+      condition     = !var.enable_pontifex || var.pontifex_eif != null
+      error_message = "enable_pontifex needs a pontifex_eif pin."
+    }
   }
 }
 
@@ -73,7 +98,7 @@ resource "aws_autoscaling_group" "prod" {
   max_size            = var.asg_max_size
   vpc_zone_identifier = [aws_subnet.public_a.id, aws_subnet.public_b.id]
 
-  # On-demand for stability; spot pool kept as capacity fallback.
+  # On-demand for stability; the fallback types cover a capacity shortage.
   mixed_instances_policy {
     instances_distribution {
       on_demand_base_capacity                  = var.asg_capacity
@@ -88,22 +113,22 @@ resource "aws_autoscaling_group" "prod" {
         version = tostring(aws_launch_template.prod.latest_version)
       }
 
-      override { instance_type = "c5.2xlarge" }
-      override { instance_type = "c5a.2xlarge" }
-      override { instance_type = "c5d.2xlarge" }
-      override { instance_type = "m5.2xlarge" }
+      dynamic "override" {
+        for_each = var.instance_types
+        content {
+          instance_type = override.value
+        }
+      }
     }
   }
 
   health_check_type         = "EC2"
   health_check_grace_period = 300
 
-  instance_refresh {
-    strategy = "Rolling"
-    preferences {
-      min_healthy_percentage = 50 # Two-AZ: keep one instance serving during refresh.
-    }
-  }
+  # No instance_refresh on purpose: k_root lives only in enclave memory and the
+  # EC2 health check marks an instance InService long before its enclave holds
+  # the key, so a rolling replace can terminate the last key holder. Roll by
+  # scaling out, letting the new enclave take the key over RA-TLS, then in.
 
   enabled_metrics = ["GroupInServiceInstances", "GroupDesiredCapacity", "GroupTotalInstances"]
 

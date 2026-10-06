@@ -6,16 +6,12 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
-    null = {
-      source  = "hashicorp/null"
-      version = "~> 3.0"
-    }
   }
 
-  # Bucket is bootstrapped outside terraform (versioned, SSE-S3, public access blocked).
+  # Same bootstrap bucket as the US root, separate key.
   backend "s3" {
     bucket       = "kaskad-terraform-state"
-    key          = "kaskad-nitro-us/terraform.tfstate"
+    key          = "kaskad-nitro-eu/terraform.tfstate"
     region       = "us-east-1"
     encrypt      = true
     use_lockfile = true

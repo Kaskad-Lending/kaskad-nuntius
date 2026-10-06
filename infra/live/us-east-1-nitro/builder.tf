@@ -3,7 +3,7 @@
 resource "aws_instance" "builder" {
   ami                    = var.ami_id
   instance_type          = var.instance_type
-  subnet_id              = aws_subnet.public_a.id
+  subnet_id              = module.fleet.public_subnet_ids[0]
   vpc_security_group_ids = [aws_security_group.builder.id]
   iam_instance_profile   = aws_iam_instance_profile.builder.name
 
@@ -49,5 +49,35 @@ resource "null_resource" "stop_builder" {
 
   provisioner "local-exec" {
     command = "aws ec2 stop-instances --instance-ids ${aws_instance.builder.id} --region ${var.aws_region}"
+  }
+}
+
+resource "aws_security_group" "builder" {
+  name_prefix = "${var.name_prefix}-builder-"
+  description = "Builder: NO inbound, HTTPS/HTTP outbound for git/docker/S3"
+  vpc_id      = module.fleet.vpc_id
+
+  # NO ingress — no SSH.
+
+  egress {
+    description = "HTTPS (git, Docker Hub, S3)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${var.name_prefix}-builder-sg" }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }

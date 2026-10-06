@@ -1,13 +1,12 @@
 #!/bin/bash
-# Reproducibly build both keyex EIFs on the Nitro builder, extract PCRs,
-# sign the manifests with the release KMS key, publish to S3.
+# Reproducibly build the keyex EIFs on the Nitro builder, publish each one
+# content-addressed as eif/<sha384>.eif and print its pin for
+# infra/live/eif-release.json. Nothing is signed: the pin in git is the trust root.
 # Images: oracle (Dockerfile.oracle) CID 16, pontifex (Dockerfile.pontifex) CID 17.
-# Manual: sudo EIF_BUCKET=... KMS_RELEASE_ALIAS=... AWS_REGION=us-east-1 host/build-eif.sh
-# CI invokes this over SSM. S3 PutObject + kms:Sign come from the instance role.
+# Manual: sudo EIF_BUCKET=... AWS_REGION=us-east-1 host/build-eif.sh
 set -euo pipefail
 
 : "${EIF_BUCKET:?EIF_BUCKET required}"
-: "${KMS_RELEASE_ALIAS:?KMS_RELEASE_ALIAS required}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_REGION AWS_DEFAULT_REGION="$AWS_REGION"
 
@@ -78,18 +77,6 @@ retry() {
   done
 }
 
-# sign_raw MSG OUT — release key, RAW/ECDSA_SHA_384; matches the host's
-# `openssl dgst -sha384 -verify` at boot (run-enclaves.sh).
-sign_raw() {
-  retry 3 5 aws kms sign \
-    --key-id "$KMS_RELEASE_ALIAS" \
-    --message "fileb://$1" \
-    --message-type RAW \
-    --signing-algorithm ECDSA_SHA_384 \
-    --output text --query Signature | base64 -d > "$2"
-  [ -s "$2" ] || { echo "FATAL: empty signature for $1" >&2; exit 1; }
-}
-
 # build_measure OUT_EIF OUT_JSON — one cold docker build + build-enclave.
 # Reads build_one's locals (bash dynamic scope): buildargs, dockerfile, tag.
 # nitro-cli is deterministic for a fixed image (measured: 3 runs, identical
@@ -103,9 +90,8 @@ build_measure() {
 
 S3="s3://$EIF_BUCKET"
 
-# Release prefix suffix: a second network publishes to oracle$REL_SUFFIX/ instead of
-# over the live one. The .sig files exist ONLY under the mutable release prefix, so
-# clobbering it destroys the other network's release. Staging is keyed by commit.
+# Host bundle suffix: a second network publishes its host plane to host$REL_SUFFIX/
+# instead of over the live one. EIFs need none: eif/ is content-addressed.
 REL_SUFFIX="${EIF_RELEASE_SUFFIX:-}"
 case "$REL_SUFFIX" in
   ""|-[a-z0-9]*) ;;
@@ -186,28 +172,22 @@ build_one() {
   # Remember the oracle PCR0 so the pontifex build (built next) pins it as parent.
   [ "$name" = oracle ] && ORACLE_PCR0="$pcr0"
 
-  # Manifests the host verifies + the compact PCR triple for slice 10.
+  # The pin is sha384 (this exact file) + PCR0 (the reproducible measurement);
+  # EIF bytes may differ across rebuilds in unmeasured metadata, PCR0 may not.
+  local sha
+  sha=$(sha384sum "$eif" | awk '{print $1}')
+  [[ "$sha" =~ ^[0-9a-f]{96}$ ]] || { echo "FATAL: $name bad sha384: $sha" >&2; exit 1; }
   jq '.Measurements' "$WORK/$name.build.json" > "$WORK/$name.pcr0.json"
-  sha384sum "$eif" | awk '{print $1}' > "$WORK/$name.eif.sha384"
-  printf '{"PCR0":"%s","PCR1":"%s","PCR2":"%s"}\n' "$pcr0" "$pcr1" "$pcr2" \
-    > "$WORK/$name.pcrs.json"
+  jq -n --arg sha "$sha" --arg p0 "$pcr0" --arg p1 "$pcr1" --arg p2 "$pcr2" \
+    '{sha384: $sha, PCR0: $p0, PCR1: $p1, PCR2: $p2}' > "$WORK/$name.pcrs.json"
+  jq -n --arg sha "$sha" --arg pcr0 "$pcr0" --arg commit "$COMMIT" --arg config "$EIF_CONFIG" \
+    '{sha384: $sha, pcr0: $pcr0, commit: $commit, config: $config}' > "$WORK/$name.pin.json"
 
-  sign_raw "$WORK/$name.eif.sha384" "$WORK/$name.eif.sha384.sig"
-  sign_raw "$WORK/$name.pcr0.json"  "$WORK/$name.pcr0.json.sig"
-
-  # Immutable staging by commit + the latest.* the host boot fetches.
-  retry 3 5 aws s3 cp "$eif"                  "$S3/staging/$COMMIT/$name.eif"
+  retry 3 5 aws s3 cp "$eif"                  "$S3/eif/$sha.eif"
   retry 3 5 aws s3 cp "$WORK/$name.pcr0.json" "$S3/staging/$COMMIT/$name.pcr0.json"
-  retry 3 5 aws s3 cp "$WORK/$name.eif.sha384" "$S3/staging/$COMMIT/$name.eif.sha384"
   retry 3 5 aws s3 cp "$WORK/$name.pcrs.json" "$S3/staging/$COMMIT/$name.pcrs.json"
-
-  local rel="$name$REL_SUFFIX"
-  retry 3 5 aws s3 cp "$eif"                     "$S3/$rel/latest.eif"
-  retry 3 5 aws s3 cp "$WORK/$name.eif.sha384"     "$S3/$rel/latest.eif.sha384"
-  retry 3 5 aws s3 cp "$WORK/$name.eif.sha384.sig" "$S3/$rel/latest.eif.sha384.sig"
-  retry 3 5 aws s3 cp "$WORK/$name.pcr0.json"      "$S3/$rel/pcr0.json"
-  retry 3 5 aws s3 cp "$WORK/$name.pcr0.json.sig"  "$S3/$rel/pcr0.json.sig"
-  echo "release published to $S3/$rel/"
+  retry 3 5 aws s3 cp "$WORK/$name.pin.json"  "$S3/staging/$COMMIT/$name.pin.json"
+  echo "$name published to $S3/eif/$sha.eif"
 
   # Reclaim the oracle build cache + image before pontifex builds, so two musl
   # release trees need not co-reside on the 30G builder volume. Cache-independent
@@ -218,19 +198,16 @@ build_one() {
   echo "$name PCR0=$pcr0"
 }
 
-# publish_host_bundle — copy the host relay plane to S3 so the prod launch
-# template can fetch it at boot. Untrusted: no signature (a compromised host can
-# only drop/delay bytes — TLS to RPCs and RA-TLS to peers both terminate inside
-# the enclave; only the EIFs are release-signed). Suffixed like the EIF release
-# prefix: a suffixed network must not push its host plane onto another network's
-# frozen prefix, since host↔enclave protocol changes travel with the commit.
+# publish_host_bundle — copy the host relay plane to S3 for the prod launch
+# template. Untrusted and unpinned: a compromised host can only drop or delay
+# bytes, since RPC TLS and peer RA-TLS terminate inside the enclave.
 publish_host_bundle() {
   local hp="host$REL_SUFFIX"
   echo "=== publish host bundle ($hp) ==="
   retry 3 5 aws s3 cp host/http_connect_proxy.py "$S3/$hp/http_connect_proxy.py"
   retry 3 5 aws s3 cp host/pontifex_host.py      "$S3/$hp/pontifex_host.py"
   retry 3 5 aws s3 cp host/genesis_capture.py    "$S3/$hp/genesis_capture.py"
-  retry 3 5 aws s3 cp enclave/pull_api.py        "$S3/$hp/pull_api.py"
+  retry 3 5 aws s3 cp host/pull_api.py           "$S3/$hp/pull_api.py"
   retry 3 5 aws s3 cp --recursive host/systemd/  "$S3/$hp/systemd/"
   echo "host bundle published to $S3/$hp/"
 }
@@ -250,7 +227,11 @@ set +e
 
   publish_host_bundle
 
-  echo "=== keyex EIFs built + signed + published (commit $COMMIT) ==="
+  echo "=== keyex EIFs built + published (commit $COMMIT) ==="
+  echo "=== pins for infra/live/eif-release.json ==="
+  for entry in "${IMAGES[@]}"; do
+    jq --arg n "${entry%%:*}" '{($n): .}' "$WORK/${entry%%:*}.pin.json"
+  done
 ) 2>&1 | tee "$BUILD_LOG"
 BUILD_RC=${PIPESTATUS[0]}
 set -e
