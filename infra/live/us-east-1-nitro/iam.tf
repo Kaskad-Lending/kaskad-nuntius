@@ -28,14 +28,14 @@ resource "aws_iam_role_policy" "builder" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Sid    = "S3Access"
         Effect = "Allow"
         Action = ["s3:PutObject", "s3:GetObject", "s3:ListBucket", "s3:PutObjectTagging"]
         Resource = [
-          aws_s3_bucket.eif.arn,
-          "${aws_s3_bucket.eif.arn}/*"
+          module.eif_bucket.arn,
+          "${module.eif_bucket.arn}/*"
         ]
       },
       {
@@ -53,7 +53,18 @@ resource "aws_iam_role_policy" "builder" {
         Action   = ["ec2:DescribeTags"]
         Resource = ["*"]
       }
-    ]
+      ], length(var.eif_mirror_buckets) == 0 ? [] : [
+      {
+        # Boot artifacts only; builds/ and staging/ stay in the release bucket.
+        Sid    = "MirrorBootArtifacts"
+        Effect = "Allow"
+        Action = ["s3:PutObject"]
+        Resource = flatten([for b in var.eif_mirror_buckets : [
+          "arn:aws:s3:::${b}/eif/*",
+          "arn:aws:s3:::${b}/host*/*",
+        ]])
+      }
+    ])
   })
 }
 
@@ -145,7 +156,7 @@ resource "aws_iam_role_policy" "github_ci" {
         Sid      = "ReadWriteBuildArtifacts"
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject"]
-        Resource = ["${aws_s3_bucket.eif.arn}/*"]
+        Resource = ["${module.eif_bucket.arn}/*"]
       }
     ]
   })

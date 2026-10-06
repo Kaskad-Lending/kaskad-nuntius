@@ -104,8 +104,14 @@ variable "eif_bucket_name" {
   default     = "kaskad-nitro-us-eif"
 }
 
+variable "eif_mirror_buckets" {
+  description = "Other regions' boot buckets; the builder mirrors eif/ and host*/ into each."
+  type        = list(string)
+  default     = ["kaskad-nitro-eu-eif"]
+}
+
 variable "eif_release_suffix" {
-  description = "Release prefix suffix, e.g. \"-mainnet\" boots from oracle-mainnet/. Empty = oracle/."
+  description = "Host bundle prefix suffix: -mainnet boots host-mainnet/ (EIFs are content-addressed under eif/)."
   type        = string
   default     = ""
 

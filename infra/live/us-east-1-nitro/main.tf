@@ -1,6 +1,6 @@
-# us-east-1 keyex fleet. Release artifacts (bucket, builder, CI role) stay in
-# this root; the EU fleet reads them cross-region. EIF pins: ../eif-release.json,
-# edge (nuntius) name: ../edge.json.
+# us-east-1 keyex fleet. Release artifacts (bucket, builder, CI role) live in
+# this root; the builder mirrors boot artifacts into each region's own bucket.
+# EIF pins: ../eif-release.json, edge (nuntius) name: ../edge.json.
 
 locals {
   eif_release = jsondecode(file("${path.module}/../eif-release.json"))
@@ -27,7 +27,7 @@ module "fleet" {
   asg_capacity        = var.asg_capacity
   asg_max_size        = var.asg_max_size
 
-  eif_bucket_name    = aws_s3_bucket.eif.bucket
+  eif_bucket_name    = module.eif_bucket.bucket
   eif_release_suffix = var.eif_release_suffix
   oracle_eif         = local.eif_release.oracle
   pontifex_eif       = local.eif_release.pontifex

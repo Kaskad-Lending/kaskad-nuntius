@@ -15,7 +15,7 @@ output "builder_instance_id" {
 }
 
 output "eif_bucket" {
-  value = aws_s3_bucket.eif.bucket
+  value = module.eif_bucket.bucket
 }
 
 output "prod_security_group" {
