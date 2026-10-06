@@ -26,12 +26,33 @@ variable "vpc_cidr" {
   default     = "10.20.0.0/16"
 }
 
+variable "peer_cidrs" {
+  description = "Peered fleet VPC CIDRs (eu-west-1) for cross-region RA-TLS handover."
+  type        = list(string)
+  default     = ["10.21.0.0/16"]
+}
+
+variable "peer_asgs" {
+  description = "Other-region fleet ASGs whose oracles are RA-TLS handover peers."
+  type = list(object({
+    region   = string
+    asg_name = string
+  }))
+  default = [{ region = "eu-west-1", asg_name = "kaskad-nitro-eu-prod-asg" }]
+}
+
 # ─── EC2 ──────────────────────────────────────────────────────
 
 variable "instance_type" {
   description = "Instance type — Nitro-capable, >=6 vCPU: two enclaves take 4 (oracle 2 + bridge 2) and Nitro must leave >=2 for the parent."
   type        = string
   default     = "c5.2xlarge"
+}
+
+variable "instance_type_fallbacks" {
+  description = "ASG fallback types when instance_type has no capacity. Same vCPU class."
+  type        = list(string)
+  default     = ["c5a.2xlarge", "c5d.2xlarge", "m5.2xlarge"]
 }
 
 variable "ami_id" {
@@ -73,12 +94,6 @@ variable "asg_max_size" {
   description = "Prod ASG max size (headroom for instance refresh)."
   type        = number
   default     = 4
-}
-
-variable "enable_sealing" {
-  description = "KMS key-sealing. Off for keyex — custody is the enclave fleet, not KMS."
-  type        = bool
-  default     = false
 }
 
 # ─── S3 ───────────────────────────────────────────────────────

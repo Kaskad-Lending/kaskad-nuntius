@@ -1,108 +1,6 @@
 # Least-privilege roles. Every role carries the KaskadNitroBoundary
 # permissions boundary — kaskad-tf apply is denied otherwise.
 
-# ─── Prod EC2 Role ────────────────────────────────────────────
-
-resource "aws_iam_role" "prod" {
-  name                 = "${var.name_prefix}-prod"
-  permissions_boundary = var.permissions_boundary_arn
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "ec2.amazonaws.com" }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy" "prod" {
-  name = "${var.name_prefix}-prod-policy"
-  role = aws_iam_role.prod.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid      = "ReadEIF"
-        Effect   = "Allow"
-        Action   = ["s3:GetObject"]
-        Resource = ["${aws_s3_bucket.eif.arn}/*"]
-      },
-      {
-        Sid    = "CloudWatchLogs"
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogStream",
-          "logs:PutLogEvents",
-          "logs:DescribeLogStreams"
-        ]
-        Resource = ["${aws_cloudwatch_log_group.nitro.arn}:*"]
-      },
-      {
-        Sid      = "CloudWatchMetrics"
-        Effect   = "Allow"
-        Action   = ["cloudwatch:PutMetricData"]
-        Resource = ["*"]
-        Condition = {
-          StringEquals = { "cloudwatch:namespace" = "KaskadNitro" }
-        }
-      },
-      {
-        Sid    = "SSMSession"
-        Effect = "Allow"
-        Action = [
-          "ssm:UpdateInstanceInformation",
-          "ssmmessages:CreateControlChannel",
-          "ssmmessages:CreateDataChannel",
-          "ssmmessages:OpenControlChannel",
-          "ssmmessages:OpenDataChannel"
-        ]
-        Resource = ["*"]
-      },
-      {
-        # pontifex_host.py sweeps same-ASG peers for the config loop. Describe*
-        # has no resource-level scoping (mirrors the github_ci role).
-        Sid      = "DescribeSelfPeers"
-        Effect   = "Allow"
-        Action   = ["ec2:DescribeInstances", "ec2:DescribeInstanceStatus", "ec2:DescribeTags"]
-        Resource = ["*"]
-      },
-      {
-        # pontifex_host.py lists s3://<bucket>/approvals/ (owner-signed keyex
-        # handover approvals). GetObject on the objects is covered by ReadEIF.
-        Sid      = "ListApprovals"
-        Effect   = "Allow"
-        Action   = ["s3:ListBucket"]
-        Resource = [aws_s3_bucket.eif.arn]
-        Condition = {
-          StringLike = { "s3:prefix" = ["approvals/*"] }
-        }
-      },
-      {
-        # genesis_capture.py publishes the boot attestation (public COSE doc +
-        # signer + PCR0, no secret) to genesis/; pontifex_host.py the bridge
-        # attestation to bridge/; the allocator diagnostic lands in diag/.
-        # PutObject only on those publish prefixes, never bucket-wide.
-        Sid    = "PublishAttestations"
-        Effect = "Allow"
-        Action = ["s3:PutObject"]
-        Resource = [
-          "${aws_s3_bucket.eif.arn}/genesis/*",
-          "${aws_s3_bucket.eif.arn}/bridge/*",
-          "${aws_s3_bucket.eif.arn}/diag/*",
-        ]
-      }
-    ]
-  })
-}
-
-resource "aws_iam_instance_profile" "prod" {
-  name = "${var.name_prefix}-prod"
-  role = aws_iam_role.prod.name
-}
-
 # ─── Builder EC2 Role ─────────────────────────────────────────
 
 resource "aws_iam_role" "builder" {
@@ -241,20 +139,13 @@ resource "aws_iam_role_policy" "github_ci" {
         Action   = ["ec2:DescribeInstances", "ec2:DescribeInstanceStatus", "ec2:DescribeTags"]
         Resource = ["*"]
       },
+      # No autoscaling grant: a rolling refresh can terminate the last enclave
+      # holding the key. Fleet rolls are manual scale-out -> handover -> scale-in.
       {
         Sid      = "ReadWriteBuildArtifacts"
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject"]
         Resource = ["${aws_s3_bucket.eif.arn}/*"]
-      },
-      {
-        Sid      = "RefreshASG"
-        Effect   = "Allow"
-        Action   = ["autoscaling:StartInstanceRefresh"]
-        Resource = ["*"]
-        Condition = {
-          StringEquals = { "autoscaling:ResourceTag/Name" = "${var.name_prefix}-prod-asg" }
-        }
       }
     ]
   })

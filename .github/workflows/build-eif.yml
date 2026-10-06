@@ -1,13 +1,10 @@
 name: Build Keyex EIFs
 
-# Builds both keyex enclave images (oracle CID 16, pontifex CID 17) once on
-# the us-east-1 Nitro builder, extracts PCR0/1/2, signs the manifests with the
-# release KMS key and publishes them under oracle/ and pontifex/ in S3.
-# Build/sign/upload run ON the builder via host/build-eif.sh over SSM (the
-# builder is stopped by default and has no self-hosted runner — SSM is the
-# only channel; mirrors deploy.yml and ENCLAVE.md). No ASG refresh here.
-# Publishes measurements for slice 10 (on-chain registries). Idempotent:
-# a musl digest-pinned rebuild of the same commit yields the same PCRs.
+# Builds both keyex enclave images (oracle CID 16, pontifex CID 17) on the
+# us-east-1 Nitro builder via host/build-eif.sh over SSM, publishes each EIF as
+# eif/<sha384>.eif and reports its pin (sha384 + PCR0). Nothing is signed and
+# nothing boots from this run: a host boots an image only after its pin lands in
+# infra/live/eif-release.json and terraform applies it. No ASG refresh here.
 
 on:
   # Deliberate release builds only. Pushing an `eif-v*` tag runs this workflow
@@ -31,12 +28,14 @@ env:
 
 jobs:
   build:
-    name: Build + sign + publish EIFs
+    name: Build + publish EIFs
     runs-on: ubuntu-latest
     outputs:
+      oracle_sha384: ${{ steps.pcrs.outputs.oracle_sha384 }}
       oracle_pcr0: ${{ steps.pcrs.outputs.oracle_pcr0 }}
       oracle_pcr1: ${{ steps.pcrs.outputs.oracle_pcr1 }}
       oracle_pcr2: ${{ steps.pcrs.outputs.oracle_pcr2 }}
+      pontifex_sha384: ${{ steps.pcrs.outputs.pontifex_sha384 }}
       pontifex_pcr0: ${{ steps.pcrs.outputs.pontifex_pcr0 }}
       pontifex_pcr1: ${{ steps.pcrs.outputs.pontifex_pcr1 }}
       pontifex_pcr2: ${{ steps.pcrs.outputs.pontifex_pcr2 }}
@@ -83,7 +82,6 @@ jobs:
           {
             echo "EIF_BUCKET=${NAME_PREFIX}-eif"
             echo "OIDC_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/${NAME_PREFIX}-github-ci"
-            echo "KMS_RELEASE_ALIAS=alias/${NAME_PREFIX}-release"
             echo "BUILDER_TAG=${NAME_PREFIX}-builder"
           } >> "$GITHUB_ENV"
 
@@ -137,8 +135,7 @@ jobs:
 
       - name: Build both EIFs via SSM
         # Drives host/build-eif.sh on the builder: docker build (2-stage musl,
-        # digest-pinned) -> nitro-cli build-enclave -> PCR extract -> KMS sign
-        # -> S3 publish, for oracle + pontifex.
+        # digest-pinned) -> nitro-cli build-enclave -> PCR extract -> S3 publish.
         run: |
           set -euo pipefail
           CMD_ID=$(aws ssm send-command \
@@ -148,7 +145,6 @@ jobs:
               "set -euxo pipefail",
               "export COMMIT=${{ github.sha }}",
               "export EIF_BUCKET='"${EIF_BUCKET}"'",
-              "export KMS_RELEASE_ALIAS='"${KMS_RELEASE_ALIAS}"'",
               "export AWS_REGION='"${AWS_REGION}"'",
               "sudo dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel awscli docker git jq unzip",
               "sudo systemctl start docker",
@@ -157,7 +153,7 @@ jobs:
               "aws s3 cp s3://'"${EIF_BUCKET}"'/builds/${{ github.sha }}/source.zip /tmp/source.zip",
               "unzip -q /tmp/source.zip -d /tmp/build/",
               "chmod +x /tmp/build/host/build-eif.sh",
-              "cd /tmp/build && COMMIT=${{ github.sha }} EIF_BUCKET='"${EIF_BUCKET}"' KMS_RELEASE_ALIAS='"${KMS_RELEASE_ALIAS}"' AWS_REGION='"${AWS_REGION}"' host/build-eif.sh"
+              "cd /tmp/build && COMMIT=${{ github.sha }} EIF_BUCKET='"${EIF_BUCKET}"' AWS_REGION='"${AWS_REGION}"' host/build-eif.sh"
             ]' \
             --query "Command.CommandId" --output text)
           echo "SSM command: $CMD_ID"
@@ -198,10 +194,11 @@ jobs:
           mkdir -p pcrs
           for name in oracle pontifex; do
             aws s3 cp "s3://${EIF_BUCKET}/staging/${{ github.sha }}/${name}.pcrs.json" "pcrs/${name}.pcrs.json"
-            for n in 0 1 2; do
-              v=$(jq -r ".PCR${n}" "pcrs/${name}.pcrs.json")
-              [[ "$v" =~ ^[0-9a-f]{96}$ ]] || { echo "bad ${name} PCR${n}: $v" >&2; exit 1; }
-              echo "${name}_pcr${n}=${v}" >> "$GITHUB_OUTPUT"
+            aws s3 cp "s3://${EIF_BUCKET}/staging/${{ github.sha }}/${name}.pin.json" "pcrs/${name}.pin.json"
+            for k in sha384 PCR0 PCR1 PCR2; do
+              v=$(jq -r ".${k}" "pcrs/${name}.pcrs.json")
+              [[ "$v" =~ ^[0-9a-f]{96}$ ]] || { echo "bad ${name} ${k}: $v" >&2; exit 1; }
+              echo "${name}_${k,,}=${v}" >> "$GITHUB_OUTPUT"
             done
           done
 
@@ -209,7 +206,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: keyex-pcrs
-          path: pcrs/*.pcrs.json
+          path: pcrs/*.json
 
       - name: Summary
         run: |
@@ -218,12 +215,17 @@ jobs:
             echo "## Keyex EIF measurements"
             echo "Commit: \`${{ github.sha }}\`  Bucket: \`${EIF_BUCKET}\`"
             echo ""
-            echo "| image | PCR | value |"
+            echo "| image | field | value |"
             echo "|---|---|---|"
             for name in oracle pontifex; do
-              for n in 0 1 2; do
-                v=$(jq -r ".PCR${n}" "pcrs/${name}.pcrs.json")
-                echo "| ${name} | PCR${n} | \`${v}\` |"
+              for k in sha384 PCR0 PCR1 PCR2; do
+                v=$(jq -r ".${k}" "pcrs/${name}.pcrs.json")
+                echo "| ${name} | ${k} | \`${v}\` |"
               done
             done
+            echo ""
+            echo "Pins for \`infra/live/eif-release.json\`:"
+            echo '```json'
+            jq -s '{oracle: .[0], pontifex: .[1]}' pcrs/oracle.pin.json pcrs/pontifex.pin.json
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

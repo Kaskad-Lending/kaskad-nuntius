@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
@@ -59,6 +60,28 @@ class EnclaveMethod(str, enum.Enum):
 class ReadinessState(str, enum.Enum):
     READY = "ready"
     FETCHING = "fetching"
+
+
+@dataclass(frozen=True)
+class PeerAsg:
+    """An oracle ASG whose running instances are RA-TLS peer candidates."""
+    region: str
+    asg_name: str
+
+
+def parse_peer_asgs(raw: str) -> list[PeerAsg]:
+    """Parse `region:asg[,region:asg...]`; blank entries are skipped."""
+    peers = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        region, sep, asg_name = entry.partition(":")
+        region, asg_name = region.strip(), asg_name.strip()
+        if not sep or not region or not asg_name:
+            raise ValueError(f"expected region:asg, got {entry!r}")
+        peers.append(PeerAsg(region, asg_name))
+    return peers
 
 
 # ─── VSOCK client ────────────────────────────────────────────
@@ -426,7 +449,8 @@ class PontifexHandler(BaseHTTPRequestHandler):
 class ConfigPusher(threading.Thread):
     """Replay config and approval hints each cycle; enclaves validate them.
 
-    Peer hints come from EC2 (same ASG); owner-signed approvals come from S3.
+    Peer hints come from EC2 (own ASG + cross-region peer ASGs); owner-signed
+    approvals come from S3 in the artifact region.
     """
 
     def __init__(self, args: argparse.Namespace, stop: threading.Event) -> None:
@@ -436,6 +460,8 @@ class ConfigPusher(threading.Thread):
         self._enclave_timeout = args.bridge_timeout
         self._asg_tag = args.asg_tag
         self._region = args.region
+        self._peer_asgs = args.peer_asgs
+        self._artifact_region = args.artifact_region or args.region
         self._eif_bucket = args.eif_bucket
         self._registry = args.oracle_registry
         self._entry = args.bridge_entry
@@ -507,32 +533,45 @@ class ConfigPusher(threading.Thread):
     # AWS access via the instance role, shelled to the CLI (stdlib-only host).
 
     def _discover_oracle_ips(self) -> list[str]:
-        if not self._asg_tag:
-            return []
+        asgs = [PeerAsg(self._region, self._asg_tag)] if self._asg_tag else []
+        found: list[str] = []
+        for asg in asgs + self._peer_asgs:
+            ips = self._asg_private_ips(asg)
+            if ips is None:
+                log.warning("peer discovery failed region=%s asg=%s",
+                            asg.region or "-", asg.asg_name)
+                continue
+            found.extend(ips)
+        # Cross-host oracle peers only (self excluded); each fronts oracle RA-TLS
+        # on :8443. The bridge reaches its co-located oracle via 127.0.0.1.
+        self_ip = self._self_ip() if found else ""
+        return list(dict.fromkeys(ip for ip in found if ip != self_ip))
+
+    def _asg_private_ips(self, asg: PeerAsg) -> Optional[list[str]]:
+        """Running instances' private IPs, or None if the region lookup failed."""
         out = self._aws([
             "ec2", "describe-instances",
             "--filters",
-            f"Name=tag:aws:autoscaling:groupName,Values={self._asg_tag}",
+            f"Name=tag:aws:autoscaling:groupName,Values={asg.asg_name}",
             "Name=instance-state-name,Values=running",
             "--query", "Reservations[].Instances[].PrivateIpAddress",
             "--output", "json",
-        ])
+        ], asg.region)
         if out is None:
-            return []
+            return None
         try:
             ips = json.loads(out)
-        except json.JSONDecodeError:
-            return []
-        # Cross-host oracle peers only (self excluded); each fronts oracle RA-TLS
-        # on :8443. The bridge reaches its co-located oracle via 127.0.0.1.
-        return [ip for ip in ips
-                if isinstance(ip, str) and ip != self._self_ip()]
+        except (ValueError, RecursionError):
+            return None
+        if not isinstance(ips, list):
+            return None
+        return [ip for ip in ips if isinstance(ip, str)]
 
     def _self_ip(self) -> str:
         return _instance_private_ip()
 
     def _list_s3(self, uri: str) -> list[str]:
-        out = self._aws(["s3", "ls", uri, "--recursive"])
+        out = self._aws(["s3", "ls", uri, "--recursive"], self._artifact_region)
         if out is None:
             return []
         keys = []
@@ -543,12 +582,12 @@ class ConfigPusher(threading.Thread):
         return keys
 
     def _read_s3(self, uri: str) -> Optional[str]:
-        return self._aws(["s3", "cp", uri, "-"])
+        return self._aws(["s3", "cp", uri, "-"], self._artifact_region)
 
-    def _aws(self, cmd: list[str]) -> Optional[str]:
+    def _aws(self, cmd: list[str], region: str) -> Optional[str]:
         full = ["aws"] + cmd
-        if self._region:
-            full += ["--region", self._region]
+        if region:
+            full += ["--region", region]
         try:
             proc = subprocess.run(full, capture_output=True, text=True, timeout=15)
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
@@ -613,6 +652,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    default=_split_env("KASKAD_RH_RPCS"))
     p.add_argument("--asg-tag", default=os.environ.get("KASKAD_ASG_NAME", ""))
     p.add_argument("--region", default=os.environ.get("KASKAD_AWS_REGION", ""))
+    p.add_argument("--peer-asgs", type=parse_peer_asgs,
+                   default=os.environ.get("KASKAD_PEER_ASGS", ""),
+                   help="comma-separated region:asg oracle ASGs discovered beside --asg-tag")
+    p.add_argument("--artifact-region", default=os.environ.get("KASKAD_ARTIFACT_REGION", ""),
+                   help="region of --eif-bucket; empty uses --region")
     p.add_argument("--eif-bucket", default=os.environ.get("KASKAD_EIF_BUCKET", ""))
     p.add_argument("--no-config-loop", action="store_true",
                    help="serve HTTP only; skip the configure/approval pusher")

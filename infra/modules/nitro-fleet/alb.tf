@@ -1,6 +1,19 @@
 # ─── ALB for Pull API (two-AZ) ───────────────────────────────
-# domain_name="" here: no ACM/HTTPS, API served on bare ALB DNS.
-# ACM DNS-validation runs outside kaskad-tf (route53 forbidden).
+# domain_name="" serves HTTP on the bare ALB DNS. ACM DNS validation runs
+# outside kaskad-tf (route53 forbidden); the HTTPS listener needs the cert ISSUED.
+
+locals {
+  edge_enabled  = var.edge_domain_name != ""
+  edge_attached = local.edge_enabled && var.edge_cert_issued
+  https_enabled = var.domain_name != "" || local.edge_attached
+  edge_header   = "X-Kaskad-Edge"
+
+  # Listeners that forward to the pull API; each one carries the edge guard.
+  forwarding_listeners = merge(
+    local.https_enabled ? { https = aws_lb_listener.https[0].arn } : {},
+    var.domain_name == "" ? { http = aws_lb_listener.http_forward[0].arn } : {},
+  )
+}
 
 resource "aws_acm_certificate" "nitro" {
   count             = var.domain_name != "" ? 1 : 0
@@ -12,6 +25,27 @@ resource "aws_acm_certificate" "nitro" {
   }
 
   tags = { Name = "${var.name_prefix}-cert" }
+}
+
+# Origin cert for the edge name: CloudFront forwards the viewer Host, so it uses
+# that name for SNI and certificate checks. In us-east-1 it is also the viewer cert.
+resource "aws_acm_certificate" "edge" {
+  count             = local.edge_enabled ? 1 : 0
+  domain_name       = var.edge_domain_name
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = { Name = "${var.name_prefix}-edge-cert" }
+}
+
+# CloudFront sends this as an origin header; it marks requests from our distribution.
+resource "random_password" "edge_origin" {
+  count   = local.edge_enabled ? 1 : 0
+  length  = 40
+  special = false
 }
 
 resource "aws_lb" "nitro" {
@@ -90,16 +124,66 @@ resource "aws_lb_target_group" "nitro" {
 }
 
 resource "aws_lb_listener" "https" {
-  count             = var.domain_name != "" ? 1 : 0
+  count             = local.https_enabled ? 1 : 0
   load_balancer_arn = aws_lb.nitro.arn
   port              = 443
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = aws_acm_certificate.nitro[0].arn
+  certificate_arn   = var.domain_name != "" ? aws_acm_certificate.nitro[0].arn : aws_acm_certificate.edge[0].arn
 
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.nitro.arn
+  }
+}
+
+# With a domain_name the edge cert rides along on SNI.
+resource "aws_lb_listener_certificate" "edge" {
+  count           = local.edge_attached && var.domain_name != "" ? 1 : 0
+  listener_arn    = aws_lb_listener.https[0].arn
+  certificate_arn = aws_acm_certificate.edge[0].arn
+}
+
+# The edge Host is served only with the origin token, so the pull API may trust
+# the X-Forwarded-For hop CloudFront appended (EDGE_HOST in pull-api.env).
+resource "aws_lb_listener_rule" "edge_origin" {
+  for_each     = local.edge_enabled ? local.forwarding_listeners : {}
+  listener_arn = each.value
+  priority     = 1
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.nitro.arn
+  }
+
+  condition {
+    host_header { values = [var.edge_domain_name] }
+  }
+
+  condition {
+    http_header {
+      http_header_name = local.edge_header
+      values           = [random_password.edge_origin[0].result]
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "edge_bypass" {
+  for_each     = local.edge_enabled ? local.forwarding_listeners : {}
+  listener_arn = each.value
+  priority     = 2
+
+  action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "application/json"
+      message_body = "{\"error\":\"forbidden\"}"
+      status_code  = "403"
+    }
+  }
+
+  condition {
+    host_header { values = [var.edge_domain_name] }
   }
 }
 
@@ -157,7 +241,7 @@ resource "aws_lb_target_group" "bridge" {
 }
 
 resource "aws_autoscaling_attachment" "bridge" {
-  # An oracle-only host never serves 8081, so attaching it would park a
+  # An oracle-only host never serves 8081; attaching it would park a
   # permanently unhealthy target in the bridge group.
   count                  = var.enable_pontifex ? 1 : 0
   autoscaling_group_name = aws_autoscaling_group.prod.name

@@ -1,4 +1,4 @@
-# Fresh VPC — stands beside the live oracle, never references its VPCs.
+# Per-region fleet VPC — never references the Igra oracle VPCs.
 
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
@@ -31,15 +31,16 @@ resource "aws_subnet" "public_b" {
   tags = { Name = "${var.name_prefix}-public-b" }
 }
 
+# Routes are standalone (route omitted = ignored) so peering roots can add theirs.
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
+  tags   = { Name = "${var.name_prefix}-public-rt" }
+}
 
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
-  }
-
-  tags = { Name = "${var.name_prefix}-public-rt" }
+resource "aws_route" "internet" {
+  route_table_id         = aws_route_table.public.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.main.id
 }
 
 resource "aws_route_table_association" "public_a" {
@@ -99,9 +100,8 @@ resource "aws_security_group" "prod" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Cross-host keyex RA-TLS handover between peers in this SG only: a successor
-  # oracle sweeps peers' 8443 for the installed genesis root. The bridge fetches
-  # only from its co-located oracle over loopback, so it needs no SG rule.
+  # Cross-host keyex RA-TLS handover: a successor oracle sweeps peers' 8443.
+  # The bridge fetches from its co-located oracle over loopback, no SG rule.
   ingress {
     description = "Peer RA-TLS handover (oracle 8443)"
     from_port   = 8443
@@ -118,37 +118,30 @@ resource "aws_security_group" "prod" {
     self        = true
   }
 
+  # Cross-region peers over VPC peering; SG references do not cross regions.
+  dynamic "ingress" {
+    for_each = length(var.peer_cidrs) > 0 ? [var.peer_cidrs] : []
+    content {
+      description = "Cross-region peer RA-TLS handover (oracle 8443)"
+      from_port   = 8443
+      to_port     = 8443
+      protocol    = "tcp"
+      cidr_blocks = ingress.value
+    }
+  }
+
+  dynamic "egress" {
+    for_each = length(var.peer_cidrs) > 0 ? [var.peer_cidrs] : []
+    content {
+      description = "Cross-region peer RA-TLS handover (oracle 8443)"
+      from_port   = 8443
+      to_port     = 8443
+      protocol    = "tcp"
+      cidr_blocks = egress.value
+    }
+  }
+
   tags = { Name = "${var.name_prefix}-prod-sg" }
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_security_group" "builder" {
-  name_prefix = "${var.name_prefix}-builder-"
-  description = "Builder: NO inbound, HTTPS/HTTP outbound for git/docker/S3"
-  vpc_id      = aws_vpc.main.id
-
-  # NO ingress — no SSH.
-
-  egress {
-    description = "HTTPS (git, Docker Hub, S3)"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    description = "HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = { Name = "${var.name_prefix}-builder-sg" }
 
   lifecycle {
     create_before_destroy = true

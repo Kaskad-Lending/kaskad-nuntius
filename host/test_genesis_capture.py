@@ -69,6 +69,27 @@ class GenesisCaptureTest(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             capture.main()
 
+    @patch.object(capture, "imds_instance_id", return_value="i-test")
+    @patch.object(capture, "s3_put")
+    @patch.object(capture, "vsock_call")
+    def test_uploads_target_artifact_region_with_fallbacks(self, rpc, upload, _iid):
+        """S3 region prefers KASKAD_ARTIFACT_REGION, then KASKAD_AWS_REGION, then us-east-1."""
+        cases = (
+            ({"KASKAD_ARTIFACT_REGION": "us-east-1", "KASKAD_AWS_REGION": "eu-west-1"}, "us-east-1"),
+            ({"KASKAD_ARTIFACT_REGION": "", "KASKAD_AWS_REGION": "eu-west-1"}, "eu-west-1"),
+            ({"KASKAD_AWS_REGION": "eu-west-1"}, "eu-west-1"),
+            ({}, "us-east-1"),
+        )
+        for env, expected in cases:
+            with self.subTest(env=env), patch.dict(
+                    os.environ, {"KASKAD_EIF_BUCKET": "test-eif", **env}, clear=True):
+                upload.reset_mock()
+                rpc.side_effect = [{"state": "waiting_registration"}, attestation("0xaabb")]
+                self.assertEqual(capture.main(), 0)
+                self.assertEqual([c.args[2] for c in upload.call_args_list],
+                                 ["genesis/i-test.json", "genesis/latest.json", "genesis/i-test.log"])
+                self.assertEqual({c.args[3] for c in upload.call_args_list}, {expected})
+
     def test_service_can_run_again_after_completion(self):
         config = configparser.ConfigParser()
         config.read(Path(__file__).parent / "systemd/kaskad-genesis-capture.service")
@@ -83,9 +104,9 @@ class GenesisCaptureTest(unittest.TestCase):
         config.read(root / "host/systemd/kaskad-genesis-capture.timer")
         self.assertEqual(config["Timer"]["OnUnitInactiveSec"], "10min")
         self.assertEqual(config["Timer"]["Unit"], "kaskad-genesis-capture.service")
-        script = (root / "infra/live/us-east-1-nitro/user-data-prod.sh").read_text()
+        script = (root / "infra/modules/nitro-fleet/user-data-prod.sh").read_text()
         self.assertIn("systemctl enable --now kaskad-genesis-capture.timer", script)
-        self.assertIn("host/systemd/kaskad-genesis-capture.timer", script)
+        self.assertIn("host${eif_release_suffix}/systemd/kaskad-genesis-capture.timer", script)
 
 
 if __name__ == "__main__":

@@ -32,20 +32,30 @@ def approval_blob(version: int = 1) -> ApprovalBlob:
     }
 
 
+def pusher_args(**overrides: Any) -> argparse.Namespace:
+    fields: dict[str, Any] = {
+        "configure_interval": 30,
+        "bridge_timeout": 10,
+        "asg_tag": "",
+        "region": "",
+        "peer_asgs": [],
+        "artifact_region": "",
+        "eif_bucket": "test-eif",
+        "oracle_registry": "",
+        "bridge_entry": "",
+        "rh_rpc": [],
+    }
+    return argparse.Namespace(**{**fields, **overrides})
+
+
+def completed(stdout: str) -> Any:
+    return host.subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
 class ConfigPusherTest(unittest.TestCase):
     def setUp(self) -> None:
-        args = argparse.Namespace(
-            configure_interval=30,
-            bridge_timeout=10,
-            asg_tag="",
-            region="",
-            eif_bucket="test-eif",
-            oracle_registry="",
-            bridge_entry="",
-            rh_rpc=[],
-        )
         self.stop_event = threading.Event()
-        self.pusher = host.ConfigPusher(args, self.stop_event)
+        self.pusher = host.ConfigPusher(pusher_args(), self.stop_event)
         self.key = "approvals/owner.json"
         self.blob = approval_blob()
         mocks = ExitStack()
@@ -200,6 +210,163 @@ class ConfigPusherTest(unittest.TestCase):
         self.list_s3.assert_not_called()
         self.read_s3.assert_not_called()
         self.rpc.assert_not_called()
+
+
+class PeerAsgParseTest(unittest.TestCase):
+    def test_pairs_keep_order_and_blank_entries_are_skipped(self) -> None:
+        """Pairs parse in order; whitespace and blank entries are ignored."""
+        self.assertEqual(
+            host.parse_peer_asgs(" us-east-1 : kaskad-nitro-us-prod-asg ,, eu-west-1:kaskad-nitro-eu-prod-asg, "),
+            [host.PeerAsg("us-east-1", "kaskad-nitro-us-prod-asg"),
+             host.PeerAsg("eu-west-1", "kaskad-nitro-eu-prod-asg")],
+        )
+
+    def test_empty_input_means_no_peers(self) -> None:
+        """Empty or all-blank input yields no peers."""
+        for raw in ("", " ", ",", " , ,"):
+            with self.subTest(raw=raw):
+                self.assertEqual(host.parse_peer_asgs(raw), [])
+
+    def test_malformed_entry_rejected(self) -> None:
+        """An entry missing its region or ASG raises ValueError."""
+        for raw in ("us-east-1", ":asg", "us-east-1:", " : ", "us-east-1:asg,eu-west-1"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                host.parse_peer_asgs(raw)
+
+    def test_env_reaches_args_and_bad_peer_env_fails_closed(self) -> None:
+        """Peer/artifact env vars reach args; a malformed peer list exits 2."""
+        with patch.dict(host.os.environ, {
+            "KASKAD_PEER_ASGS": "us-east-1:kaskad-nitro-us-prod-asg",
+            "KASKAD_ARTIFACT_REGION": "us-east-1",
+        }, clear=True):
+            args = host.parse_args([])
+        self.assertEqual(args.peer_asgs, [host.PeerAsg("us-east-1", "kaskad-nitro-us-prod-asg")])
+        self.assertEqual(args.artifact_region, "us-east-1")
+        with patch.dict(host.os.environ, {}, clear=True):
+            args = host.parse_args([])
+        self.assertEqual((args.peer_asgs, args.artifact_region), ([], ""))
+        with patch.dict(host.os.environ, {"KASKAD_PEER_ASGS": "us-east-1"}, clear=True), \
+                patch("sys.stderr", new_callable=io.StringIO):
+            with self.assertRaises(SystemExit) as error:
+                host.parse_args([])
+        self.assertEqual(error.exception.code, 2)
+
+
+class PeerDiscoveryTest(unittest.TestCase):
+    OWN = host.PeerAsg("eu-west-1", "kaskad-nitro-eu-prod-asg")
+    PEER = host.PeerAsg("us-east-1", "kaskad-nitro-us-prod-asg")
+
+    def setUp(self) -> None:
+        self.pusher = host.ConfigPusher(pusher_args(
+            asg_tag=self.OWN.asg_name, region=self.OWN.region,
+            peer_asgs=[self.PEER], artifact_region="us-east-1",
+        ), threading.Event())
+        self.replies: dict[host.PeerAsg, Optional[str]] = {}
+        mocks = ExitStack()
+        self.addCleanup(mocks.close)
+        self.aws = mocks.enter_context(patch.object(self.pusher, "_aws", side_effect=self.fake_aws))
+        self.self_ip = mocks.enter_context(patch.object(
+            self.pusher, "_self_ip", return_value="10.21.1.5",
+        ))
+        self.warn = mocks.enter_context(patch.object(host.log, "warning"))
+
+    def fake_aws(self, cmd: list[str], region: str) -> Optional[str]:
+        asg_name = cmd[cmd.index("--filters") + 1].rsplit("=", 1)[1]
+        return self.replies[host.PeerAsg(region, asg_name)]
+
+    def test_own_then_peer_ips_deduped_without_self(self) -> None:
+        """Own-ASG IPs come first, then peers; duplicates and self drop out."""
+        self.pusher._peer_asgs = [self.OWN, self.PEER]
+        self.replies = {
+            self.OWN: json.dumps(["10.21.1.5", "10.21.2.6"]),
+            self.PEER: json.dumps(["10.20.1.127", None, "10.20.2.70"]),
+        }
+        self.assertEqual(self.pusher._discover_oracle_ips(),
+                         ["10.21.2.6", "10.20.1.127", "10.20.2.70"])
+        self.assertEqual([c.args[1] for c in self.aws.call_args_list],
+                         ["eu-west-1", "eu-west-1", "us-east-1"])
+
+    def test_failed_region_does_not_block_others(self) -> None:
+        """A failed or garbled region is logged and skipped; the others still count."""
+        for broken in (None, "not json", json.dumps({"ip": "10.20.1.127"})):
+            with self.subTest(broken=broken):
+                self.warn.reset_mock()
+                self.replies = {self.OWN: broken, self.PEER: json.dumps(["10.20.1.127"])}
+                self.assertEqual(self.pusher._discover_oracle_ips(), ["10.20.1.127"])
+                self.replies = {self.OWN: json.dumps(["10.21.2.6"]), self.PEER: broken}
+                self.assertEqual(self.pusher._discover_oracle_ips(), ["10.21.2.6"])
+                self.assertEqual(self.warn.call_count, 2)
+
+    def test_total_failure_returns_empty_without_imds(self) -> None:
+        """Every region failing yields [] and skips the IMDS self lookup."""
+        self.replies = {self.OWN: None, self.PEER: None}
+        self.assertEqual(self.pusher._discover_oracle_ips(), [])
+        self.self_ip.assert_not_called()
+
+    def test_no_asg_and_no_peers_makes_no_calls(self) -> None:
+        """Without an own ASG or peers discovery stays idle."""
+        self.pusher._asg_tag = ""
+        self.pusher._peer_asgs = []
+        self.assertEqual(self.pusher._discover_oracle_ips(), [])
+        self.aws.assert_not_called()
+        self.self_ip.assert_not_called()
+
+    def test_peers_discovered_without_own_asg(self) -> None:
+        """Peer ASGs are still queried when the own ASG tag is unset."""
+        self.pusher._asg_tag = ""
+        self.replies = {self.PEER: json.dumps(["10.20.1.127"])}
+        self.assertEqual(self.pusher._discover_oracle_ips(), ["10.20.1.127"])
+
+    def test_configure_push_carries_cross_region_peers(self) -> None:
+        """The oracle configure frame lists peers from every region."""
+        registry = "0x" + "ab" * 20
+        self.pusher._registry = registry
+        self.pusher._eif_bucket = ""
+        self.replies = {self.OWN: json.dumps(["10.21.2.6"]), self.PEER: json.dumps(["10.20.1.127"])}
+        with patch.object(host, "vsock_call", return_value={"ok": True}) as rpc:
+            self.pusher._tick()
+        rpc.assert_called_once_with(host.ORACLE_CID, host.ORACLE_CONFIG_PORT, {
+            "method": host.EnclaveMethod.CONFIGURE.value,
+            "registry": registry,
+            "rhRpcs": [],
+            "oraclePeers": ["10.21.2.6", "10.20.1.127"],
+        }, 10)
+
+
+class AwsRegionTest(unittest.TestCase):
+    def test_single_region_describe_argv_unchanged(self) -> None:
+        """Without peer config the describe call keeps its exact legacy argv."""
+        pusher = host.ConfigPusher(pusher_args(
+            asg_tag="kaskad-nitro-us-prod-asg", region="us-east-1",
+        ), threading.Event())
+        with patch.object(host.subprocess, "run",
+                          return_value=completed('["10.20.1.127", "10.20.2.70"]')) as run, \
+                patch.object(pusher, "_self_ip", return_value="10.20.1.127"):
+            self.assertEqual(pusher._discover_oracle_ips(), ["10.20.2.70"])
+        run.assert_called_once_with([
+            "aws", "ec2", "describe-instances", "--filters",
+            "Name=tag:aws:autoscaling:groupName,Values=kaskad-nitro-us-prod-asg",
+            "Name=instance-state-name,Values=running",
+            "--query", "Reservations[].Instances[].PrivateIpAddress",
+            "--output", "json", "--region", "us-east-1",
+        ], capture_output=True, text=True, timeout=15)
+
+    def test_s3_uses_artifact_region_else_host_region(self) -> None:
+        """S3 list/read target the artifact region, defaulting to the host region."""
+        for artifact, expected in (("us-east-1", "us-east-1"), ("", "eu-west-1")):
+            with self.subTest(artifact=artifact):
+                pusher = host.ConfigPusher(pusher_args(
+                    region="eu-west-1", artifact_region=artifact,
+                ), threading.Event())
+                with patch.object(host.subprocess, "run", return_value=completed("")) as run:
+                    pusher._list_s3("s3://test-eif/approvals/")
+                    pusher._read_s3("s3://test-eif/approvals/owner.json")
+                self.assertEqual([c.args[0] for c in run.call_args_list], [
+                    ["aws", "s3", "ls", "s3://test-eif/approvals/", "--recursive",
+                     "--region", expected],
+                    ["aws", "s3", "cp", "s3://test-eif/approvals/owner.json", "-",
+                     "--region", expected],
+                ])
 
 
 class VsockBoundsTest(unittest.TestCase):

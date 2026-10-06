@@ -12,11 +12,12 @@ terraform {
     }
   }
 
-  # Local backend for the first apply. Migrate to S3 once the state
-  # bucket exists and kaskad-tf can write it.
-  #   backend "s3" {
-  #     bucket = "kaskad-terraform-state"
-  #     key    = "kaskad-nitro-us/terraform.tfstate"
-  #     region = "us-east-1"
-  #   }
+  # Bucket is bootstrapped outside terraform (versioned, SSE-S3, public access blocked).
+  backend "s3" {
+    bucket       = "kaskad-terraform-state"
+    key          = "kaskad-nitro-us/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
 }
