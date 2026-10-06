@@ -126,6 +126,14 @@ class NoKmsTest(unittest.TestCase):
             with self.subTest(file=rel):
                 self.assertIsNone(KMS_USE.search((ROOT / rel).read_text()))
 
+    def test_nitro_terraform_declares_no_kms(self):
+        """No aws_kms_* resource or data source in the nitro module or its roots."""
+        dirs = ("infra/modules/nitro-fleet", "infra/live/us-east-1-nitro",
+                "infra/live/eu-west-1-nitro", "infra/live/nuntius-edge")
+        for tf in (p for d in dirs for p in sorted((ROOT / d).glob("*.tf"))):
+            with self.subTest(file=str(tf.relative_to(ROOT))):
+                self.assertNotRegex(tf.read_text(), r'"aws_kms_')
+
     def test_boot_fetches_both_images_by_pin(self):
         """user-data boots each enclave through fetch_pinned with its template pin."""
         text = USER_DATA.read_text()
