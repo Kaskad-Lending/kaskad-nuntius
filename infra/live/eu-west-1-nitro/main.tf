@@ -1,5 +1,5 @@
-# eu-west-1 keyex fleet: oracle-only mirror of the US fleet. Fetches the pinned
-# EIF from the us-east-1 bucket and takes the key from US peers over VPC peering.
+# eu-west-1 keyex fleet: oracle-only mirror of the US fleet. Boots the pinned EIF
+# from its own bucket (s3.tf) and takes the key from US peers over VPC peering.
 # Edge (nuntius) name: ../edge.json.
 
 locals {
@@ -26,10 +26,9 @@ module "fleet" {
   asg_capacity        = var.asg_capacity
   asg_max_size        = var.asg_max_size
 
-  eif_bucket_name    = local.us.eif_bucket
+  eif_bucket_name    = module.eif_bucket.bucket
   eif_release_suffix = var.eif_release_suffix
   oracle_eif         = local.eif_release.oracle
-  artifact_region    = local.us.aws_region
 
   peer_asgs = [{ region = local.us.aws_region, asg_name = local.us.prod_asg_name }]
 

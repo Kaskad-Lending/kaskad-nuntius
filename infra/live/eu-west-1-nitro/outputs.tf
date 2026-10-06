@@ -3,6 +3,10 @@ output "alb_dns_name" {
   value       = module.fleet.alb_dns_name
 }
 
+output "eif_bucket" {
+  value = module.eif_bucket.bucket
+}
+
 output "prod_asg_name" {
   value = module.fleet.asg_name
 }

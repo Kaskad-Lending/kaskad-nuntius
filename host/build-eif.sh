@@ -98,6 +98,26 @@ case "$REL_SUFFIX" in
   *) echo "FATAL: EIF_RELEASE_SUFFIX must start with '-' and be lowercase alnum" >&2; exit 1 ;;
 esac
 
+# EIF_MIRRORS="bucket@region ...": each regional fleet boots from its own bucket,
+# so boot artifacts (eif/, host*/) also go to every mirror. A failed mirror fails the release.
+MIRRORS=()
+read -r -a _mirrors <<< "${EIF_MIRRORS:-}"
+for m in "${_mirrors[@]}"; do
+  [[ "$m" =~ ^[a-z0-9][a-z0-9.-]+@[a-z]{2}(-[a-z]+)+-[0-9]$ ]] \
+    || { echo "FATAL: EIF_MIRRORS entry '$m' is not bucket@region" >&2; exit 1; }
+  MIRRORS+=("$m")
+done
+
+# put_boot SRC KEY [aws s3 cp flags]: one boot artifact to the primary and every mirror.
+put_boot() {
+  local src="$1" key="$2" m
+  shift 2
+  retry 3 5 aws s3 cp "$@" "$src" "$S3/$key"
+  for m in "${MIRRORS[@]}"; do
+    retry 3 5 aws s3 cp "$@" --region "${m#*@}" "$src" "s3://${m%@*}/$key"
+  done
+}
+
 build_one() {
   local name="$1" dockerfile="$2"
   local tag="kaskad-$name:$COMMIT" eif="$WORK/$name.eif"
@@ -183,11 +203,11 @@ build_one() {
   jq -n --arg sha "$sha" --arg pcr0 "$pcr0" --arg commit "$COMMIT" --arg config "$EIF_CONFIG" \
     '{sha384: $sha, pcr0: $pcr0, commit: $commit, config: $config}' > "$WORK/$name.pin.json"
 
-  retry 3 5 aws s3 cp "$eif"                  "$S3/eif/$sha.eif"
+  put_boot "$eif" "eif/$sha.eif"
   retry 3 5 aws s3 cp "$WORK/$name.pcr0.json" "$S3/staging/$COMMIT/$name.pcr0.json"
   retry 3 5 aws s3 cp "$WORK/$name.pcrs.json" "$S3/staging/$COMMIT/$name.pcrs.json"
   retry 3 5 aws s3 cp "$WORK/$name.pin.json"  "$S3/staging/$COMMIT/$name.pin.json"
-  echo "$name published to $S3/eif/$sha.eif"
+  echo "$name published to $S3/eif/$sha.eif (+${#MIRRORS[@]} mirrors)"
 
   # Reclaim the oracle build cache + image before pontifex builds, so two musl
   # release trees need not co-reside on the 30G builder volume. Cache-independent
@@ -204,12 +224,12 @@ build_one() {
 publish_host_bundle() {
   local hp="host$REL_SUFFIX"
   echo "=== publish host bundle ($hp) ==="
-  retry 3 5 aws s3 cp host/http_connect_proxy.py "$S3/$hp/http_connect_proxy.py"
-  retry 3 5 aws s3 cp host/pontifex_host.py      "$S3/$hp/pontifex_host.py"
-  retry 3 5 aws s3 cp host/genesis_capture.py    "$S3/$hp/genesis_capture.py"
-  retry 3 5 aws s3 cp host/pull_api.py           "$S3/$hp/pull_api.py"
-  retry 3 5 aws s3 cp --recursive host/systemd/  "$S3/$hp/systemd/"
-  echo "host bundle published to $S3/$hp/"
+  put_boot host/http_connect_proxy.py "$hp/http_connect_proxy.py"
+  put_boot host/pontifex_host.py      "$hp/pontifex_host.py"
+  put_boot host/genesis_capture.py    "$hp/genesis_capture.py"
+  put_boot host/pull_api.py           "$hp/pull_api.py"
+  put_boot host/systemd/              "$hp/systemd/" --recursive
+  echo "host bundle published to $S3/$hp/ (+${#MIRRORS[@]} mirrors)"
 }
 
 # Run the whole build piped to tee so the full transcript — not just SSM's

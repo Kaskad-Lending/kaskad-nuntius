@@ -2,9 +2,10 @@ name: Build Keyex EIFs
 
 # Builds both keyex enclave images (oracle CID 16, pontifex CID 17) on the
 # us-east-1 Nitro builder via host/build-eif.sh over SSM, publishes each EIF as
-# eif/<sha384>.eif and reports its pin (sha384 + PCR0). Nothing is signed and
-# nothing boots from this run: a host boots an image only after its pin lands in
-# infra/live/eif-release.json and terraform applies it. No ASG refresh here.
+# eif/<sha384>.eif (plus the host bundle) to the release bucket and every
+# regional mirror in EIF_MIRRORS, and reports its pin (sha384 + PCR0). Nothing
+# is signed and nothing boots from this run: a host boots an image only after its
+# pin lands in infra/live/eif-release.json and terraform applies it. No ASG refresh here.
 
 on:
   # Deliberate release builds only. Pushing an `eif-v*` tag runs this workflow
@@ -81,6 +82,8 @@ jobs:
           set -euo pipefail
           {
             echo "EIF_BUCKET=${NAME_PREFIX}-eif"
+            # Each regional fleet's boot bucket (bucket@region); see eif_mirror_buckets.
+            echo "EIF_MIRRORS=kaskad-nitro-eu-eif@eu-west-1"
             echo "OIDC_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/${NAME_PREFIX}-github-ci"
             echo "BUILDER_TAG=${NAME_PREFIX}-builder"
           } >> "$GITHUB_ENV"
@@ -153,7 +156,7 @@ jobs:
               "aws s3 cp s3://'"${EIF_BUCKET}"'/builds/${{ github.sha }}/source.zip /tmp/source.zip",
               "unzip -q /tmp/source.zip -d /tmp/build/",
               "chmod +x /tmp/build/host/build-eif.sh",
-              "cd /tmp/build && COMMIT=${{ github.sha }} EIF_BUCKET='"${EIF_BUCKET}"' AWS_REGION='"${AWS_REGION}"' host/build-eif.sh"
+              "cd /tmp/build && COMMIT=${{ github.sha }} EIF_BUCKET='"${EIF_BUCKET}"' EIF_MIRRORS='"${EIF_MIRRORS}"' AWS_REGION='"${AWS_REGION}"' host/build-eif.sh"
             ]' \
             --query "Command.CommandId" --output text)
           echo "SSM command: $CMD_ID"
@@ -213,7 +216,7 @@ jobs:
           set -euo pipefail
           {
             echo "## Keyex EIF measurements"
-            echo "Commit: \`${{ github.sha }}\`  Bucket: \`${EIF_BUCKET}\`"
+            echo "Commit: \`${{ github.sha }}\`  Bucket: \`${EIF_BUCKET}\`  Mirrors: \`${EIF_MIRRORS}\`"
             echo ""
             echo "| image | field | value |"
             echo "|---|---|---|"

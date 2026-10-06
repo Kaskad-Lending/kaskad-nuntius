@@ -63,7 +63,7 @@ if [ "$alloc_rc" -ne 0 ]; then
 fi
 set -e
 
-# The bucket may live in another region (EU boots from us-east-1).
+# Each fleet boots from its own regional bucket unless artifact_region overrides it.
 ARTIFACT_REGION=${artifact_region}
 BUCKET=${eif_bucket}
 KASKAD_DIR=/opt/kaskad

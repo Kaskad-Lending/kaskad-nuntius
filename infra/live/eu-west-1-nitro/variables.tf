@@ -60,8 +60,14 @@ variable "asg_max_size" {
   default     = 2
 }
 
+variable "eif_bucket_name" {
+  description = "This region's boot bucket; must be in the US root's eif_mirror_buckets."
+  type        = string
+  default     = "kaskad-nitro-eu-eif"
+}
+
 variable "eif_release_suffix" {
-  description = "Release prefix suffix: -mainnet boots oracle-mainnet/ + host-mainnet/."
+  description = "Host bundle prefix suffix: -mainnet boots host-mainnet/ (EIFs are content-addressed under eif/)."
   type        = string
   default     = "-mainnet"
 }

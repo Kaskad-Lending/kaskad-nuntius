@@ -134,3 +134,29 @@ moved {
   from = aws_cloudwatch_metric_alarm.quorum
   to   = module.fleet.aws_cloudwatch_metric_alarm.quorum
 }
+
+# EIF bucket moved into the shared eif-bucket module.
+moved {
+  from = aws_s3_bucket.eif
+  to   = module.eif_bucket.aws_s3_bucket.eif
+}
+
+moved {
+  from = aws_s3_bucket_versioning.eif
+  to   = module.eif_bucket.aws_s3_bucket_versioning.eif
+}
+
+moved {
+  from = aws_s3_bucket_server_side_encryption_configuration.eif
+  to   = module.eif_bucket.aws_s3_bucket_server_side_encryption_configuration.eif
+}
+
+moved {
+  from = aws_s3_bucket_public_access_block.eif
+  to   = module.eif_bucket.aws_s3_bucket_public_access_block.eif
+}
+
+moved {
+  from = aws_s3_bucket_lifecycle_configuration.eif
+  to   = module.eif_bucket.aws_s3_bucket_lifecycle_configuration.eif
+}
