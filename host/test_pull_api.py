@@ -171,14 +171,25 @@ class EdgeWiringTest(unittest.TestCase):
     FLEET = ROOT / "infra/modules/nitro-fleet"
 
     def test_pull_api_edge_host_is_the_name_the_alb_guards(self):
-        """EDGE_HOST and both ALB edge rules come from the same module var."""
+        """EDGE_HOST and every ALB host rule (edge pair + guarded bridge pair) use the same module var."""
         self.assertIn("EDGE_HOST=${edge_domain_name}\n", (self.FLEET / "user-data-prod.sh").read_text())
         self.assertRegex((self.FLEET / "prod.tf").read_text(), r"edge_domain_name\s*=\s*var\.edge_domain_name\n")
         self.assertIn("EnvironmentFile=/etc/kaskad/pull-api.env",
                       (ROOT / "host/systemd/kaskad-pull-api.service").read_text())
         self.assertIn('os.environ.get("EDGE_HOST"', (ROOT / "host/pull_api.py").read_text())
         alb = (self.FLEET / "alb.tf").read_text()
-        self.assertEqual(alb.count("host_header { values = [var.edge_domain_name] }"), 2)
+        self.assertEqual(alb.count("host_header { values = [var.edge_domain_name] }"), 4)
+        self.assertEqual(alb.count("host_header"), 4)
+
+    def test_edge_only_alb_admits_only_cloudfront_and_refuses_by_default(self):
+        """Edge-only: 443 from the CloudFront prefix list, no :80 listener, default 403, guarded bridge."""
+        alb = (self.FLEET / "alb.tf").read_text()
+        self.assertIn('edge_only     = var.domain_name == "" && local.edge_attached', alb)
+        self.assertIn('"com.amazonaws.global.cloudfront.origin-facing"', alb)
+        self.assertIn('for_each = local.edge_only ? [] : [80]', alb)
+        self.assertIn('count             = var.domain_name == "" && !local.edge_only ? 1 : 0', alb)
+        self.assertIn('type             = local.edge_only ? "fixed-response" : "forward"', alb)
+        self.assertEqual(alb.count("http_header_name = local.edge_header"), 3)
 
 
 class _FakeSock:

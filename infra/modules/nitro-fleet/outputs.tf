@@ -27,7 +27,7 @@ output "launch_template_id" {
 }
 
 output "alb_dns_name" {
-  description = "Pull API endpoint (bare DNS while domain_name is empty)."
+  description = "ALB DNS: the CloudFront origin when edge-only, else the pull API endpoint."
   value       = aws_lb.nitro.dns_name
 }
 

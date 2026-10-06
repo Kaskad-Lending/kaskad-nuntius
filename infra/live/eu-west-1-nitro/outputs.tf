@@ -1,5 +1,5 @@
 output "alb_dns_name" {
-  description = "EU pull API (HTTP on the bare ALB DNS while domain_name is empty)."
+  description = "EU ALB DNS: CloudFront failover origin for the edge name."
   value       = module.fleet.alb_dns_name
 }
 

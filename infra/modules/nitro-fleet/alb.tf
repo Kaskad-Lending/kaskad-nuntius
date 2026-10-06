@@ -1,18 +1,27 @@
 # ─── ALB for Pull API (two-AZ) ───────────────────────────────
-# domain_name="" serves HTTP on the bare ALB DNS. ACM DNS validation runs
-# outside kaskad-tf (route53 forbidden); the HTTPS listener needs the cert ISSUED.
+# Without domain_name the ALB is edge-only once the edge cert is ISSUED (CloudFront
+# is its only client), else HTTP on the bare ALB DNS. ACM DNS validation runs
+# outside kaskad-tf (route53 forbidden).
 
 locals {
   edge_enabled  = var.edge_domain_name != ""
   edge_attached = local.edge_enabled && var.edge_cert_issued
   https_enabled = var.domain_name != "" || local.edge_attached
+  edge_only     = var.domain_name == "" && local.edge_attached
   edge_header   = "X-Kaskad-Edge"
 
   # Listeners that forward to the pull API; each one carries the edge guard.
   forwarding_listeners = merge(
     local.https_enabled ? { https = aws_lb_listener.https[0].arn } : {},
-    var.domain_name == "" ? { http = aws_lb_listener.http_forward[0].arn } : {},
+    var.domain_name == "" && !local.edge_only ? { http = aws_lb_listener.http_forward[0].arn } : {},
   )
+  bridge_listener_arn = var.domain_name != "" || local.edge_only ? aws_lb_listener.https[0].arn : aws_lb_listener.http_forward[0].arn
+}
+
+# CloudFront's origin-facing ranges; the origin token tells our distribution apart.
+data "aws_ec2_managed_prefix_list" "cloudfront_origin" {
+  count = local.edge_only ? 1 : 0
+  name  = "com.amazonaws.global.cloudfront.origin-facing"
 }
 
 resource "aws_acm_certificate" "nitro" {
@@ -66,20 +75,25 @@ resource "aws_security_group" "alb" {
   description = "ALB: HTTPS/HTTP inbound, 8080 to instances"
   vpc_id      = aws_vpc.main.id
 
+  # Edge-only: CloudFront alone (the prefix list weighs 55 of the 60-rule quota).
   ingress {
-    description = "HTTPS"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    description     = local.edge_only ? "HTTPS from CloudFront" : "HTTPS"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    cidr_blocks     = local.edge_only ? [] : ["0.0.0.0/0"]
+    prefix_list_ids = local.edge_only ? [data.aws_ec2_managed_prefix_list.cloudfront_origin[0].id] : []
   }
 
-  ingress {
-    description = "HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  dynamic "ingress" {
+    for_each = local.edge_only ? [] : [80]
+    content {
+      description = "HTTP"
+      from_port   = ingress.value
+      to_port     = ingress.value
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
   }
 
   egress {
@@ -131,9 +145,19 @@ resource "aws_lb_listener" "https" {
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn   = var.domain_name != "" ? aws_acm_certificate.nitro[0].arn : aws_acm_certificate.edge[0].arn
 
+  # Edge-only: whatever the edge guard does not forward is refused.
   default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.nitro.arn
+    type             = local.edge_only ? "fixed-response" : "forward"
+    target_group_arn = local.edge_only ? null : aws_lb_target_group.nitro.arn
+
+    dynamic "fixed_response" {
+      for_each = local.edge_only ? [1] : []
+      content {
+        content_type = "application/json"
+        message_body = "{\"error\":\"forbidden\"}"
+        status_code  = "403"
+      }
+    }
   }
 }
 
@@ -204,7 +228,7 @@ resource "aws_lb_listener" "http_redirect" {
 }
 
 resource "aws_lb_listener" "http_forward" {
-  count             = var.domain_name != "" ? 0 : 1
+  count             = var.domain_name == "" && !local.edge_only ? 1 : 0
   load_balancer_arn = aws_lb.nitro.arn
   port              = 80
   protocol          = "HTTP"
@@ -248,8 +272,9 @@ resource "aws_autoscaling_attachment" "bridge" {
   lb_target_group_arn    = aws_lb_target_group.bridge.arn
 }
 
+# Edge-only: the bridge sits behind the same edge guard as the pull API.
 resource "aws_lb_listener_rule" "bridge_read" {
-  listener_arn = var.domain_name != "" ? aws_lb_listener.https[0].arn : aws_lb_listener.http_forward[0].arn
+  listener_arn = local.bridge_listener_arn
   priority     = 10
 
   action {
@@ -264,10 +289,27 @@ resource "aws_lb_listener_rule" "bridge_read" {
   condition {
     path_pattern { values = ["/bridge/health", "/bridge/attestation"] }
   }
+
+  dynamic "condition" {
+    for_each = local.edge_only ? [1] : []
+    content {
+      host_header { values = [var.edge_domain_name] }
+    }
+  }
+
+  dynamic "condition" {
+    for_each = local.edge_only ? [1] : []
+    content {
+      http_header {
+        http_header_name = local.edge_header
+        values           = [random_password.edge_origin[0].result]
+      }
+    }
+  }
 }
 
 resource "aws_lb_listener_rule" "bridge_sign" {
-  listener_arn = var.domain_name != "" ? aws_lb_listener.https[0].arn : aws_lb_listener.http_forward[0].arn
+  listener_arn = local.bridge_listener_arn
   priority     = 11
 
   action {
@@ -281,5 +323,22 @@ resource "aws_lb_listener_rule" "bridge_sign" {
 
   condition {
     path_pattern { values = ["/bridge/sign"] }
+  }
+
+  dynamic "condition" {
+    for_each = local.edge_only ? [1] : []
+    content {
+      host_header { values = [var.edge_domain_name] }
+    }
+  }
+
+  dynamic "condition" {
+    for_each = local.edge_only ? [1] : []
+    content {
+      http_header {
+        http_header_name = local.edge_header
+        values           = [random_password.edge_origin[0].result]
+      }
+    }
   }
 }
