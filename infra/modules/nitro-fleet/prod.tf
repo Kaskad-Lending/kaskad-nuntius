@@ -137,4 +137,9 @@ resource "aws_autoscaling_group" "prod" {
     value               = "${var.name_prefix}-prod-asg"
     propagate_at_launch = false
   }
+
+  # Rollouts scale out by hand; an apply mid-rollout must not reset desired.
+  lifecycle {
+    ignore_changes = [desired_capacity]
+  }
 }
