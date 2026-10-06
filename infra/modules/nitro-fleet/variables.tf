@@ -152,7 +152,7 @@ variable "enclave_debug_mode" {
 # ─── ALB / DNS ────────────────────────────────────────────────
 
 variable "domain_name" {
-  description = "API domain. Empty = HTTP on the bare ALB DNS, no ACM."
+  description = "Public API domain. Empty: edge-only once the edge cert is issued, else HTTP on the bare ALB DNS."
   type        = string
   default     = ""
 }

@@ -27,7 +27,7 @@ output "github_ci_role_arn" {
 }
 
 output "alb_dns_name" {
-  description = "ALB DNS — the pull API endpoint (bare DNS while domain_name is empty)"
+  description = "ALB DNS: CloudFront origin for the edge name"
   value       = module.fleet.alb_dns_name
 }
 

@@ -124,7 +124,7 @@ variable "enable_pontifex" {
 # ─── ALB / DNS ────────────────────────────────────────────────
 
 variable "domain_name" {
-  description = "API domain. Empty = bare ALB DNS, no ACM/HTTPS (route53 forbidden here; ACM DNS-validation runs outside kaskad-tf)."
+  description = "Public API domain. Empty: edge-only once the edge cert is issued (ACM DNS validation runs outside kaskad-tf)."
   type        = string
   default     = ""
 }
