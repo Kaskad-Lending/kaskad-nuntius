@@ -60,10 +60,11 @@ _concurrency = threading.Semaphore(MAX_CONCURRENT)
 # up to the entry the ALB itself appends. `TRUSTED_PROXIES` names the egress
 # addresses of our own front proxies; the chain is then walked right to left
 # past trusted and private hops, and the first remaining entry is the client.
-# Unset, that walk is impossible and we fall back to the legacy leftmost
-# entry, which any caller can forge — `main()` says so loudly at startup.
+# Unset, it defaults to the front hosts below; set it empty and the walk is
+# off, leaving the legacy leftmost entry, which any caller can forge —
+# `main()` says so loudly at startup.
 #
-# `VPC_CIDR` and `TRUSTED_PROXIES` are set via systemd `Environment=` in
+# `VPC_CIDR` and `TRUSTED_PROXIES` can be set via systemd `Environment=` in
 # kaskad-pull-api.service, substituted from terraform.
 _VPC_CIDR_STR = os.environ.get("VPC_CIDR", "10.0.0.0/16")
 try:
@@ -96,7 +97,11 @@ def _parse_networks(raw):
     return tuple(nets)
 
 
-_TRUSTED_PROXIES = _parse_networks(os.environ.get("TRUSTED_PROXIES", ""))
+# Egress of the kaskad.live and testnet.kaskad.live front nginx hosts, which
+# proxy /enclave and /enclave-eu here and put the visitor left of their own hop.
+DEFAULT_TRUSTED_PROXIES = "49.13.195.55/32,46.224.136.122/32"
+
+_TRUSTED_PROXIES = _parse_networks(os.environ.get("TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES))
 _TRUST_MODE = TrustMode.TRUSTED_CHAIN if _TRUSTED_PROXIES else TrustMode.LEFTMOST
 
 
@@ -119,7 +124,8 @@ def _xff_chain(handler):
     for value in values:
         for token in value.split(","):
             token = token.strip()
-            if not token:
+            # `%` is an IPv6 scope id or percent-encoding: one address, many spellings.
+            if not token or "%" in token:
                 continue
             try:
                 chain.append(ipaddress.ip_address(token))
@@ -353,7 +359,7 @@ def main():
     print(f"[pull-api] Rate limit: {RATE_LIMIT} req/{RATE_WINDOW}s per IP "
           f"(max {MAX_TRACKED_KEYS} tracked keys)")
     if _TRUST_MODE is TrustMode.LEFTMOST:
-        print("[pull-api] WARN: TRUSTED_PROXIES is unset — the rate-limit key is "
+        print("[pull-api] WARN: TRUSTED_PROXIES is empty — the rate-limit key is "
               "the first X-Forwarded-For entry, which any caller can forge. "
               "Set it to the front proxy egress addresses.", file=sys.stderr)
     else:
