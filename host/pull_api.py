@@ -16,7 +16,7 @@ import sys
 import time
 import threading
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from collections import defaultdict
+from collections import OrderedDict
 
 # VSOCK constants
 AF_VSOCK = 40
@@ -26,6 +26,11 @@ VSOCK_PORT = 5001
 # Rate limiting
 RATE_LIMIT = 60        # requests per window
 RATE_WINDOW = 60       # seconds
+
+# Cap on distinct rate-limit keys kept in memory. Buckets idle for a full
+# window are dropped first — they have provably refilled to RATE_LIMIT and
+# carry no information — so the cap only bites under a key-flooding attack.
+MAX_TRACKED_KEYS = 50_000
 
 # Concurrency cap. `ThreadingHTTPServer` spawns a fresh thread per request
 # unbounded — one slowloris-style client can exhaust threads / FDs. This
@@ -103,35 +108,51 @@ def _via_edge(handler):
 # ─── Rate Limiter ────────────────────────────────────────────
 
 class RateLimiter:
-    """Simple token-bucket rate limiter per IP."""
+    """Token bucket per key, with bounded state.
 
-    def __init__(self, limit=RATE_LIMIT, window=RATE_WINDOW):
+    Uses `time.monotonic()` so an NTP step cannot mint or withhold tokens.
+    """
+
+    def __init__(self, limit=RATE_LIMIT, window=RATE_WINDOW, max_keys=MAX_TRACKED_KEYS):
         self.limit = limit
         self.window = window
-        self.clients = defaultdict(lambda: {"tokens": limit, "last": time.time()})
+        self.max_keys = max_keys
+        # key -> (tokens, last_seen); ordered oldest-touched first.
+        self.clients = OrderedDict()
         self.lock = threading.Lock()
 
-    def is_allowed(self, ip):
+    def _tokens(self, key, now):
+        entry = self.clients.get(key)
+        if entry is None:
+            return float(self.limit)
+        tokens, last = entry
+        return min(self.limit, tokens + (now - last) * (self.limit / self.window))
+
+    def _evict(self, now):
+        cutoff = now - self.window
+        while self.clients:
+            _, (_, last) = next(iter(self.clients.items()))
+            # Idle for a full window ⇒ refilled to `limit` ⇒ nothing to remember.
+            # Past the cap we also drop live buckets, which hands that key a
+            # fresh allowance — the memory bound wins over per-key accuracy.
+            if last > cutoff and len(self.clients) <= self.max_keys:
+                break
+            self.clients.popitem(last=False)
+
+    def is_allowed(self, key):
         with self.lock:
-            now = time.time()
-            client = self.clients[ip]
+            now = time.monotonic()
+            tokens = self._tokens(key, now)
+            allowed = tokens >= 1
+            self.clients[key] = (tokens - 1 if allowed else tokens, now)
+            self.clients.move_to_end(key)
+            self._evict(now)
+            return allowed
 
-            # Refill tokens
-            elapsed = now - client["last"]
-            client["tokens"] = min(
-                self.limit,
-                client["tokens"] + elapsed * (self.limit / self.window)
-            )
-            client["last"] = now
-
-            if client["tokens"] >= 1:
-                client["tokens"] -= 1
-                return True
-            return False
-
-    def remaining(self, ip):
+    def remaining(self, key):
+        """Read-only — never creates a bucket."""
         with self.lock:
-            return int(self.clients[ip]["tokens"])
+            return int(self._tokens(key, time.monotonic()))
 
 
 rate_limiter = RateLimiter()
@@ -293,7 +314,8 @@ def main():
     # handlers that are themselves blocked on a slow VSOCK call.
     server.daemon_threads = True
     print(f"[pull-api] HTTP server listening on port {port}")
-    print(f"[pull-api] Rate limit: {RATE_LIMIT} req/{RATE_WINDOW}s per IP")
+    print(f"[pull-api] Rate limit: {RATE_LIMIT} req/{RATE_WINDOW}s per IP "
+          f"(max {MAX_TRACKED_KEYS} tracked keys)")
     print(f"[pull-api] Max concurrent handlers: {MAX_CONCURRENT}")
     print(f"[pull-api] Enclave VSOCK: CID={ENCLAVE_CID} port={VSOCK_PORT}")
     print(f"[pull-api] Edge host: {EDGE_HOST or '(none)'}")
