@@ -1,4 +1,4 @@
-use crate::types::PricePoint;
+use crate::types::{AssetConfig, PricePoint, Quote};
 use alloy_primitives::U256;
 use eyre::{eyre, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -192,6 +192,17 @@ pub fn weighted_median(prices: &[PricePoint]) -> Option<(f64, WeightingMode)> {
 /// Reject outliers using MAD (Median Absolute Deviation).
 /// Removes points that deviate more than `sigma` MADs from the median.
 pub fn reject_outliers(prices: &mut Vec<PricePoint>, sigma: f64) {
+    reject_outliers_with_cap(prices, sigma, 0);
+}
+
+/// `reject_outliers` with a per-asset hard cap on deviation from the
+/// median.
+///
+/// A sample is dropped when it exceeds the MAD threshold OR `cap_bps` of
+/// the median, so the cap can only reject more, never fewer. It bounds
+/// how far one venue may sit from the pack on assets whose MAD is too
+/// small to be a meaningful scale. `cap_bps == 0` disables the cap.
+pub fn reject_outliers_with_cap(prices: &mut Vec<PricePoint>, sigma: f64, cap_bps: u16) {
     if prices.len() < 3 {
         return; // Not enough data to detect outliers
     }
@@ -204,14 +215,60 @@ pub fn reject_outliers(prices: &mut Vec<PricePoint>, sigma: f64) {
     let mut abs_devs: Vec<f64> = prices_sorted.iter().map(|p| (p - median).abs()).collect();
     let mad = median_sorted(&mut abs_devs);
 
-    if mad < 1e-10 {
+    let cap = if cap_bps == 0 {
+        f64::INFINITY
+    } else {
+        median.abs() * (cap_bps as f64) / 10_000.0
+    };
+
+    // MAD collapses to zero when a majority of venues agree exactly; the
+    // cap still applies, so a lone divergent venue is caught.
+    let mad_threshold = if mad < 1e-10 {
+        f64::INFINITY
+    } else {
+        sigma * 1.4826 * mad // 1.4826 = consistency constant for normal dist
+    };
+
+    let threshold = mad_threshold.min(cap);
+    if !threshold.is_finite() {
         return;
     }
 
-    // Modified Z-score threshold.
-    let threshold = sigma * 1.4826 * mad; // 1.4826 = consistency constant for normal dist
-
     prices.retain(|p| (p.price - median).abs() <= threshold);
+}
+
+/// Multiply every `Quote::Usdt` sample of `asset` by `usdt_usd` so the
+/// whole sample set is USD-denominated before aggregation. Converting
+/// per sample (not the final median) keeps USD- and USDT-quoted venues
+/// comparable, so outlier rejection sees one population.
+///
+/// Samples whose source has no mapping are left untouched — they cannot
+/// have been produced by a configured source.
+pub fn convert_quotes_to_usd(prices: &mut [PricePoint], asset: &AssetConfig, usdt_usd: f64) {
+    if !usdt_usd.is_finite() || usdt_usd <= 0.0 {
+        return;
+    }
+    for p in prices.iter_mut() {
+        if asset.quote(&p.source) == Some(Quote::Usdt) {
+            p.price *= usdt_usd;
+        }
+    }
+}
+
+/// Monotonic count of cycles that published a USDT-quoted asset without a
+/// live USDT/USD rate, i.e. assuming the peg holds. Surfaced in `health`
+/// so a monitor can page when it climbs: a depeg plus a suppressed
+/// USDT/USD feed is the case this counter exists to make visible.
+static USDT_RATE_ASSUMED_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of the assumed-peg counter.
+pub fn usdt_rate_assumed_count() -> u64 {
+    USDT_RATE_ASSUMED_COUNT.load(Ordering::Relaxed)
+}
+
+/// Record one cycle that fell back to assuming USDT == USD.
+pub fn note_usdt_rate_assumed() {
+    USDT_RATE_ASSUMED_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Convert a positive finite floating-point price to a fixed-point U256 with
@@ -282,6 +339,131 @@ mod tests {
                 server_time: 1_710_000_000 + i as u64,
             })
             .collect()
+    }
+
+    fn asset_with_quotes(symbol: &str, cap_bps: u16, srcs: &[(&str, Quote)]) -> AssetConfig {
+        AssetConfig {
+            symbol: symbol.to_string(),
+            min_sources: 1,
+            deviation_threshold_bps: cap_bps,
+            heartbeat_seconds: 3600,
+            sources: srcs
+                .iter()
+                .map(|(name, q)| {
+                    (
+                        name.to_string(),
+                        crate::types::SourceMapping {
+                            pair: format!("{}PAIR", name),
+                            quote: *q,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Only USDT-quoted samples are scaled; USD-quoted ones are untouched.
+    #[test]
+    fn convert_quotes_scales_only_usdt_sources() {
+        let asset = asset_with_quotes(
+            "ETH/USD",
+            0,
+            &[("source_0", Quote::Usdt), ("source_1", Quote::Usd)],
+        );
+        let mut prices = make_prices(&[100.0, 100.0]);
+        convert_quotes_to_usd(&mut prices, &asset, 0.99);
+        assert_eq!(prices[0].price, 99.0);
+        assert_eq!(prices[1].price, 100.0);
+    }
+
+    /// A source absent from the asset's mapping is left alone rather than
+    /// defaulting to "convert".
+    #[test]
+    fn convert_quotes_leaves_unmapped_sources_untouched() {
+        let asset = asset_with_quotes("ETH/USD", 0, &[("source_1", Quote::Usdt)]);
+        let mut prices = make_prices(&[100.0, 100.0]);
+        convert_quotes_to_usd(&mut prices, &asset, 0.5);
+        assert_eq!(prices[0].price, 100.0);
+        assert_eq!(prices[1].price, 50.0);
+    }
+
+    /// A nonsensical rate is a no-op, never a zeroed or NaN feed.
+    #[test]
+    fn convert_quotes_rejects_bad_rates() {
+        let asset = asset_with_quotes("ETH/USD", 0, &[("source_0", Quote::Usdt)]);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut prices = make_prices(&[100.0]);
+            convert_quotes_to_usd(&mut prices, &asset, bad);
+            assert_eq!(prices[0].price, 100.0, "rate {bad} must be a no-op");
+        }
+    }
+
+    /// Conversion must precede rejection: converting the surviving median
+    /// instead would let a USD venue look like an outlier against a USDT
+    /// pack during a depeg.
+    #[test]
+    fn convert_then_reject_keeps_a_usd_venue_that_raw_prices_would_drop() {
+        let asset = asset_with_quotes(
+            "ETH/USD",
+            0,
+            &[
+                ("source_0", Quote::Usdt),
+                ("source_1", Quote::Usdt),
+                ("source_2", Quote::Usdt),
+                ("source_3", Quote::Usd),
+            ],
+        );
+        // Three USDT venues at 100.0 and a USD venue at 95.0: USDT is 5 %
+        // off the peg, so every venue agrees once converted.
+        let mut prices = make_prices(&[100.0, 100.0, 100.0, 95.0]);
+        convert_quotes_to_usd(&mut prices, &asset, 0.95);
+        reject_outliers_with_cap(&mut prices, 3.0, asset.deviation_threshold_bps);
+        assert_eq!(prices.len(), 4, "no venue should be rejected");
+    }
+
+    /// The cap drops a venue the MAD band alone would keep.
+    #[test]
+    fn cap_rejects_beyond_the_band_that_mad_allows() {
+        // Dispersed population: MAD is 5.0, so the band is +/-22.2 and
+        // 128.0 survives it. The cap is 10.75 and does not.
+        let mut prices = make_prices(&[100.0, 105.0, 110.0, 128.0]);
+        let mut uncapped = prices.clone();
+        reject_outliers_with_cap(&mut uncapped, 3.0, 0);
+        assert_eq!(uncapped.len(), 4, "wide MAD keeps 128.0 without a cap");
+
+        reject_outliers_with_cap(&mut prices, 3.0, 1000);
+        assert_eq!(prices.len(), 3);
+        assert!(prices.iter().all(|p| p.price < 128.0));
+    }
+
+    /// MAD collapses to zero when a majority agree exactly; the cap still
+    /// catches the lone divergent venue.
+    #[test]
+    fn cap_applies_when_mad_is_zero() {
+        let mut prices = make_prices(&[100.0, 100.0, 100.0, 108.0]);
+        let mut uncapped = prices.clone();
+        reject_outliers_with_cap(&mut uncapped, 3.0, 0);
+        assert_eq!(uncapped.len(), 4, "zero MAD alone rejects nothing");
+
+        reject_outliers_with_cap(&mut prices, 3.0, 500);
+        assert_eq!(prices.len(), 3);
+    }
+
+    /// The cap is measured against the median, so a uniform move (a real
+    /// depeg, not one bad venue) rejects nothing.
+    #[test]
+    fn cap_is_relative_to_the_median_not_to_one() {
+        let mut prices = make_prices(&[0.93, 0.931, 0.932, 0.933]);
+        reject_outliers_with_cap(&mut prices, 3.0, 50);
+        assert_eq!(prices.len(), 4);
+    }
+
+    /// Fewer than three samples: no basis for a median, so no rejection.
+    #[test]
+    fn cap_needs_three_samples() {
+        let mut prices = make_prices(&[100.0, 200.0]);
+        reject_outliers_with_cap(&mut prices, 3.0, 10);
+        assert_eq!(prices.len(), 2);
     }
 
     #[test]

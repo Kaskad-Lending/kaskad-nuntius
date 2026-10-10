@@ -82,7 +82,7 @@ impl Gate {
                             };
                             let result = match v.get("result") { Some(r) if !r.is_null() => r, _ => continue };
                             let symbol = match result.get("s").and_then(|s| s.as_str()) {
-                                Some(s) => s.to_uppercase(), None => continue,
+                                Some(s) => pair_from_obu_symbol(s).to_uppercase(), None => continue,
                             };
                             let Some(book) = books.get_mut(&symbol) else { continue };
 
@@ -148,6 +148,14 @@ impl Collector for Gate {
     }
 }
 
+/// The `spot.obu` payload's `s` field is channel-qualified —
+/// `ob.<PAIR>.<depth>` (e.g. `ob.TAO_USDT.400`, verified live
+/// 2026-07-16) — while the book map is keyed by the bare pair.
+/// Accepts a bare pair too in case the venue ever drops the prefix.
+fn pair_from_obu_symbol(s: &str) -> &str {
+    s.split('.').nth(1).unwrap_or(s)
+}
+
 fn parse_levels(v: Option<&Value>) -> Vec<(f64, f64)> {
     let Some(arr) = v.and_then(|x| x.as_array()) else {
         return Vec::new();
@@ -166,12 +174,20 @@ mod tests {
 
     #[test]
     fn parse_snapshot_message() {
-        let s = r#"{"channel":"spot.obu","event":"update","result":{"t":1,"s":"BTC_USDT","U":1,"u":1,"full":true,"b":[["100","1"]],"a":[["101","2"]]}}"#;
+        // Live `spot.obu` format: `s` is channel-qualified (`ob.<PAIR>.<depth>`).
+        let s = r#"{"channel":"spot.obu","event":"update","result":{"t":1,"s":"ob.BTC_USDT.400","U":1,"u":1,"full":true,"b":[["100","1"]],"a":[["101","2"]]}}"#;
         let v: Value = serde_json::from_str(s).unwrap();
         let r = v.get("result").unwrap();
-        assert_eq!(r.get("s").unwrap().as_str().unwrap(), "BTC_USDT");
+        let sym = pair_from_obu_symbol(r.get("s").unwrap().as_str().unwrap());
+        assert_eq!(sym, "BTC_USDT");
         assert_eq!(r.get("full").unwrap().as_bool(), Some(true));
         assert_eq!(parse_levels(r.get("b")), vec![(100.0, 1.0)]);
+    }
+
+    #[test]
+    fn pair_from_obu_symbol_accepts_bare_pair() {
+        assert_eq!(pair_from_obu_symbol("ob.TAO_USDT.400"), "TAO_USDT");
+        assert_eq!(pair_from_obu_symbol("TAO_USDT"), "TAO_USDT");
     }
 
     #[test]

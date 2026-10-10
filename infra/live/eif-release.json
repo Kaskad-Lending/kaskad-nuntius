@@ -1,0 +1,14 @@
+{
+  "oracle": {
+    "sha384": "06878290f998e7f02a6ef40ca4c4ce3d88b411318089ec5db38b3a06bab4a214892e98453a2dd405419422b137b36580",
+    "pcr0": "5248a0d0ca1bea3044a270078286a7f788dfba98ada7069bdc4db81407e6a3a65c5be8f76e3cd299571621d71cc02296",
+    "commit": "dcfe9897add5ba5622c602fea760f3adcbb3c9be",
+    "config": "host/eif-config/robinhood-mainnet.env"
+  },
+  "pontifex": {
+    "sha384": "c72dcbb24b132eeb2b2f0276617ce5eac260d0af6976cf5bc0c706ef0e294e10fe54f511ed424518559b97e7ab39ff4d",
+    "pcr0": "8761b33a338db4fab12c9201eef87e1c582310d59645848c2574061d1e070d71238976ea1af05ad4b4e645004621aac6",
+    "commit": "3944e30d2636fbf7ab5fece99d0bc023034ebebb",
+    "config": "host/eif-config/robinhood-mainnet.env"
+  }
+}

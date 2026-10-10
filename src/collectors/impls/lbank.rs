@@ -12,7 +12,7 @@ use crate::cob_common::ExchangeConfig;
 use crate::collectors::book::LocalBook;
 use crate::collectors::collector::Collector;
 use crate::collectors::sink::BookSink;
-use crate::collectors::util::{now_ms, parse_f64, ws_connect};
+use crate::collectors::util::{now_ms, parse_f64, parse_i64, ws_connect};
 use async_trait::async_trait;
 use eyre::{eyre, Result};
 use futures::{SinkExt, StreamExt};
@@ -24,6 +24,11 @@ use tracing::info;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const DEPTH: &str = "100";
+
+/// LBank's `TS` field is naive Beijing time (UTC+8), not naive UTC as
+/// audit M-3 assumed. Verified live 2026-07-16: TS read 16:43 while the
+/// `ds` field (epoch ms) and wall clock both read 08:43Z.
+const LBANK_TZ_OFFSET_MS: i64 = 8 * 3600 * 1000;
 
 pub struct Lbank {
     config: ExchangeConfig,
@@ -91,9 +96,7 @@ impl Lbank {
                             let Some(book) = books.get_mut(&pair) else { continue };
                             let bids = parse_levels(d.get("bids"));
                             let asks = parse_levels(d.get("asks"));
-                            // Audit M-3: LBank includes a `TS` field
-                            // (naive UTC ISO-ish), e.g. "2019-06-28T17:49:22.722".
-                            let exch_ts_ms = parse_lbank_ts_ms(v.get("TS")).unwrap_or(0);
+                            let exch_ts_ms = lbank_exch_ts_ms(&v);
                             tick = tick.wrapping_add(1);
                             book.apply_snapshot(bids, asks, Some(tick));
                             if !book.is_crossed() {
@@ -132,10 +135,22 @@ impl Collector for Lbank {
     }
 }
 
+/// Exchange timestamp for an LBank depth push. Prefers the `ds` field
+/// (epoch ms, UTC); falls back to `TS` (naive ISO string in Beijing time,
+/// UTC+8) shifted back to UTC. `0` when neither is usable — LocalBook
+/// then drops the book rather than inventing a host-clock time (audit
+/// C-3 / M-3).
+fn lbank_exch_ts_ms(v: &Value) -> i64 {
+    v.get("ds")
+        .and_then(parse_i64)
+        .or_else(|| parse_lbank_ts_ms(v.get("TS")).map(|t| t - LBANK_TZ_OFFSET_MS))
+        .unwrap_or(0)
+}
+
 /// LBank ships server time as a TZ-less ISO-like string in `TS`, e.g.
-/// `"2019-06-28T17:49:22.722"`. Parse it as naive UTC. Returns `None` for
-/// missing / non-string / unparseable input — caller falls back to host
-/// receive-time (audit M-3).
+/// `"2019-06-28T17:49:22.722"`, in Beijing time (UTC+8). Parses the naive
+/// datetime as-is; the caller applies `LBANK_TZ_OFFSET_MS`. Returns `None`
+/// for missing / non-string / unparseable input.
 fn parse_lbank_ts_ms(v: Option<&Value>) -> Option<i64> {
     let s = v?.as_str()?;
     let dt = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").ok()?;
@@ -168,9 +183,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_ts_field_handles_naive_utc() {
+    fn parse_ts_field_parses_naive_datetime() {
         let v: Value = serde_json::from_str(r#"{"TS":"2024-01-02T03:04:05.123"}"#).unwrap();
         assert_eq!(parse_lbank_ts_ms(v.get("TS")), Some(1704164645123));
+    }
+
+    #[test]
+    fn exch_ts_prefers_ds_epoch_ms() {
+        // Live capture 2026-07-16: `ds` is epoch ms UTC, `TS` is UTC+8.
+        let v: Value = serde_json::from_str(
+            r#"{"ds":"1784191392179","TS":"2026-07-16T16:43:12.215","pair":"tao_usdt"}"#,
+        )
+        .unwrap();
+        assert_eq!(lbank_exch_ts_ms(&v), 1784191392179);
+    }
+
+    #[test]
+    fn exch_ts_falls_back_to_ts_shifted_to_utc() {
+        let v: Value = serde_json::from_str(r#"{"TS":"2026-07-16T16:43:12.215"}"#).unwrap();
+        let naive = parse_lbank_ts_ms(v.get("TS")).unwrap();
+        assert_eq!(lbank_exch_ts_ms(&v), naive - 8 * 3600 * 1000);
+    }
+
+    #[test]
+    fn exch_ts_zero_when_no_time_fields() {
+        let v: Value = serde_json::from_str(r#"{"pair":"tao_usdt"}"#).unwrap();
+        assert_eq!(lbank_exch_ts_ms(&v), 0);
     }
 
     #[test]

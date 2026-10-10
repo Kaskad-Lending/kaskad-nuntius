@@ -1,0 +1,14 @@
+[Unit]
+Description=Kaskad oracle RA-TLS ingress (TCP:8443 -> VSOCK CID16:5002)
+After=network.target nitro-enclaves-allocator.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:8443,fork,reuseaddr VSOCK-CONNECT:16:5002
+Restart=always
+RestartSec=5
+StandardOutput=file:/var/log/kaskad-ratls.log
+StandardError=file:/var/log/kaskad-ratls.log
+
+[Install]
+WantedBy=multi-user.target
