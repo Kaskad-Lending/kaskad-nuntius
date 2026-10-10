@@ -1,0 +1,23 @@
+[package]
+name = "volume-monitor"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Standalone WS trade-volume monitor for the venues configured in config/exchanges.json. Connects the same way the kaskad-nuntius collectors do (same endpoints, same handshake quirks) but subscribes to the public trade streams, accumulates observed volume per (venue, pair), and reports."
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.23", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+eyre = "0.6"
+chrono = "0.4"
+flate2 = "1"
+url = "2"
+prost = "0.12"
+
+[build-dependencies]
+prost-build = "0.12"
+protoc-bin-vendored = "3"

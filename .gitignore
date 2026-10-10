@@ -1,4 +1,6 @@
 /target
+tools/volume-monitor/target/
+volmon-out/
 reference/
 .env
 *.eif
