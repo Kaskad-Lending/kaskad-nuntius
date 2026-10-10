@@ -32,8 +32,8 @@ output "alb_dns_name" {
 }
 
 output "acm_dns_validation_records" {
-  description = "CNAMEs that validate the ACM cert, added outside kaskad-tf. Empty without domain_name."
-  value = var.domain_name == "" ? [] : [
+  description = "CNAMEs that validate the module's ACM cert, added outside kaskad-tf. Empty without domain_name or with certificate_arn."
+  value = length(aws_acm_certificate.nitro) == 0 ? [] : [
     for opt in aws_acm_certificate.nitro[0].domain_validation_options : {
       cname_name  = opt.resource_record_name
       cname_value = opt.resource_record_value

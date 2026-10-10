@@ -1,7 +1,7 @@
-# /kaskad/nitro only — never /kaskad/oracle*. Log group names are per region.
+# /kaskad/nitro* only — never /kaskad/oracle*. Log group names are per region.
 
 resource "aws_cloudwatch_log_group" "nitro" {
-  name              = "/kaskad/nitro"
+  name              = var.log_group_name
   retention_in_days = 30
 
   tags = { Name = "${var.name_prefix}-logs" }
