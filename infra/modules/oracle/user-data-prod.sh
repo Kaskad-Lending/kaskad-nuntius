@@ -283,6 +283,9 @@ Type=simple
 # therefore trust X-Forwarded-For for). Outside-VPC peers are direct
 # hits whose XFF is spoofable — the Python code falls back to peer.
 Environment=VPC_CIDR=${vpc_cidr}
+# TRUSTED_PROXIES lets pull_api.py walk X-Forwarded-For right to left past
+# our own front proxies. Empty ⇒ it keys on the forgeable leftmost entry.
+Environment=TRUSTED_PROXIES=${trusted_proxies}
 ExecStart=/usr/bin/python3 /opt/kaskad/pull_api.py 8080
 Restart=always
 RestartSec=5

@@ -908,13 +908,17 @@ mod tests {
             timestamped_book("mexc", 0.03095, FIXTURE_TS_MS),
             timestamped_book("attacker", 0.62, FIXTURE_TS_MS),
         ];
-        let fv = gated_consolidated_order_book(&books, 3)
-            .expect("five honest survivors clear the gate");
+        let fv =
+            gated_consolidated_order_book(&books, 3).expect("five honest survivors clear the gate");
         assert_eq!(
             fv.num_sources, 5,
             "attacker book must be excluded from consolidation"
         );
-        assert!(fv.price < 0.05, "honest cluster must dominate, got {}", fv.price);
+        assert!(
+            fv.price < 0.05,
+            "honest cluster must dominate, got {}",
+            fv.price
+        );
     }
 
     #[test]

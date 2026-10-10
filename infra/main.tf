@@ -68,6 +68,7 @@ module "oracle_us_east_1" {
   enclave_cpu_count        = 2
   enclave_memory_mib       = 512
   domain_name              = "oracle.kaskad.live"
+  trusted_proxies          = var.front_proxy_egress
   github_org               = var.github_org
   github_repo              = var.github_repo
   github_oidc_provider_arn = aws_iam_openid_connect_provider.github.arn
@@ -85,8 +86,9 @@ module "oracle_eu_west_1" {
   ami_id                   = "ami-0c13c2049f369d641" # standard AL2023 x86_64 (minimal lacks amazon-ssm-agent)
   enclave_cpu_count        = 2
   enclave_memory_mib       = 512
-  asg_capacity             = 1 # EIF deployed, enclave online
+  asg_capacity             = 1  # EIF deployed, enclave online
   domain_name              = "" # bare ALB DNS until HTTPS domain / DNS failover is decided
+  trusted_proxies          = var.front_proxy_egress
   github_org               = var.github_org
   github_repo              = var.github_repo
   github_oidc_provider_arn = aws_iam_openid_connect_provider.github.arn
