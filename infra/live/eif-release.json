@@ -5,5 +5,10 @@
     "commit": "dcfe9897add5ba5622c602fea760f3adcbb3c9be",
     "config": "host/eif-config/robinhood-mainnet.env"
   },
-  "pontifex": null
+  "pontifex": {
+    "sha384": "c72dcbb24b132eeb2b2f0276617ce5eac260d0af6976cf5bc0c706ef0e294e10fe54f511ed424518559b97e7ab39ff4d",
+    "pcr0": "8761b33a338db4fab12c9201eef87e1c582310d59645848c2574061d1e070d71238976ea1af05ad4b4e645004621aac6",
+    "commit": "3944e30d2636fbf7ab5fece99d0bc023034ebebb",
+    "config": "host/eif-config/robinhood-mainnet.env"
+  }
 }
