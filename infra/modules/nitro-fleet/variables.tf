@@ -169,6 +169,41 @@ variable "edge_cert_issued" {
   default     = false
 }
 
+variable "certificate_arn" {
+  description = "ISSUED ACM cert for domain_name, managed outside the module. Empty = the module requests one."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.certificate_arn == "" || can(regex("^arn:aws[a-z-]*:acm:", var.certificate_arn))
+    error_message = "certificate_arn must be empty or an ACM certificate ARN."
+  }
+}
+
+variable "alb_ingress_cidrs" {
+  description = "IPv4 CIDRs allowed on ALB 443/80 unless edge-only (CloudFront prefix list then)."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+
+  validation {
+    condition     = length(var.alb_ingress_cidrs) > 0 && alltrue([for c in var.alb_ingress_cidrs : can(cidrnetmask(c))])
+    error_message = "alb_ingress_cidrs needs at least one IPv4 CIDR."
+  }
+}
+
+# ─── Monitoring ───────────────────────────────────────────────
+
+variable "log_group_name" {
+  description = "Fleet CloudWatch log group (per region). /kaskad/nitro* only, never /kaskad/oracle*."
+  type        = string
+  default     = "/kaskad/nitro"
+
+  validation {
+    condition     = can(regex("^/kaskad/nitro", var.log_group_name))
+    error_message = "log_group_name must start with /kaskad/nitro."
+  }
+}
+
 # ─── Host-plane hints (untrusted) ─────────────────────────────
 
 variable "oracle_registry" {
