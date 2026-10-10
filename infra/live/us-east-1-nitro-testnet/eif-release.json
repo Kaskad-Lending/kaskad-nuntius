@@ -1,1 +1,14 @@
-{}
+{
+  "oracle": {
+    "sha384": "086e5a10bea432d881c89654ba7dbd34110650f6d53bbfe8c241f2852b31d5e27b0607e0d9a3d6ce517fb8db444b93ba",
+    "pcr0": "7d0e5d21f58f3aeff50f759b981937fd6b813ac5072330f2c807de4ca6fa6f89e615f97e94655955f8a8d9198fe018fb",
+    "commit": "2d54c97b7769322f4f10ae1e7ddec6d6cdba7731",
+    "config": "host/eif-config/robinhood-testnet.env"
+  },
+  "pontifex": {
+    "sha384": "c5f24b47cbb95d1ea33e0e0dcf7ed7d3070c072897cd3bf1cc4aec085b1f5e3dfdc6caf0cf0735371c9f32e837af8f9e",
+    "pcr0": "bdfd0efe2e06ec60981779ad2f948d082afe9cbe660d9af84b9e7ae010b6c1687abee9c373484f219ebcfda588153d16",
+    "commit": "2d54c97b7769322f4f10ae1e7ddec6d6cdba7731",
+    "config": "host/eif-config/robinhood-testnet.env"
+  }
+}
