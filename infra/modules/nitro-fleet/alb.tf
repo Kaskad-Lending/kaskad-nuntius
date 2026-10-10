@@ -24,8 +24,9 @@ data "aws_ec2_managed_prefix_list" "cloudfront_origin" {
   name  = "com.amazonaws.global.cloudfront.origin-facing"
 }
 
+# Requested here only when no external certificate_arn is supplied.
 resource "aws_acm_certificate" "nitro" {
-  count             = var.domain_name != "" ? 1 : 0
+  count             = var.domain_name != "" && var.certificate_arn == "" ? 1 : 0
   domain_name       = var.domain_name
   validation_method = "DNS"
 
@@ -68,6 +69,14 @@ resource "aws_lb" "nitro" {
   enable_xff_client_port     = false
 
   tags = { Name = "${var.name_prefix}-alb" }
+
+  lifecycle {
+    # HTTPS keys off domain_name; a lone certificate_arn would be silently unused.
+    precondition {
+      condition     = var.certificate_arn == "" || var.domain_name != ""
+      error_message = "certificate_arn needs domain_name."
+    }
+  }
 }
 
 resource "aws_security_group" "alb" {
@@ -81,7 +90,7 @@ resource "aws_security_group" "alb" {
     from_port       = 443
     to_port         = 443
     protocol        = "tcp"
-    cidr_blocks     = local.edge_only ? [] : ["0.0.0.0/0"]
+    cidr_blocks     = local.edge_only ? [] : var.alb_ingress_cidrs
     prefix_list_ids = local.edge_only ? [data.aws_ec2_managed_prefix_list.cloudfront_origin[0].id] : []
   }
 
@@ -92,7 +101,7 @@ resource "aws_security_group" "alb" {
       from_port   = ingress.value
       to_port     = ingress.value
       protocol    = "tcp"
-      cidr_blocks = ["0.0.0.0/0"]
+      cidr_blocks = var.alb_ingress_cidrs
     }
   }
 
@@ -143,7 +152,7 @@ resource "aws_lb_listener" "https" {
   port              = 443
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = var.domain_name != "" ? aws_acm_certificate.nitro[0].arn : aws_acm_certificate.edge[0].arn
+  certificate_arn   = var.certificate_arn != "" ? var.certificate_arn : (var.domain_name != "" ? aws_acm_certificate.nitro[0].arn : aws_acm_certificate.edge[0].arn)
 
   # Edge-only: whatever the edge guard does not forward is refused.
   default_action {

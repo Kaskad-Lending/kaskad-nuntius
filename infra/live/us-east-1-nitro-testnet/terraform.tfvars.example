@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (gitignored). Public values only — no secrets here.
+
+# Standard AL2023 x86_64 AMI in us-east-1, the release the US fleet pins.
+ami_id = "ami-00000000000000000"
+
+# ALB 443/80 ingress (reactor-prod, the bridge relayer).
+allowed_cidrs = ["95.217.1.162/32"]
+
+# Must equal the addresses baked into the pinned EIFs (host/eif-config/robinhood-testnet.env
+# KEYEX_ORACLE_REGISTRY / PONTIFEX_ENTRY); the enclaves refuse any other value.
+oracle_registry = "0x0000000000000000000000000000000000000000"
+bridge_entry    = "0x0000000000000000000000000000000000000000"
+
+# Optional, defaults shown.
+# rh_rpcs            = "https://robinhood-testnet.drpc.org,https://rpc.testnet.chain.robinhood.com"
+# hostname           = "nuntius-testnet.kaskad.live"
+# certificate_issued = false # true once ACM shows the hostname cert ISSUED
