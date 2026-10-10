@@ -170,10 +170,13 @@ resource "aws_lb_listener_certificate" "edge" {
 
 # The edge Host is served only with the origin token, so the pull API may trust
 # the X-Forwarded-For hop CloudFront appended (EDGE_HOST in pull-api.env).
+# Path-less, so it must trail the bridge rules (10, 11) and precede edge_bypass;
+# depends_on moves edge_bypass first, so this rule never trails it mid-apply.
 resource "aws_lb_listener_rule" "edge_origin" {
   for_each     = local.edge_enabled ? local.forwarding_listeners : {}
   listener_arn = each.value
-  priority     = 1
+  priority     = 20
+  depends_on   = [aws_lb_listener_rule.edge_bypass]
 
   action {
     type             = "forward"
@@ -195,7 +198,7 @@ resource "aws_lb_listener_rule" "edge_origin" {
 resource "aws_lb_listener_rule" "edge_bypass" {
   for_each     = local.edge_enabled ? local.forwarding_listeners : {}
   listener_arn = each.value
-  priority     = 2
+  priority     = 21
 
   action {
     type = "fixed-response"

@@ -77,6 +77,19 @@ resource "aws_cloudfront_distribution" "nuntius" {
     origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer.id
   }
 
+  # The bridge runs only in US and signs over POST, so it skips the failover group.
+  # CloudFront allows GET+POST only as the full method set; the ALB bridge rules
+  # forward just GET health/attestation and POST sign, the rest hits the pull API.
+  ordered_cache_behavior {
+    path_pattern             = "/bridge/*"
+    target_origin_id         = "us"
+    viewer_protocol_policy   = "https-only"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    cache_policy_id          = data.aws_cloudfront_cache_policy.disabled.id
+    origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer.id
+  }
+
   restrictions {
     geo_restriction {
       restriction_type = "none"
