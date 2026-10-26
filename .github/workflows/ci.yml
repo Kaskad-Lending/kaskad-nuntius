@@ -28,10 +28,14 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Rust format check
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Rust clippy
-        run: cargo clippy -- -D warnings || true  # warn-only for now
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --all-targets --features keyex_oracle -- -D warnings
 
       - name: Rust tests
-        run: cargo test
+        run: |
+          cargo test --workspace
+          cargo test --features keyex_oracle

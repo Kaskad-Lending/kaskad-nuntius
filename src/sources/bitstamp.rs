@@ -24,7 +24,7 @@ struct BitstampTicker {
 #[async_trait]
 impl PriceSource for Bitstamp {
     async fn fetch_price(&self, asset: &AssetConfig) -> Result<Option<PricePoint>> {
-        let pair = match asset.sources.get(self.name()) {
+        let pair = match asset.pair(self.name()) {
             Some(s) => s.as_str(),
             None => return Ok(None),
         };

@@ -1,3 +1,3 @@
 [submodule "contracts"]
 	path = contracts
-	url = git@github.com:Kaskad-Lending/kaskad-oracle-contracts.git
+	url = https://github.com/Kaskad-Lending/kaskad-nuntius-contracts.git

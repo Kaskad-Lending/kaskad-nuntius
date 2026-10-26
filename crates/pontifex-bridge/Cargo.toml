@@ -1,0 +1,42 @@
+[package]
+name = "pontifex-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Pontifex bridge enclave (CID 17): wires the keyex core to NSM, RA-TLS peer handover, and the VSOCK claim API."
+
+[[bin]]
+name = "pontifex-bridge"
+path = "src/main.rs"
+
+[dependencies]
+keyex = { path = "../keyex" }
+nitro-common = { path = "../nitro-common" }
+
+alloy-primitives = "1"
+# secp256k1 signer held by the running bridge (the installed claim key).
+k256 = { version = "0.13", features = ["ecdsa"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+eyre = "0.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+# Wipe transferable/derived key material on every drop and refusal path.
+zeroize = "1"
+
+# HTTP client for the JSON-RPC transport, egressing through the VSOCK→TCP
+# CONNECT/SOCKS proxy on 127.0.0.1:5000. Feature set mirrors the root crate.
+reqwest = { version = "0.12", default-features = false, features = ["json", "socks", "rustls-tls-webpki-roots", "http2"] }
+
+tokio = { version = "1", features = ["full"] }
+
+# VSOCK listener + NSM device are Linux-only (the enclave target).
+[target.'cfg(target_os = "linux")'.dependencies]
+vsock = "0.5"
+libc = "0.2"
+
+[dev-dependencies]
+hex = "0.4"
