@@ -1,0 +1,18 @@
+[Unit]
+Description=Kaskad oracle genesis attestation capture (VSOCK CID16:5005 -> S3 genesis/)
+After=network.target nitro-enclaves-allocator.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=20min
+# Public host hints written by user-data.
+EnvironmentFile=/etc/kaskad/genesis-capture.env
+ExecStart=/usr/bin/python3 /opt/kaskad/genesis_capture.py
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+StandardOutput=file:/var/log/kaskad-genesis-capture.log
+StandardError=file:/var/log/kaskad-genesis-capture.log
+
+[Install]
+WantedBy=multi-user.target

@@ -33,7 +33,7 @@ struct BitgetTicker {
 #[async_trait]
 impl PriceSource for Bitget {
     async fn fetch_price(&self, asset: &AssetConfig) -> Result<Option<PricePoint>> {
-        let symbol = match asset.sources.get(self.name()) {
+        let symbol = match asset.pair(self.name()) {
             Some(s) => s.as_str(),
             None => return Ok(None),
         };

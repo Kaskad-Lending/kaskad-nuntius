@@ -9,7 +9,9 @@ mod http_client;
 mod nsm_rng;
 mod price_server;
 #[cfg(target_os = "linux")]
+#[cfg_attr(feature = "keyex_oracle", allow(dead_code))]
 mod sealing;
+#[cfg_attr(feature = "keyex_oracle", allow(dead_code))]
 mod signer;
 mod sources;
 mod types;
@@ -21,9 +23,17 @@ use tokio::sync::RwLock;
 use eyre::Result;
 use tracing::{error, info, warn};
 
+#[cfg(feature = "keyex_oracle")]
+use keyex_oracle::spawn_blocking_listener as spawn_price_listener;
+#[cfg(not(feature = "keyex_oracle"))]
+use tokio::spawn as spawn_price_listener;
+
+#[cfg(feature = "keyex_oracle")]
+use signer::OracleSigner;
+#[cfg(not(feature = "keyex_oracle"))]
 use signer::{MockSigner, OracleSigner};
 use sources::PriceSource;
-use types::{load_assets, CachedPrice, PricePoint};
+use types::{load_assets, AssetConfig, CachedPrice, PricePoint, USDT_USD_SYMBOL};
 
 const ORACLE_DECIMALS: u8 = 8;
 const FETCH_INTERVAL_SECS: u64 = 5;
@@ -93,6 +103,7 @@ async fn main() -> Result<()> {
     // Init signer. The enclave key only signs price updates; the per-asset
     // quorum is committed separately by the admin via
     // KaskadPriceOracle.registerAssets (no enclave-side bundle signature).
+    #[cfg(not(feature = "keyex_oracle"))]
     let signer: Box<dyn OracleSigner> = if enclave_mode {
         #[cfg(target_os = "linux")]
         {
@@ -136,7 +147,8 @@ async fn main() -> Result<()> {
             }
         }
     };
-
+    #[cfg(feature = "keyex_oracle")]
+    let signer: Box<dyn OracleSigner> = keyex_oracle::boot_and_serve().await?;
     let signer_address = format!("0x{}", hex::encode(signer.address()));
     let signer: SharedSigner = Arc::from(signer);
     info!(address = %signer_address, "Oracle signer initialized");
@@ -153,7 +165,7 @@ async fn main() -> Result<()> {
     let server_store = price_store.clone();
     let server_signer = signer.clone();
     let server_signer_address = signer_address.clone();
-    tokio::spawn(async move {
+    spawn_price_listener(async move {
         if let Err(e) = price_server::run_price_server(
             vsock_port,
             server_store,
@@ -175,13 +187,24 @@ async fn main() -> Result<()> {
 
     let client = http_client::HttpClient::new(enclave_mode, config.exchange_hostnames.clone());
 
+    // Every coingecko id in one list: the source batches them into a single
+    // request per cycle instead of one per asset.
+    let coingecko_ids: Vec<String> = config
+        .assets
+        .iter()
+        .filter_map(|a| a.pair("coingecko").cloned())
+        .collect();
+
     // (config loaded above — used here for source registration.)
     let price_sources: Vec<Box<dyn PriceSource>> = vec![
         Box::new(sources::binance::Binance::new(client.clone())),
         Box::new(sources::okx::Okx::new(client.clone())),
         Box::new(sources::bybit::Bybit::new(client.clone())),
         Box::new(sources::coinbase::Coinbase::new(client.clone())),
-        Box::new(sources::coingecko::CoinGecko::new(client.clone())),
+        Box::new(sources::coingecko::CoinGecko::new(
+            client.clone(),
+            coingecko_ids.clone(),
+        )),
         Box::new(sources::mexc::Mexc::new(client.clone())),
         Box::new(sources::kucoin::Kucoin::new(client.clone())),
         Box::new(sources::gateio::GateIo::new(client.clone())),
@@ -346,16 +369,30 @@ async fn main() -> Result<()> {
         "Starting oracle loop"
     );
 
-    // Min USDC books before we trust the peg gate. Three matches the
-    // USDC min_sources baked into config/assets.json — keep them in step.
+    // Min USDC books before we trust the peg gate. Matches USDC/USD min_sources
+    // in config/assets.json — keep them in step.
     const USDT_PEG_MIN_SOURCES: usize = 2;
+
+    // Oldest cached USDT/USD rate still usable for quote conversion when the
+    // current cycle failed to produce one. Measured against venue-attested
+    // sample times, never the host clock.
+    const USDT_RATE_MAX_AGE_SECS: u64 = 900;
+
+    // USDT/USD is the conversion rate for every USDT-quoted sample, so it
+    // must be aggregated before the assets that consume it.
+    let ordered_assets: Vec<&AssetConfig> = {
+        let mut v: Vec<&AssetConfig> = config.assets.iter().collect();
+        v.sort_by_key(|a| a.symbol != USDT_USD_SYMBOL);
+        v
+    };
 
     // Main oracle loop: fetch → aggregate → sign → store
     loop {
-        // Optional USDT-peg sentinel: log-only. We no longer fail-closed on
-        // depeg — the gate previously froze the cache for all non-USDC USD
-        // feeds whenever USDC WS books were unavailable, which is the
-        // overwhelmingly common state under our current proxy setup.
+        // USDT-peg sentinel, observational. USDT-quoted samples are
+        // converted with the measured USDT/USD rate, so a depeg is priced
+        // rather than gated; this only cross-checks that rate against the
+        // USDC/USDT books. The alarm for a failed conversion is the
+        // `usdt_rate_assumed` counter on /health.
         if let Some(res) = cob::usdt_peg_ok(&book_state, USDT_PEG_MIN_SOURCES).await {
             match res {
                 Ok(mid) => info!(usdc_mid = format!("{:.6}", mid), "USDT peg observed"),
@@ -367,12 +404,18 @@ async fn main() -> Result<()> {
             }
         }
 
-        for asset in &config.assets {
+        // Rate for this cycle, set when USDT/USD aggregates successfully.
+        let mut usdt_usd: Option<f64> = None;
+
+        for asset in &ordered_assets {
             // COB fast-path. Yields `Some(cached)` only if WS books made
             // quorum AND produced a valid mid; otherwise falls through to
             // the REST aggregator so a degraded WS layer never stalls
             // publishes.
-            let cob_cached: Option<CachedPrice> = if cob::is_cob_asset(asset) {
+            // Every collector pair is USDT-denominated (asserted by
+            // `collector_pairs_are_usdt_quoted`), so a COB mid is a USDT
+            // price and needs the same conversion as a REST sample.
+            let cob_raw: Option<(f64, u64, usize, Vec<PricePoint>)> = if cob::is_cob_asset(asset) {
                 let books = cob::read_books_from_state(asset, &book_state).await;
                 // `gated_consolidated_order_book` reapplies the
                 // aggregator's sanitize + MAD-by-price gate per source
@@ -399,20 +442,35 @@ async fn main() -> Result<()> {
                             server_time: cob_signed_ts,
                         })
                         .collect();
-                    let price_fixed =
-                        aggregator::to_fixed_point(fair.price, ORACLE_DECIMALS).ok()?;
-                    Some(CachedPrice {
-                        asset_symbol: asset.symbol.clone(),
-                        asset_id: asset.id(),
-                        price_fixed,
-                        price_human: fair.price,
-                        num_sources: fair.num_sources as u8,
-                        sources_hash: aggregator::sources_hash(&hash_points),
-                        signed_timestamp: cob_signed_ts,
-                    })
+                    Some((fair.price, cob_signed_ts, fair.num_sources, hash_points))
                 })
             } else {
                 None
+            };
+
+            let cob_cached: Option<CachedPrice> = match cob_raw {
+                Some((mid_usdt, cob_signed_ts, num_sources, hash_points)) => {
+                    let rate = usdt_rate(
+                        usdt_usd,
+                        &price_store,
+                        cob_signed_ts,
+                        USDT_RATE_MAX_AGE_SECS,
+                    )
+                    .await;
+                    let mid = mid_usdt * rate;
+                    aggregator::to_fixed_point(mid, ORACLE_DECIMALS)
+                        .ok()
+                        .map(|price_fixed| CachedPrice {
+                            asset_symbol: asset.symbol.clone(),
+                            asset_id: asset.id(),
+                            price_fixed,
+                            price_human: mid,
+                            num_sources: num_sources as u8,
+                            sources_hash: aggregator::sources_hash(&hash_points),
+                            signed_timestamp: cob_signed_ts,
+                        })
+                }
+                None => None,
             };
 
             if let Some(cached) = cob_cached {
@@ -449,6 +507,14 @@ async fn main() -> Result<()> {
                 );
             }
 
+            // 1b. Convert USDT-quoted samples to USD before anything
+            //     compares them, so one population reaches the median.
+            if asset.has_usdt_quoted_source() {
+                let ref_ts = aggregator::median_server_time(&prices).unwrap_or(0);
+                let rate = usdt_rate(usdt_usd, &price_store, ref_ts, USDT_RATE_MAX_AGE_SECS).await;
+                aggregator::convert_quotes_to_usd(&mut prices, asset, rate);
+            }
+
             if prices.len() < asset.min_sources {
                 warn!(
                     asset = %asset.symbol,
@@ -467,7 +533,7 @@ async fn main() -> Result<()> {
 
             // 2. Outlier rejection (by price)
             let before = prices.len();
-            aggregator::reject_outliers(&mut prices, 3.0);
+            aggregator::reject_outliers_with_cap(&mut prices, 3.0, asset.deviation_threshold_bps);
             if prices.len() < before {
                 info!(
                     asset = %asset.symbol,
@@ -516,6 +582,10 @@ async fn main() -> Result<()> {
                     continue;
                 }
             };
+
+            if asset.symbol == USDT_USD_SYMBOL {
+                usdt_usd = Some(median);
+            }
 
             let price_fixed = match aggregator::to_fixed_point(median, ORACLE_DECIMALS) {
                 Ok(p) => p,
@@ -576,6 +646,34 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve the USDT/USD rate for quote conversion: this cycle's fresh
+/// value, else a cached one no older than `max_age_secs` measured against
+/// `ref_ts` (venue-attested, never the host clock), else 1.0.
+///
+/// The 1.0 fallback assumes the peg and is counted, not silent: refusing
+/// to publish instead would freeze every USDT-quoted feed whenever the
+/// four USD-quoted USDT venues are unreachable, which is the failure that
+/// zeroed TVL before.
+async fn usdt_rate(cycle: Option<f64>, store: &PriceStore, ref_ts: u64, max_age_secs: u64) -> f64 {
+    if let Some(r) = cycle {
+        return r;
+    }
+    if let Some(c) = store.read().await.get(USDT_USD_SYMBOL) {
+        let age = ref_ts.saturating_sub(c.signed_timestamp);
+        if age <= max_age_secs && c.price_human.is_finite() && c.price_human > 0.0 {
+            warn!(
+                rate = c.price_human,
+                age_secs = age,
+                "USDT/USD missing this cycle — converting with the cached rate"
+            );
+            return c.price_human;
+        }
+    }
+    aggregator::note_usdt_rate_assumed();
+    warn!("no USDT/USD rate available — assuming the peg holds (1.0)");
+    1.0
 }
 
 // The live VSOCK↔TCP bridge is inlined in `main` after the price server
@@ -656,3 +754,6 @@ async fn bridge_connection(
 
     Ok(())
 }
+
+#[cfg(feature = "keyex_oracle")]
+mod keyex_oracle;

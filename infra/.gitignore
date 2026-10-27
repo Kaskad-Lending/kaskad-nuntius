@@ -4,6 +4,8 @@
 .terraform/
 .terraform.lock.hcl
 terraform.tfvars
+# Plans embed sensitive values (edge origin token).
+*.tfplan
 crash.log
 override.tf
 override.tf.json
