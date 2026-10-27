@@ -1,0 +1,31 @@
+// Minimal subset of MEXC's PushDataV3ApiWrapper schema for the aggregated
+// public deals (trades) channel. Mirrors the shape of the oracle's
+// proto/mexc.proto (depth variant); the deals body field number is
+// verified live against the wire format before use.
+
+syntax = "proto3";
+
+package mexc;
+
+message PushDataV3ApiWrapper {
+  string channel = 1;
+  optional string symbol = 3;
+  optional string symbolId = 4;
+  optional int64 createTime = 5;
+  optional int64 sendTime = 6;
+  // spot@public.aggre.deals.v3.api.pb body variant.
+  optional PublicAggreDealsV3Api publicAggreDeals = 314;
+}
+
+message PublicAggreDealsV3Api {
+  repeated PublicAggreDealsV3ApiItem deals = 1;
+  string eventType = 2;
+}
+
+message PublicAggreDealsV3ApiItem {
+  string price = 1;
+  string quantity = 2;
+  // 1 = buy, 2 = sell.
+  int32 tradeType = 3;
+  int64 time = 4;
+}
