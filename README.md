@@ -1,233 +1,100 @@
-# Kaskad TEE Oracle
+# Kaskad Nuntius
 
-Trustless price oracle for the Kaskad lending protocol. Fetches prices from multiple CEX/DEX sources, aggregates them using a volume-weighted median with statistical outlier rejection, signs the result with an enclave-bound key, and pushes updates on-chain via deviation/heartbeat triggers.
+Nuntius is Kaskad's price oracle. It runs in AWS Nitro Enclaves, collects prices from public exchanges and aggregators, and signs each price with a key that exists only inside enclaves. Anyone can fetch the signed prices over HTTPS and submit them to the oracle contract, which accepts only prices signed by a registered enclave key.
 
-Designed to run inside a Trusted Execution Environment (AWS Nitro Enclave or Intel TDX), providing cryptographic guarantees that the oracle software hasn't been tampered with and the signing key never leaves the enclave.
+This repository holds the oracle enclave, the Pontifex bridge enclave, and their tests. The contracts are in the `contracts` submodule, [Kaskad-Lending/kaskad-nuntius-contracts](https://github.com/Kaskad-Lending/kaskad-nuntius-contracts).
 
-## Architecture
+- [Oracle](https://docs.kaskad.app/docs/oracle-integration): how prices are produced and what keeps them safe.
+- [Oracle API Reference](https://docs.kaskad.app/docs/oracle-api): endpoints, the signature format, the contracts, and code examples.
+- [Enclave Security](https://docs.kaskad.app/docs/enclave-security): keys, attestation and the role of the host.
+- [Verify the Enclaves](https://docs.kaskad.app/docs/enclave-verification): rebuild the images and check them against the live attestations and the on-chain pins.
 
-```
-                                ┌─────────────────────┐
-                                │   Kaskad Oracle      │
-                                │   (Rust binary)      │
-                                │                      │
-   ┌──────────┐  HTTP/REST      │  ┌───────────────┐   │
-   │ Binance  │◄────────────────┤  │   Sources     │   │
-   │ OKX      │                 │  │   (5 CEX APIs)│   │
-   │ Bybit    │                 │  └───────┬───────┘   │
-   │ Coinbase │                 │          │           │
-   │ CoinGecko│                 │          ▼           │
-   └──────────┘                 │  ┌───────────────┐   │
-                                │  │  Aggregator   │   │
-                                │  │  - outliers   │   │
-                                │  │  - w. median  │   │
-                                │  └───────┬───────┘   │
-                                │          │           │
-                                │          ▼           │
-                                │  ┌───────────────┐   │
-                                │  │    Signer     │   │
-                                │  │  (EIP-191)    │   │
-   ┌──────────────────┐         │  └───────┬───────┘   │
-   │  Galleon Testnet  │  TX    │          │           │
-   │  ┌──────────────┐│◄───────┤  ┌───────▼───────┐   │
-   │  │ KaskadPrice  ││        │  │  Publisher    │   │
-   │  │ Oracle.sol   ││        │  │  (TODO)       │   │
-   │  └──────────────┘│        │  └───────────────┘   │
-   └──────────────────┘        └─────────────────────┘
-```
+## How It Works
 
-In TEE mode the binary runs inside a Nitro Enclave. The enclave has no network — all I/O goes through a VSOCK proxy on the parent EC2 instance:
+1. For each asset, the enclave fetches quotes from a fixed list of sources over TLS. The list is in `config/assets.json` and `config/exchanges.json`, which are compiled into the image, so the attestation covers them.
+2. It removes outliers and takes the volume-weighted median of the remaining quotes. The [Oracle](https://docs.kaskad.app/docs/oracle-integration#how-a-price-is-computed) page describes each step and how the Igra and Robinhood Chain images differ.
+3. It signs the result with EIP-191 over `abi.encodePacked(assetId, price, timestamp, numSources, sourcesHash)`. The signing key is bound to the enclave's attestation document, and the oracle contract registers the key from that document.
+4. The host serves the signed prices over HTTPS. The enclave sends no transactions. Anyone can submit a price, and the contract checks the signer, the number of sources, the order of updates and the change limits.
+
+## Keys
+
+- **Robinhood Chain.** While the oracle contract has no registered signer, an oracle enclave generates the root key from the Nitro hardware random number generator. Enclaves running the same image receive the key from a running enclave over RA-TLS. The key exists only in enclave memory. The Pontifex bridge key is derived from it.
+- **Igra.** Each regional enclave generates its own key and stores it encrypted with AWS KMS.
+
+## Images
+
+| Dockerfile | Image |
+|---|---|
+| `Dockerfile.oracle` | The oracle on Robinhood Chain, built with `--features keyex_oracle` |
+| `Dockerfile.pontifex` | The Pontifex bridge enclave |
+| `Dockerfile` | The oracle with KMS key storage, the design used on Igra |
+
+The source of the live Robinhood Chain images and their build arguments are published in [Kaskad-Lending/kaskad-pontifex-enclave](https://github.com/Kaskad-Lending/kaskad-pontifex-enclave/tree/79c81b806232c325b3b4b01c9d47cb8713e71063). [Verify the Enclaves](https://docs.kaskad.app/docs/enclave-verification) rebuilds both images from it and compares their PCRs with the live attestations and the on-chain pins.
+
+## Repository Layout
 
 ```
-┌───── EC2 Instance ───────────────────────────┐
-│                                               │
-│  ┌───── Nitro Enclave ──────────────────┐    │
-│  │                                       │    │
-│  │  kaskad-oracle binary                 │    │
-│  │  (no network, no disk, no SSH)        │    │
-│  │                                       │    │
-│  │  Key generated inside enclave         │    │
-│  │  Attestation doc = PCR0..PCR8 hashes  │    │
-│  │                                       │    │
-│  └──────────┬────────────────────────────┘    │
-│             │ VSOCK                           │
-│  ┌──────────▼────────────────────────────┐    │
-│  │  Proxy Service                         │    │
-│  │  - forwards HTTP to CEX APIs           │    │
-│  │  - forwards RPC to Galleon node        │    │
-│  │  - submits signed TXs                  │    │
-│  └────────────────────────────────────────┘    │
-└───────────────────────────────────────────────┘
+src/                      the oracle
+  sources/                one module per price source
+  collectors/, cob.rs     exchange order books and the consolidated-order-book price
+  aggregator/             outlier removal and the volume-weighted median
+  signer.rs               price signatures
+  keyex_oracle/           Robinhood Chain key generation and handover
+  sealing.rs              Igra key storage with AWS KMS
+crates/keyex/             RA-TLS key handover and the boot rules shared by both enclaves
+crates/nitro-common/      Nitro Security Module access and attestation verification
+crates/pontifex-bridge/   the Pontifex bridge enclave
+config/                   assets and sources, compiled into the image
+contracts/                submodule: kaskad-nuntius-contracts
+tests/, testdata/         integration tests and attestation fixtures
 ```
 
-## Modules
+`enclave/` and `infra/` hold Kaskad's host tooling and infrastructure code, `relayer/` a price relayer, and `scripts/` end-to-end test scripts. The commands in this README do not use them.
 
-### Sources (`src/sources/`)
-
-Each source implements the `PriceSource` trait:
-
-```rust
-#[async_trait]
-pub trait PriceSource: Send + Sync {
-    async fn fetch_price(&self, asset: Asset) -> Result<Option<PricePoint>>;
-    fn name(&self) -> &'static str;
-}
-```
-
-| Source | API | Assets |
-|--------|-----|--------|
-| Binance | `/api/v3/ticker/price` | ETH, BTC, KAS, USDC |
-| OKX | `/api/v5/market/ticker` | ETH, BTC, KAS, USDC |
-| Bybit | `/v5/market/tickers` | ETH, BTC, KAS |
-| Coinbase | `/v2/prices/.../spot` | ETH, BTC |
-| CoinGecko | `/api/v3/simple/price` | ETH, BTC, KAS, USDC |
-
-All sources are fetched sequentially per asset. On error, the source is skipped and a warning is logged. Minimum 2 sources required to proceed.
-
-### Aggregator (`src/aggregator/`)
-
-Pipeline: **outlier rejection → weighted median → fixed-point conversion**
-
-**Outlier rejection** — Modified Z-score using MAD (Median Absolute Deviation):
-1. Compute median of all prices
-2. Compute MAD = median(|price - median|)
-3. Reject any price where |price - median| > σ × 1.4826 × MAD
-4. Default σ = 3.0
-
-**Weighted median** — prices are weighted by 24h trading volume. If volume data is unavailable, all sources are weighted equally. This makes high-liquidity exchanges (Binance, OKX) have more influence than aggregators (CoinGecko).
-
-**Fixed-point** — prices are converted to `uint256` with 8 decimals for on-chain storage: `$1234.56 → 123456000000`.
-
-### Signer (`src/signer.rs`)
-
-The `OracleSigner` trait abstracts signing:
-
-```rust
-pub trait OracleSigner: Send + Sync {
-    fn sign_price_update(&self, asset_id, price, timestamp, num_sources, sources_hash)
-        -> Result<(Vec<u8>, [u8; 20])>;
-    fn address(&self) -> [u8; 20];
-}
-```
-
-| Implementation | Key source | Use case |
-|----------------|-----------|----------|
-| `MockSigner` | env var or random | Local dev, tests |
-| `EnclaveSigner` (planned) | TEE key manager | Production |
-
-Signature payload matches what Solidity `ecrecover` expects:
-
-```
-payload = abi.encodePacked(assetId, price, timestamp, numSources, sourcesHash)
-hash    = keccak256(payload)
-signed  = sign(keccak256("\x19Ethereum Signed Message:\n32" + hash))
-```
-
-### Update Triggers (`src/main.rs`)
-
-Price updates are pushed on-chain only when:
-
-| Condition | ETH/BTC | KAS | USDC | IGRA |
-|-----------|---------|-----|------|------|
-| **Deviation** exceeds | 0.5% | 2.0% | 0.1% | always |
-| **Heartbeat** (max silence) | 1 hour | 30 min | 24 hours | 24 hours |
-
-This minimizes gas cost while keeping prices fresh — same model as Chainlink.
-
-## Supported Assets
-
-| Asset | Type | Sources | Notes |
-|-------|------|---------|-------|
-| ETH/USD | Major | 5 | High liquidity on all exchanges |
-| BTC/USD | Major | 5 | — |
-| KAS/USD | Exotic L1 | 2-3 | Bybit, CoinGecko; limited exchange support |
-| USDC/USD | Stablecoin | 2-3 | Depeg detection via multi-source |
-| IGRA/USD | Presale | — | Governance-set price (planned) |
-
-## Quick Start
+## Build and Test
 
 ```bash
-# Run oracle with test key (auto-generated)
-cargo run
-
-# Run with specific key
-ORACLE_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 cargo run
-
-# Run tests
-cargo test                              # Rust unit tests
-cd contracts && forge test -vvv         # Solidity tests (45 tests incl. E2E)
-
-# Run relayer
-cd relayer && cp .env.example .env      # fill in values
-npm run dev
-
-# E2E integration test (Anvil + real CEX APIs + relayer)
-bash scripts/e2e_relayer.sh
-
-# Verbose logging
-RUST_LOG=debug cargo run
+git clone --recursive https://github.com/Kaskad-Lending/kaskad-nuntius.git
+cd kaskad-nuntius
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --all-targets --features keyex_oracle -- -D warnings
+cargo test --workspace
+cargo test --features keyex_oracle
+(cd contracts && forge test)
 ```
 
-## Contracts
+`rust-toolchain.toml` pins Rust 1.91.1.
 
-| Contract | Purpose |
-|----------|---------|
-| `KaskadPriceOracle` | Permissionless oracle. OZ ECDSA verification, circuit breaker (15% + 4h staleness bypass), rate limiter (5s), future timestamp cap (5 min) |
-| `KaskadAggregatorV3` | Chainlink `IAggregatorV3` wrapper (one per asset) |
-| `KaskadRouter` | Atomic price-update + Aave action. `borrowWithPrices`, `withdrawWithPrices`, `liquidateWithPrices`. Validates MAX_PRICE_AGE=60s |
-| `NitroAttestationVerifier` | On-chain AWS Nitro attestation verification (Marlin NitroProver) |
+## Run a Pricing Round Locally
 
-## Relayer
+```bash
+KASKAD_ALLOW_MOCK_SIGNER=1 SINGLE_RUN=1 cargo run
+```
 
-Permissionless TypeScript service (`relayer/`). Polls oracle pull API, verifies EIP-191 signatures locally, submits `updatePrice()` via ethers.js. Anyone can run a relayer — contract verifies only the enclave signature.
+This runs one pricing round on your machine and logs the price and the number of sources for each asset. The process keeps running after `Single run complete`; stop it with Ctrl-C. It uses a random signing key, which no Kaskad contract has registered.
 
-Users can also push prices directly via `KaskadRouter` (pull oracle pattern) — frontend fetches signed price from enclave, bundles with Aave action in one TX.
+## Run Your Own Oracle
 
-## Deployments
+To run your own Nuntius, with your own assets, sources or approvers, you deploy your own oracle contract and run your own enclave image. This section is an outline of the Robinhood Chain flow. You also need to run the parent-instance side yourself: relaying the enclave's outbound connections to its sources and RPC endpoints, and serving its signed prices.
 
-### Galleon Testnet (Chain ID: 38836)
+1. **Choose the assets and sources** in `config/assets.json` and `config/exchanges.json`. Any change gives the image a different PCR0.
+2. **Predict your oracle's address**, as in step 1 of [Deploy on Robinhood Chain](https://github.com/Kaskad-Lending/kaskad-nuntius-contracts#deploy-on-robinhood-chain) in the contracts README.
+3. **Build `Dockerfile.oracle`** with your own build arguments. They are compiled into the binary, so they are part of PCR0, and the enclave refuses to start if a required one is missing or malformed. The build command in the kaskad-pontifex-enclave README is a template. The build requires `SOURCE_DATE_EPOCH`, which fixes file times so that PCR0 is reproducible.
 
-Full addresses in [`contracts/deployments/galleon.json`](contracts/deployments/galleon.json).
+   | Build argument | Value |
+   |---|---|
+   | `KEYEX_ORACLE_REGISTRY` | Your oracle's predicted address |
+   | `KEYEX_ORACLE_RH_RPCS` | Comma-separated HTTPS RPC endpoints through which the enclave reads the oracle contract and the Safe |
+   | `KEYEX_ORACLE_CHAIN_ID` | The chain ID that owner approvals must name: `4663`, or `46630` for the testnet |
+   | `KEYEX_ORACLE_SAFE`, `KEYEX_ORACLE_OWNERS`, `KEYEX_ORACLE_THRESHOLD` | The Safe, its owners and the minimum number of owner approvals before an enclave hands its key, or a key derived from it, to a different image |
+   | `KEYEX_ORACLE_VERSION` | The image version, `1` for a first image |
+   | `KEYEX_ORACLE_ANCESTORS`, `KEYEX_ORACLE_PEERS` | Earlier images and running enclaves that this image may take the key from. Empty for a first image |
 
-| Contract | Address |
-|----------|---------|
-| KaskadPriceOracle | `0x876a9d20eC033AA3b3DA43b742079eC16fB0C989` |
-| ETH/USD Aggregator | `0xee25D927c926BcA73912f0B3b88B7274Df42ffd8` |
-| BTC/USD Aggregator | `0x3A0d0e305f5cE7FE541A56f88c433DBABD2E8aB0` |
-| USDC/USD Aggregator | `0xB7836b00Cb8a452b47315D720f16fEf4f6D25Ae8` |
-| KAS/USD Aggregator | `0xc578C1E1CE67D5782e0D27C8b268bD1FBd4707f3` |
-| KaskadRouter | `0xdA23732c1Ac6Ea18EE5Bc04A629b8CD1E9fEDe9C` |
-
-Integrates with Kaskad lending protocol (`lending-onchain`). IGRA and KSKD stay on MockPriceOracle (governance/computed prices).
-
-## Configuration
-
-Environment variables (`.env` file supported):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ORACLE_PRIVATE_KEY` | random | Hex-encoded secp256k1 private key |
-| `ENCLAVE_MODE` | unset | Enable EnclaveSigner + VSOCK bridge |
-| `SINGLE_RUN` | unset | Exit after one oracle loop |
-| `VSOCK_PORT` | 5001 | Pull API server port |
-| `IGRA_PRICE` | 0.10 | Governance-set IGRA price |
-| `RUST_LOG` | info | Tracing filter level |
-
-## Roadmap
-
-- [x] Multi-source price fetcher (8 CEX/DEX APIs)
-- [x] Weighted median aggregation + MAD outlier rejection
-- [x] EIP-191 compatible signer (MockSigner + EnclaveSigner)
-- [x] Deviation/heartbeat update triggers
-- [x] Smart contracts (KaskadPriceOracle, AggregatorV3, Router)
-- [x] Permissionless relayer (TypeScript)
-- [x] Pull API (VSOCK/TCP price server)
-- [x] Security audit + fixes (OZ ECDSA, circuit breaker staleness, symbol validation)
-- [x] Galleon testnet deployment
-- [x] Aave V3 integration (KaskadRouter — atomic price+action)
-- [x] Nitro Enclave attestation on-chain (real AWS Nitro COSE_Sign1 verification)
-- [ ] ZKP aggregation proofs (Phase 3)
+4. **Deploy the oracle contract** pinned to the image's PCR0, as in step 3 of the contracts README.
+5. **Run the image** in a Nitro Enclave. On its first boot it generates the key and produces an attestation document that binds it.
+6. **Register the key** from that attestation document, as in step 5 of the contracts README. The enclave starts signing prices once its key is registered.
 
 ## License
 
-Private. Kaskad project.
+Apache-2.0. See `LICENSE` and `NOTICE`.
