@@ -7,3 +7,12 @@
 
 # github_org  = "Kaskad-Lending"
 # github_repo = "kaskad-nuntius"
+
+# ─── Rate-limit attribution ──────────────────────────────────
+
+# Egress addresses of the kaskad.live front proxies. Requests arriving through
+# them are attributed to the client their X-Forwarded-For names; requests from
+# anywhere else are attributed to the address the ALB observed, which the caller
+# cannot forge. Leave empty and the rate-limit key is the leftmost XFF entry,
+# which any caller can set to whatever it likes.
+# front_proxy_egress = ["203.0.113.10/32"]

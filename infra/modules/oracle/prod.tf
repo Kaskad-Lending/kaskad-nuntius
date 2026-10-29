@@ -39,13 +39,14 @@ resource "aws_launch_template" "prod" {
   }
 
   user_data = base64encode(templatefile("${path.module}/user-data-prod.sh", {
-    eif_bucket          = var.eif_bucket_name
-    enclave_cpu_count   = var.enclave_cpu_count
-    enclave_memory_mib  = var.enclave_memory_mib
-    vpc_cidr            = var.vpc_cidr
-    aws_region          = var.aws_region
-    kms_sealing_alias   = aws_kms_alias.sealing.name
-    kms_release_alias   = aws_kms_alias.release.name
+    eif_bucket         = var.eif_bucket_name
+    enclave_cpu_count  = var.enclave_cpu_count
+    enclave_memory_mib = var.enclave_memory_mib
+    vpc_cidr           = var.vpc_cidr
+    trusted_proxies    = join(",", var.trusted_proxies)
+    aws_region         = var.aws_region
+    kms_sealing_alias  = aws_kms_alias.sealing.name
+    kms_release_alias  = aws_kms_alias.release.name
   }))
 
   tag_specifications {

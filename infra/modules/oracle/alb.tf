@@ -21,6 +21,11 @@ resource "aws_lb" "oracle" {
   security_groups    = [aws_security_group.alb.id]
   subnets            = [aws_subnet.public.id, aws_subnet.public_b.id]
 
+  # Pinned, not left to the default: pull_api.py trusts the rightmost
+  # X-Forwarded-For entry because the ALB appends the true TCP peer there.
+  # "preserve" or "remove" would silently make the rate-limit key forgeable.
+  xff_header_processing_mode = "append"
+
   tags = { Name = "${var.name_prefix}-alb" }
 }
 
