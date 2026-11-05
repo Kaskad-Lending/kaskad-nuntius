@@ -41,6 +41,7 @@ MAX_SIGN_BODY = 4096
 MAX_NONCE_HEX = 1024                 # NSM nonce: 512 bytes
 HTTP_READ_TIMEOUT = 10.0
 READINESS_TIMEOUT = 1.0
+MAX_LOG_FIELD = 160                  # cap on enclave-supplied text in host logs
 
 _ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
@@ -60,6 +61,13 @@ class EnclaveMethod(str, enum.Enum):
 class ReadinessState(str, enum.Enum):
     READY = "ready"
     FETCHING = "fetching"
+
+
+class ApprovalReplyField(str, enum.Enum):
+    """Fields of the oracle's `approval` reply (keyex `ApprovalResult`, `err_reply`)."""
+    ACCEPTED = "accepted"
+    REASON = "reason"
+    ERROR = "error"
 
 
 @dataclass(frozen=True)
@@ -99,6 +107,18 @@ def _json_object(body: bytes) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("JSON body must be an object")
     return value
+
+
+def _log_field(value: Any) -> str:
+    """Render an untrusted reply field as one printable, length-capped log token."""
+    if value is None:
+        return "-"
+    if not isinstance(value, str):
+        return f"<{type(value).__name__}>"
+    text = "".join(c if c.isprintable() else "?" for c in value[:MAX_LOG_FIELD + 1])
+    if len(text) > MAX_LOG_FIELD:
+        text = text[:MAX_LOG_FIELD] + "..."
+    return repr(text)
 
 
 def _set_deadline_timeout(sock: socket.socket, deadline: float) -> None:
@@ -525,8 +545,13 @@ class ConfigPusher(threading.Thread):
                     **approval,
                     "method": EnclaveMethod.APPROVAL.value,
                 }, self._enclave_timeout)
-                log.info("approval %s accepted=%s", key,
-                         isinstance(resp, dict) and resp.get("accepted") is True)
+                reply = resp if isinstance(resp, dict) else {}
+                if reply.get(ApprovalReplyField.ACCEPTED.value) is True:
+                    log.info("approval %s accepted=True", key)
+                else:
+                    log.info("approval %s accepted=False reason=%s error=%s", key,
+                             _log_field(reply.get(ApprovalReplyField.REASON.value)),
+                             _log_field(reply.get(ApprovalReplyField.ERROR.value)))
             except VsockError as e:
                 log.info("approval %s deferred (oracle not ready): %s", key, e)
 

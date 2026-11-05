@@ -181,6 +181,36 @@ class ConfigPusherTest(unittest.TestCase):
                 self.pusher._tick()
                 self.assertEqual(self.rpc.call_args_list, [self.approval_call(self.blob)] * 2)
 
+    def approval_log(self) -> list[str]:
+        with self.assertLogs(host.log, level="INFO") as logs:
+            self.pusher._tick()
+        return [r.getMessage() for r in logs.records if r.getMessage().startswith("approval ")]
+
+    def test_refusal_logs_bounded_printable_reason_and_error(self) -> None:
+        cases = [
+            ({"accepted": False, "reason": "multisig read failed: Rpc"},
+             f"approval {self.key} accepted=False reason='multisig read failed: Rpc' error=-"),
+            ({"error": "bad_request"},
+             f"approval {self.key} accepted=False reason=- error='bad_request'"),
+            ({"accepted": False, "reason": "a\nb\x1bc"},
+             f"approval {self.key} accepted=False reason='a?b?c' error=-"),
+            ({"accepted": False, "reason": {"nested": "x"}, "error": 7},
+             f"approval {self.key} accepted=False reason=<dict> error=<int>"),
+            (None, f"approval {self.key} accepted=False reason=- error=-"),
+            ({"accepted": False, "reason": "x" * (host.MAX_LOG_FIELD * 4)},
+             f"approval {self.key} accepted=False reason='{'x' * host.MAX_LOG_FIELD}...' error=-"),
+        ]
+        for response, expected in cases:
+            with self.subTest(response=response):
+                self.rpc.return_value = response
+                lines = self.approval_log()
+                self.assertEqual(lines, [expected])
+                self.assertNotIn(self.blob["signatures"][0][2:], lines[0])
+
+    def test_acceptance_logs_no_reason(self) -> None:
+        self.rpc.return_value = {"accepted": True, "reason": "ignored"}
+        self.assertEqual(self.approval_log(), [f"approval {self.key} accepted=True"])
+
     def test_blob_cannot_override_approval_method(self) -> None:
         self.read_s3.return_value = json.dumps({
             **self.blob, "method": host.EnclaveMethod.CONFIGURE.value,
