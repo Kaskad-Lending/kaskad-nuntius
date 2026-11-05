@@ -450,6 +450,66 @@
           "quote": "USDT"
         }
       }
+    },
+    {
+      "symbol": "HOOD/USD",
+      "min_sources": 3,
+      "deviation_threshold_bps": 500,
+      "heartbeat_seconds": 3600,
+      "sources": {
+        "binance": {
+          "pair": "HOODBUSDT",
+          "quote": "USDT"
+        },
+        "okx": {
+          "pair": "XHOOD-USDT",
+          "quote": "USDT"
+        },
+        "bybit": {
+          "pair": "HOODXUSDT",
+          "quote": "USDT"
+        },
+        "gateio": {
+          "pair": "HOODX_USDT",
+          "quote": "USDT"
+        },
+        "coingecko": {
+          "pair": "robinhood-xstock",
+          "quote": "USD"
+        },
+        "mexc": {
+          "pair": "HOODXUSDT",
+          "quote": "USDT"
+        },
+        "kucoin": {
+          "pair": "HOODX-USDT",
+          "quote": "USDT"
+        }
+      }
+    },
+    {
+      "symbol": "WMT/USD",
+      "min_sources": 3,
+      "deviation_threshold_bps": 300,
+      "heartbeat_seconds": 3600,
+      "sources": {
+        "gateio": {
+          "pair": "WMTG_USDT",
+          "quote": "USDT"
+        },
+        "mexc": {
+          "pair": "WMTONUSDT",
+          "quote": "USDT"
+        },
+        "okx": {
+          "pair": "XWMT-USDT",
+          "quote": "USDT"
+        },
+        "coingecko": {
+          "pair": "walmart-ondo-tokenized-stock",
+          "quote": "USD"
+        }
+      }
     }
   ]
 }
