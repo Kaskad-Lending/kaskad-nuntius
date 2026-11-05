@@ -385,6 +385,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_l2_recorded_frame() {
+        // Frame recorded from the live feed on 2026-11-05.
+        let s = r#"{"topic":"/market/level2:TSLAX-USDT","type":"message","subject":"trade.l2update","data":{"changes":{"asks":[["373.87","0.083","82565263"]],"bids":[]},"sequenceEnd":82565263,"sequenceStart":82565263,"symbol":"TSLAX-USDT","time":1793888973597}}"#;
+        let (sym, upd) = parse_l2_message(s).unwrap();
+        assert_eq!(sym, "TSLAX-USDT");
+        assert_eq!((upd.sequence_start, upd.sequence_end), (82565263, 82565263));
+        assert_eq!(upd.time_ms, 1793888973597);
+        assert_eq!(upd.asks, vec![(373.87, 0.083)]);
+        assert!(upd.bids.is_empty());
+    }
+
+    #[test]
     fn parse_l2_time_optional() {
         // `time` absent — `time_ms` defaults to 0 (caller treats it as
         // "no exchange ts" and falls back to host receive-time).
