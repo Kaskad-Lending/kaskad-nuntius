@@ -469,10 +469,6 @@
           "pair": "HEMI_USDT",
           "quote": "USDT"
         },
-        "crypto_com": {
-          "pair": "HEMI_USD",
-          "quote": "USD"
-        },
         "coingecko": {
           "pair": "hemi",
           "quote": "USD"
