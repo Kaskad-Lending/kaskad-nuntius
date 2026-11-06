@@ -1,0 +1,101 @@
+{
+  "chain_id": 743111,
+  "network": "Hemi Sepolia",
+  "native_currency": "ETH",
+  "transaction_type": "eip1559",
+  "max_fee_per_gas_wei": 3000000,
+  "priority_fee_per_gas_wei": 2500000,
+  "rpc_urls": [
+    "https://testnet.rpc.hemi.network/rpc",
+    "https://hemi-testnet.drpc.org"
+  ],
+  "explorer": "https://testnet.explorer.hemi.xyz",
+  "pool_addresses_provider": "0xd8A01EfCA17eB7f0dB3CfC4335BF714F8C34038E",
+  "pool": "0xf3E62b03e8DEd32B7000A1800460C92803f9E798",
+  "admin": "0xe92cf3419E91EDBeAc9DD8eAC7728Df5DCe57A52",
+  "oracle_source_commit": "80d6c0a",
+  "testnet_tokens": {
+    "WETH": {
+      "address": "0x0C8aFD1b58aa2A5bAd2414B861D8A7fF898eDC3A",
+      "decimals": 18,
+      "feed": "ETH/USD"
+    },
+    "USDT.e": {
+      "address": "0x3Adf21A6cbc9ce6D5a3ea401E7Bae9499d391298",
+      "decimals": 6,
+      "feed": "USDT/USD"
+    },
+    "hBTC": {
+      "address": "0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7",
+      "decimals": 8,
+      "feed": "BTC/USD"
+    },
+    "HEMI": {
+      "address": "0x258D1550a149D13e05599e484D1658032aEE01Cc",
+      "decimals": 18,
+      "feed": "HEMI/USD"
+    },
+    "USDC.e": {
+      "address": "0xD47971C7F5B1067d25cd45d30b2c9eb60de96443",
+      "decimals": 6,
+      "feed": "USDC/USD"
+    }
+  },
+  "feeds": [
+    {
+      "symbol": "ETH/USD",
+      "min_sources": 3,
+      "max_change_bps": 1000,
+      "max_resume_change_bps": 2500
+    },
+    {
+      "symbol": "USDT/USD",
+      "min_sources": 2,
+      "max_change_bps": 200,
+      "max_resume_change_bps": 1000
+    },
+    {
+      "symbol": "BTC/USD",
+      "min_sources": 3,
+      "max_change_bps": 1000,
+      "max_resume_change_bps": 2500
+    },
+    {
+      "symbol": "USDC/USD",
+      "min_sources": 2,
+      "max_change_bps": 200,
+      "max_resume_change_bps": 1000
+    },
+    {
+      "symbol": "HEMI/USD",
+      "min_sources": 3,
+      "max_change_bps": 3000,
+      "max_resume_change_bps": 5000
+    }
+  ],
+  "mainnet_reference_tokens": {
+    "WETH": {
+      "address": "0x4200000000000000000000000000000000000006",
+      "decimals": 18
+    },
+    "USDT": {
+      "address": "0xbB0D083fb1be0A9f6157ec484b6C79E0A4e31C2e",
+      "decimals": 6
+    },
+    "HEMI": {
+      "address": "0x99e3dE3817F6081B2568208337ef83295b7f591D",
+      "decimals": 18
+    }
+  },
+  "reference_chain_id": 43111,
+  "references": [
+    "https://docs.hemi.xyz/discover/network-details",
+    "https://docs.hemi.xyz/discover/token-contract-details",
+    "https://github.com/hemilabs/token-list/blob/master/src/hemi.tokenlist.json"
+  ],
+  "oracle_registry": "0xaa756d70edea36F834B982E03A79EE59835d0d1A",
+  "aave_oracle": "0xa210FB1F6AF21066675e208e57F282eb770Ac70e",
+  "existing_hemi_aggregator": "0x4f61dB806724259e3fcf8f3d2496B66d736bE111",
+  "price_api": "https://nuntius.kaskad.live",
+  "price_delivery": "user-submitted-pull-updates"
+}

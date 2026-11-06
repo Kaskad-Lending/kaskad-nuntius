@@ -1,0 +1,28 @@
+{
+  "symbol": "HEMI/USD",
+  "min_sources": 3,
+  "deviation_threshold_bps": 1500,
+  "heartbeat_seconds": 300,
+  "sources": {
+    "binance": {
+      "pair": "HEMIUSDT",
+      "quote": "USDT"
+    },
+    "mexc": {
+      "pair": "HEMIUSDT",
+      "quote": "USDT"
+    },
+    "gateio": {
+      "pair": "HEMI_USDT",
+      "quote": "USDT"
+    },
+    "crypto_com": {
+      "pair": "HEMI_USD",
+      "quote": "USD"
+    },
+    "coingecko": {
+      "pair": "hemi",
+      "quote": "USD"
+    }
+  }
+}
