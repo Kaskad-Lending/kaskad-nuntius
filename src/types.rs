@@ -254,6 +254,7 @@ mod tests {
             "TSLA/USD",
             "HOOD/USD",
             "WMT/USD",
+            "HEMI/USD",
         ];
         let cfg = load_assets().expect("assets.json must parse");
         for want in REQUIRED {
