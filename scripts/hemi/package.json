@@ -1,0 +1,13 @@
+{
+  "name": "@kaskad/hemi-price-configuration",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "inspect": "node price-configuration.mjs",
+    "prepare": "node price-configuration.mjs --prepare"
+  },
+  "dependencies": {
+    "ethers": "^6.16.0"
+  }
+}

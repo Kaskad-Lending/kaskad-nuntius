@@ -18,6 +18,10 @@ COPY proto/ ./proto/
 # runs the full price loop under the feature) means both must be present at
 # compile time; their bytes go into PCR0.
 COPY config/ ./config/
+ARG ORACLE_ASSETS_CONFIG=config/assets.json
+ARG ORACLE_EXCHANGES_CONFIG=config/exchanges.json
+COPY ${ORACLE_ASSETS_CONFIG} ./config/assets.json
+COPY ${ORACLE_EXCHANGES_CONFIG} ./config/exchanges.json
 # Workspace members (keyex, nitro-common) are compiled in under the feature, so
 # the whole crates/ tree must be present — cargo needs every member manifest to
 # resolve the workspace even for the ones the default build leaves out.

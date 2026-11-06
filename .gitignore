@@ -1,4 +1,7 @@
 /target
+scratchpad/
+scratchpad-hemi-price-preparation-output.json
+scripts/hemi/node_modules/
 reference/
 .env
 *.eif
@@ -10,3 +13,6 @@ docs/timestamps.md
 CLAUDE.md
 enclave/__pycache__/
 docs/pr-timeline-*.md
+__pycache__/
+*.pyc
+.cache/

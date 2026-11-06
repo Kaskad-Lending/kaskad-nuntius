@@ -1,0 +1,137 @@
+[
+  {
+    "name": "binance",
+    "enabled": true,
+    "ws_url": "wss://stream.binance.com:9443",
+    "pairs": [
+      "ETHUSDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "bingx",
+    "enabled": true,
+    "ws_url": "wss://open-api-ws.bingx.com/market",
+    "pairs": [
+      "ETH-USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "bitget",
+    "enabled": true,
+    "ws_url": "wss://ws.bitget.com/v2/ws/public",
+    "pairs": [
+      "ETHUSDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "bitmart",
+    "enabled": true,
+    "ws_url": "wss://ws-manager-compress.bitmart.com/api?protocol=1.1",
+    "pairs": [
+      "ETH_USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "bitrue",
+    "enabled": true,
+    "ws_url": "wss://ws.bitrue.com/market/ws",
+    "pairs": [
+      "ETHUSDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "bybit",
+    "enabled": true,
+    "ws_url": "wss://stream.bybit.com/v5/public/spot",
+    "pairs": [
+      "ETHUSDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "coinbase",
+    "enabled": true,
+    "ws_url": "wss://advanced-trade-ws.coinbase.com",
+    "pairs": [
+      "ETH-USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "coinw",
+    "enabled": true,
+    "ws_url": "wss://ws.futurescw.com",
+    "pairs": [
+      "ETH_USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "cryptocom",
+    "enabled": true,
+    "ws_url": "wss://stream.crypto.com/exchange/v1/market",
+    "pairs": [
+      "ETH_USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "gate",
+    "enabled": true,
+    "ws_url": "wss://api.gateio.ws/ws/v4/",
+    "pairs": [
+      "ETH_USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "kraken",
+    "enabled": true,
+    "ws_url": "wss://ws.kraken.com/v2",
+    "pairs": [
+      "ETH/USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "kucoin",
+    "enabled": true,
+    "ws_url": "wss://ws-api-spot.kucoin.com",
+    "pairs": [
+      "ETH-USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "mexc",
+    "enabled": true,
+    "ws_url": "wss://wbs-api.mexc.com/ws",
+    "pairs": [
+      "ETHUSDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "okx",
+    "enabled": true,
+    "ws_url": "wss://ws.okx.com:8443/ws/v5/public",
+    "pairs": [
+      "ETH-USDT"
+    ],
+    "extra_params": {}
+  },
+  {
+    "name": "whitebit",
+    "enabled": true,
+    "ws_url": "wss://api.whitebit.com/ws",
+    "pairs": [
+      "ETH_USDT"
+    ],
+    "extra_params": {}
+  }
+]
