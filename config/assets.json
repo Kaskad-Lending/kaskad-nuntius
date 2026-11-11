@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "_note": "This file is baked into the enclave EIF via include_str! and is therefore measured in PCR0. Any change to its content produces a different PCR0 and requires on-chain re-registration of the oracle. Keys under `sources` MUST match a registered PriceSource::name() \u2014 otherwise the mapping is silently ignored for that source. Each source carries the quote currency of its pair; USDT-quoted samples are multiplied by USDT/USD before aggregation, so USDT/USD itself must stay USD-quoted. `deviation_threshold_bps` is a hard cap on one venue's distance from the median (0 = MAD only). `exchange_hostnames` is the allowlist of hostnames the enclave's HttpClient may connect to \u2014 startup validates that every source's hardcoded URL hostname appears here.",
+  "_note": "This file is baked into the enclave EIF via include_str! and is therefore measured in PCR0. Any change to its content produces a different PCR0 and requires on-chain re-registration of the oracle. Keys under `sources` MUST match a registered PriceSource::name() \u2014 otherwise the mapping is silently ignored for that source. Each source carries the quote currency of its pair; USDT-quoted samples are multiplied by USDT/USD before aggregation, so USDT/USD itself must stay USD-quoted. `deviation_threshold_bps` is a hard cap on one venue's distance from the median (0 = MAD only). `max_pair_gap_bps`, when set, skips the cycle if exactly two samples remain and sit further apart than that. A source `scale` multiplies that venue's price, for a pair that trades a proxy of the asset at a fixed ratio. `exchange_hostnames` is the allowlist of hostnames the enclave's HttpClient may connect to \u2014 startup validates that every source's hardcoded URL hostname appears here.",
   "exchange_hostnames": [
     "api.binance.com",
     "www.okx.com",
@@ -16,7 +16,8 @@
     "www.bitstamp.net",
     "api.crypto.com",
     "api.huobi.pro",
-    "apis.igralabs.com"
+    "apis.igralabs.com",
+    "api.robinhood.com"
   ],
   "assets": [
     {
@@ -532,6 +533,55 @@
         "coingecko": {
           "pair": "hemi",
           "quote": "USD"
+        }
+      }
+    },
+    {
+      "symbol": "SGOV/USD",
+      "min_sources": 2,
+      "deviation_threshold_bps": 50,
+      "max_pair_gap_bps": 50,
+      "heartbeat_seconds": 3600,
+      "sources": {
+        "bitget": {
+          "pair": "RSGOVUSDT",
+          "quote": "USD"
+        },
+        "robinhood": {
+          "pair": "SGOV",
+          "quote": "USD"
+        }
+      }
+    },
+    {
+      "symbol": "SPYM/USD",
+      "min_sources": 3,
+      "deviation_threshold_bps": 200,
+      "heartbeat_seconds": 3600,
+      "sources": {
+        "bitget": {
+          "pair": "RSPYMUSDT",
+          "quote": "USD"
+        },
+        "robinhood": {
+          "pair": "SPY",
+          "quote": "USD",
+          "scale": 0.1177
+        },
+        "binance": {
+          "pair": "SPYBUSDT",
+          "quote": "USDT",
+          "scale": 0.1177
+        },
+        "okx": {
+          "pair": "XSPY-USDT",
+          "quote": "USDT",
+          "scale": 0.1177
+        },
+        "gateio": {
+          "pair": "SPYX_USDT",
+          "quote": "USDT",
+          "scale": 0.1177
         }
       }
     }

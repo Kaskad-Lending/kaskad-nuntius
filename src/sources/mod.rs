@@ -13,6 +13,7 @@ pub mod kraken;
 pub mod kucoin;
 pub mod mexc;
 pub mod okx;
+pub mod robinhood;
 
 use async_trait::async_trait;
 use eyre::Result;
