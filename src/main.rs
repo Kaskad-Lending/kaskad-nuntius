@@ -215,6 +215,7 @@ async fn main() -> Result<()> {
         Box::new(sources::crypto_com::CryptoCom::new(client.clone())),
         Box::new(sources::htx::Htx::new(client.clone())),
         Box::new(sources::igralabs::IgraLabs::new(client.clone())),
+        Box::new(sources::robinhood::Robinhood::new(client.clone())),
     ];
 
     // --- Spawn the WS collector manager + book-state fan-in ----------
@@ -507,7 +508,10 @@ async fn main() -> Result<()> {
                 );
             }
 
-            // 1b. Convert USDT-quoted samples to USD before anything
+            // 1b. Bring proxy-pair samples to the asset's own price.
+            aggregator::apply_source_scales(&mut prices, asset);
+
+            // 1c. Convert USDT-quoted samples to USD before anything
             //     compares them, so one population reaches the median.
             if asset.has_usdt_quoted_source() {
                 let ref_ts = aggregator::median_server_time(&prices).unwrap_or(0);
@@ -571,6 +575,19 @@ async fn main() -> Result<()> {
                     remaining = prices.len(),
                     min_required = asset.min_sources,
                     "Data Quorum lost after outlier rejection. Skipping."
+                );
+                continue;
+            }
+
+            // 2b. Two samples have no median to be rejected against, so an
+            //     asset with a pair limit refuses to sign a split pair.
+            if let Some(gap_bps) = aggregator::pair_gap_over_limit(&prices, asset.max_pair_gap_bps)
+            {
+                warn!(
+                    asset = %asset.symbol,
+                    gap_bps = format!("{:.1}", gap_bps),
+                    max_gap_bps = ?asset.max_pair_gap_bps,
+                    "two sources disagree beyond the pair limit. Skipping."
                 );
                 continue;
             }

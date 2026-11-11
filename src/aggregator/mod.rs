@@ -1,6 +1,7 @@
 use crate::types::{AssetConfig, PricePoint, Quote};
 use alloy_primitives::U256;
 use eyre::{eyre, Result};
+use std::num::NonZeroU16;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Cap a single source's volume weight at N× the median of positive volumes.
@@ -255,6 +256,30 @@ pub fn convert_quotes_to_usd(prices: &mut [PricePoint], asset: &AssetConfig, usd
     }
 }
 
+/// Multiply each sample by its source's `scale`, turning a proxy pair's
+/// price into the asset's. Runs before anything compares samples; a unit
+/// scale leaves the price bit-identical.
+pub fn apply_source_scales(prices: &mut [PricePoint], asset: &AssetConfig) {
+    for p in prices.iter_mut() {
+        if let Some(scale) = asset.scale(&p.source) {
+            p.price *= scale.get();
+        }
+    }
+}
+
+/// Gap of a two-sample set in bps of its midpoint, when it is wider than
+/// `max_gap_bps`. None for any other sample count, without a limit, or
+/// within it. Expects sanitised (positive, finite) prices.
+pub fn pair_gap_over_limit(prices: &[PricePoint], max_gap_bps: Option<NonZeroU16>) -> Option<f64> {
+    let limit = f64::from(max_gap_bps?.get());
+    let [a, b] = prices else {
+        return None;
+    };
+    let mid = (a.price + b.price) / 2.0;
+    let gap_bps = (a.price - b.price).abs() / mid * 10_000.0;
+    (gap_bps > limit).then_some(gap_bps)
+}
+
 /// Monotonic count of cycles that published a USDT-quoted asset without a
 /// live USDT/USD rate, i.e. assuming the peg holds. Surfaced in `health`
 /// so a monitor can page when it climbs: a depeg plus a suppressed
@@ -315,6 +340,7 @@ pub fn sources_hash(prices: &[PricePoint]) -> alloy_primitives::B256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Scale;
 
     fn make_prices(values: &[f64]) -> Vec<PricePoint> {
         values
@@ -346,6 +372,7 @@ mod tests {
             symbol: symbol.to_string(),
             min_sources: 1,
             deviation_threshold_bps: cap_bps,
+            max_pair_gap_bps: None,
             heartbeat_seconds: 3600,
             sources: srcs
                 .iter()
@@ -355,11 +382,121 @@ mod tests {
                         crate::types::SourceMapping {
                             pair: format!("{}PAIR", name),
                             quote: *q,
+                            scale: Scale::UNIT,
                         },
                     )
                 })
                 .collect(),
         }
+    }
+
+    fn bundled_asset(symbol: &str) -> AssetConfig {
+        crate::types::load_assets()
+            .expect("assets.json must parse")
+            .assets
+            .into_iter()
+            .find(|a| a.symbol == symbol)
+            .unwrap_or_else(|| panic!("{symbol} missing from assets.json"))
+    }
+
+    fn sample(source: &str, price: f64) -> PricePoint {
+        PricePoint {
+            price,
+            volume: 0.0,
+            source: source.to_string(),
+            server_time: 1_710_000_000,
+        }
+    }
+
+    /// Only a mapping with a factor is scaled; a unit scale and an unmapped
+    /// source keep the exact bits of the venue price.
+    #[test]
+    fn source_scales_apply_only_to_proxy_mappings() {
+        let mut asset = asset_with_quotes(
+            "SPYM/USD",
+            0,
+            &[("source_0", Quote::Usd), ("source_1", Quote::Usd)],
+        );
+        asset.sources.get_mut("source_1").unwrap().scale = Scale::try_from(0.5).unwrap();
+        let odd = 0.1 + 0.2;
+        let mut prices = make_prices(&[odd, 200.0, odd]);
+        apply_source_scales(&mut prices, &asset);
+        assert_eq!(prices[0].price.to_bits(), odd.to_bits());
+        assert_eq!(prices[1].price, 100.0);
+        assert_eq!(prices[2].price.to_bits(), odd.to_bits());
+    }
+
+    /// The bundled SPYM mappings turn SPY venue prices into one population
+    /// with the direct SPYM quote, so the cap keeps every venue.
+    #[test]
+    fn bundled_spym_proxies_land_on_the_direct_quote() {
+        let asset = bundled_asset("SPYM/USD");
+        // Closes of 2026-11-10: SPY 749.92, SPYM 88.28.
+        let mut prices: Vec<PricePoint> = asset
+            .sources
+            .iter()
+            .map(|(name, m)| {
+                sample(
+                    name,
+                    if m.scale == Scale::UNIT {
+                        88.28
+                    } else {
+                        749.92
+                    },
+                )
+            })
+            .collect();
+        assert!(prices.iter().any(|p| p.price == 749.92), "no proxy mapping");
+        assert!(prices.iter().any(|p| p.price == 88.28), "no direct mapping");
+        let total = prices.len();
+        apply_source_scales(&mut prices, &asset);
+        reject_outliers_with_cap(&mut prices, 3.0, asset.deviation_threshold_bps);
+        assert_eq!(prices.len(), total, "a venue was rejected");
+        let (median, _) = weighted_median(&prices).unwrap();
+        assert!((median / 88.28 - 1.0).abs() < 0.0005, "median {median}");
+    }
+
+    /// A pair is compared only when a limit is set, and only a gap wider
+    /// than the limit is reported.
+    #[test]
+    fn pair_gap_limit_boundaries() {
+        let limit = NonZeroU16::new(50);
+        // Midpoint 100, gap exactly 50 bps: at the limit, still signed.
+        assert_eq!(
+            pair_gap_over_limit(&make_prices(&[99.75, 100.25]), limit),
+            None
+        );
+        let gap = pair_gap_over_limit(&make_prices(&[99.7, 100.3]), limit).unwrap();
+        assert!((gap - 60.0).abs() < 1e-6, "{gap}");
+        // Order of the two samples does not matter.
+        assert!(pair_gap_over_limit(&make_prices(&[100.3, 99.7]), limit).is_some());
+        assert_eq!(
+            pair_gap_over_limit(&make_prices(&[100.0, 200.0]), None),
+            None
+        );
+    }
+
+    /// One sample or three and more are not a pair: other gates own them.
+    #[test]
+    fn pair_gap_limit_ignores_other_sample_counts() {
+        let limit = NonZeroU16::new(1);
+        assert_eq!(pair_gap_over_limit(&[], limit), None);
+        assert_eq!(pair_gap_over_limit(&make_prices(&[100.0]), limit), None);
+        assert_eq!(
+            pair_gap_over_limit(&make_prices(&[100.0, 200.0, 300.0]), limit),
+            None
+        );
+    }
+
+    /// SGOV runs on two venues, so its pair must be compared.
+    #[test]
+    fn bundled_sgov_refuses_a_split_pair() {
+        let asset = bundled_asset("SGOV/USD");
+        assert_eq!(asset.min_sources, 2);
+        let agree = [sample("bitget", 100.52), sample("robinhood", 100.525)];
+        assert_eq!(pair_gap_over_limit(&agree, asset.max_pair_gap_bps), None);
+        let split = [sample("bitget", 99.0), sample("robinhood", 100.525)];
+        assert!(pair_gap_over_limit(&split, asset.max_pair_gap_bps).is_some());
     }
 
     /// Only USDT-quoted samples are scaled; USD-quoted ones are untouched.

@@ -2,6 +2,7 @@ use alloy_primitives::B256;
 use eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::num::NonZeroU16;
 
 /// Per-asset configuration loaded from the bundled `config/assets.json`.
 ///
@@ -21,11 +22,16 @@ pub struct AssetConfig {
     /// rejection before the cycle will sign (per-asset Data Quorum).
     pub min_sources: usize,
 
-    /// Minimum band, in bps of the median, below which a sample is never
-    /// treated as an outlier. Widens the MAD gate for assets whose honest
-    /// cross-venue spread is wide (equities gap on earnings); it can only
-    /// keep samples, never drop extra ones.
+    /// Hard cap, in bps of the median, on one sample's distance from the
+    /// median of three or more samples. It can only drop samples the MAD
+    /// gate would keep; 0 leaves the MAD gate alone.
     pub deviation_threshold_bps: u16,
+
+    /// Widest gap, in bps of the midpoint, at which a two-sample set is
+    /// still signed. A wider gap skips the cycle; absent, the pair is not
+    /// compared.
+    #[serde(default)]
+    pub max_pair_gap_bps: Option<NonZeroU16>,
     #[allow(dead_code)]
     pub heartbeat_seconds: u64,
 
@@ -47,6 +53,38 @@ pub enum Quote {
     Usdt,
 }
 
+/// Positive finite factor from a venue pair's price to the asset's price.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(try_from = "f64")]
+pub struct Scale(f64);
+
+impl Scale {
+    /// The pair trades the asset itself.
+    pub const UNIT: Scale = Scale(1.0);
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Default for Scale {
+    fn default() -> Self {
+        Self::UNIT
+    }
+}
+
+impl TryFrom<f64> for Scale {
+    type Error = String;
+
+    fn try_from(value: f64) -> std::result::Result<Self, Self::Error> {
+        if value.is_finite() && value > 0.0 {
+            Ok(Self(value))
+        } else {
+            Err(format!("scale must be a positive number, got {value}"))
+        }
+    }
+}
+
 /// One venue's pair for an asset. `quote` is mandatory: a mapping added
 /// without it fails to parse at boot rather than defaulting to a guess.
 #[derive(Debug, Clone, Deserialize)]
@@ -54,6 +92,10 @@ pub enum Quote {
 pub struct SourceMapping {
     pub pair: String,
     pub quote: Quote,
+    /// Set when the pair trades a proxy that moves with the asset at a
+    /// fixed ratio; the sample is multiplied by it before aggregation.
+    #[serde(default)]
+    pub scale: Scale,
 }
 
 /// Canonical symbol of the rate used to convert `Quote::Usdt` samples.
@@ -74,6 +116,11 @@ impl AssetConfig {
     /// Quote currency of `source`'s pair for this asset.
     pub fn quote(&self, source: &str) -> Option<Quote> {
         self.sources.get(source).map(|m| m.quote)
+    }
+
+    /// Factor from `source`'s pair price to this asset's price.
+    pub fn scale(&self, source: &str) -> Option<Scale> {
+        self.sources.get(source).map(|m| m.scale)
     }
 
     /// True when at least one mapping is USDT-denominated.
@@ -235,6 +282,42 @@ mod tests {
             .expect_err("a mapping without a quote must not parse");
     }
 
+    #[test]
+    fn scale_defaults_to_unit_and_parses_a_positive_factor() {
+        let plain: SourceMapping =
+            serde_json::from_str(r#"{"pair":"ETHUSDT","quote":"USDT"}"#).unwrap();
+        assert_eq!(plain.scale, Scale::UNIT);
+        let proxy: SourceMapping =
+            serde_json::from_str(r#"{"pair":"SPY","quote":"USD","scale":0.1177}"#).unwrap();
+        assert_eq!(proxy.scale.get(), 0.1177);
+    }
+
+    #[test]
+    fn non_positive_or_non_numeric_scale_is_rejected() {
+        for bad in ["0", "0.0", "-0.1177", "1e999", r#""0.1177""#, "null"] {
+            let json = format!(r#"{{"pair":"SPY","quote":"USD","scale":{bad}}}"#);
+            assert!(
+                serde_json::from_str::<SourceMapping>(&json).is_err(),
+                "scale {bad} accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn pair_gap_limit_is_optional_and_never_zero() {
+        let asset = |extra: &str| {
+            format!(
+                r#"{{"symbol":"X/USD","min_sources":2,"deviation_threshold_bps":50,"heartbeat_seconds":3600,"sources":{{}}{extra}}}"#
+            )
+        };
+        let absent: AssetConfig = serde_json::from_str(&asset("")).unwrap();
+        assert_eq!(absent.max_pair_gap_bps, None);
+        let set: AssetConfig = serde_json::from_str(&asset(r#","max_pair_gap_bps":50"#)).unwrap();
+        assert_eq!(set.max_pair_gap_bps.map(NonZeroU16::get), Some(50));
+        serde_json::from_str::<AssetConfig>(&asset(r#","max_pair_gap_bps":0"#))
+            .expect_err("a zero gap limit would skip every pair");
+    }
+
     /// The reserves the Kaskad markets list must all have a feed. Losing
     /// one here means an unpriceable reserve after an enclave rebuild.
     #[test]
@@ -255,6 +338,8 @@ mod tests {
             "HOOD/USD",
             "WMT/USD",
             "HEMI/USD",
+            "SGOV/USD",
+            "SPYM/USD",
         ];
         let cfg = load_assets().expect("assets.json must parse");
         for want in REQUIRED {
@@ -308,6 +393,7 @@ mod tests {
             ("crypto_com", "api.crypto.com"),
             ("htx", "api.huobi.pro"),
             ("igralabs", "apis.igralabs.com"),
+            ("robinhood", "api.robinhood.com"),
         ];
 
         let cfg = load_assets().expect("assets.json must parse");
