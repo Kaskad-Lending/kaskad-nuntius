@@ -1427,4 +1427,24 @@ mod tests {
         )
         .await;
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn spec_16_7_scenario_20_an_unaccepted_2xx_costs_the_next_round_its_retry() {
+        retry_right_chain(
+            "#20",
+            |nth| match nth {
+                0 => answer(200, None, &response(98, 100, 0, BLOCK_TS)),
+                1 | 3 => status(503),
+                2 => accepted(LATER),
+                _ => accepted(LATER + 20),
+            },
+            &[
+                (1, None),
+                (1, None),
+                (1, Some(LATER)),
+                (2, Some(LATER + 20)),
+            ],
+        )
+        .await;
+    }
 }
