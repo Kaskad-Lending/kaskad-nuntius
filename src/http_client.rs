@@ -1388,6 +1388,27 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_success_in_flight_ends_the_pause_of_its_host() {
+        const SLOW: &str = "https://api.example.com/slow";
+        let (client, exchange) = scripted(|url, _| match url {
+            SLOW => Step::After(Duration::from_secs(2), Box::new(ok())),
+            URL => status(429),
+            _ => ok(),
+        });
+        let (slow, limited) = tokio::join!(
+            client.get_json_with_time::<Value>(SLOW),
+            client.get_json_with_time::<Value>(URL)
+        );
+        slow.expect("the slow call was sent before the pause");
+        assert_eq!(limited.unwrap_err().class(), ErrorClass::RateLimited);
+        client
+            .get_json_with_time::<Value>("https://api.example.com/next")
+            .await
+            .expect("the success cleared the 30 s pause");
+        assert_eq!(exchange.sent().len(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn statuses_outside_the_pause_list_never_pause() {
         for code in [400, 404, 408, 500, 503, 301] {
             let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));

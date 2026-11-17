@@ -4,7 +4,7 @@
 
 use std::fmt;
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use alloy_primitives::{address, Address, U256};
 use alloy_sol_types::{sol, SolCall};
@@ -13,6 +13,7 @@ use eyre::{eyre, Result};
 use futures::future::join_all;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use super::PriceSource;
@@ -437,6 +438,8 @@ pub fn sources(client: HttpClient) -> Vec<Box<dyn PriceSource>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http_client::mock::{connect_error, MockExchange, Sent, Step};
+    use crate::http_client::{ErrorClass, HttpError, Method, Reply, RequestError};
     use crate::sources::fetch_all;
     use crate::types::load_assets;
     use sha2::{Digest, Sha256};
@@ -879,5 +882,397 @@ mod tests {
             "{err}"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Operator the single-operator SPEC §16.7 scenarios script; the other seven always answer.
+    const TARGET: Operator = Operator::BlastApi;
+    /// `Date` of an answer that only a retry or a later round can get.
+    const LATER: u64 = BLOCK_TS + 7;
+
+    /// IMF-fixdate of `unix`, as an operator sends it in `Date`.
+    fn http_date(unix: u64) -> String {
+        chrono::DateTime::from_timestamp(unix as i64, 0)
+            .unwrap()
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+    }
+
+    fn answer(status: u16, date: Option<u64>, body: &Value) -> Step {
+        Step::Answer(Reply {
+            status,
+            date: date.map(http_date),
+            body: serde_json::to_vec(body).unwrap(),
+            ..Reply::default()
+        })
+    }
+
+    fn accepted(date: u64) -> Step {
+        answer(200, Some(date), &response(98, 100, 0, BLOCK_TS))
+    }
+
+    fn status(code: u16) -> Step {
+        answer(code, Some(BLOCK_TS), &Value::Null)
+    }
+
+    fn rpc_error(code: i64) -> Step {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": code, "message": "limit" } });
+        answer(200, Some(BLOCK_TS), &body)
+    }
+
+    fn fixture(name: &str) -> Step {
+        let v = vector(name);
+        answer(200, v["date_unix"].as_u64(), &v["body"])
+    }
+
+    /// A poller over the production `HttpClient` and bundled allowlist, on a scripted wire.
+    fn wired(
+        plan: impl Fn(&str, usize) -> Step + Send + Sync + 'static,
+    ) -> (Arc<NavPoller>, Arc<MockExchange>) {
+        let exchange = MockExchange::new(plan);
+        let hosts = load_assets().unwrap().exchange_hostnames;
+        let client = HttpClient::with_exchange(exchange.clone(), hosts);
+        (Arc::new(NavPoller::new(Box::new(client))), exchange)
+    }
+
+    #[derive(Debug)]
+    enum Expect {
+        Sample { server_time: u64 },
+        Failed(ErrorClass),
+        Rejected(NavReject),
+    }
+
+    fn check(name: &str, got: Result<NavSample>, expect: &Expect) {
+        match (expect, got) {
+            (Expect::Sample { server_time }, Ok(sample)) => {
+                assert_eq!(sample.server_time, *server_time, "{name}")
+            }
+            (Expect::Failed(class), Err(e)) => assert_eq!(
+                e.downcast_ref::<RequestError>().map(RequestError::class),
+                Some(*class),
+                "{name}: {e}"
+            ),
+            (Expect::Rejected(reject), Err(e)) => {
+                assert!(e.downcast_ref::<RequestError>().is_none(), "{name}: {e}");
+                assert!(e.to_string().ends_with(&reject.to_string()), "{name}: {e}");
+            }
+            (expect, got) => panic!("{name}: want {expect:?}, got {got:?}"),
+        }
+    }
+
+    type Attempt = fn() -> Step;
+
+    struct Scenario {
+        name: &'static str,
+        first: Attempt,
+        /// None: a retry would be accepted dated `LATER`.
+        second: Option<Attempt>,
+        requests: usize,
+        expect: Expect,
+        /// None: the next round asks the operator again at once.
+        pause: Option<Duration>,
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spec_16_7_single_operator_scenarios() {
+        use ErrorClass::*;
+        let scenario = |name, first, second, requests, expect, pause| Scenario {
+            name,
+            first,
+            second,
+            requests,
+            expect,
+            pause,
+        };
+        let scenarios = [
+            scenario(
+                "#1 accepted",
+                || accepted(BLOCK_TS),
+                None,
+                1,
+                Expect::Sample {
+                    server_time: BLOCK_TS,
+                },
+                None,
+            ),
+            scenario(
+                "#2 error code 3 (real revert vector)",
+                || fixture("real_revert_block_26428312_stale_usdt_feed"),
+                None,
+                1,
+                Expect::Rejected(NavReject::RpcError),
+                None,
+            ),
+            scenario(
+                "#3 error code -32005",
+                || rpc_error(-32005),
+                None,
+                1,
+                Expect::Rejected(NavReject::RpcError),
+                None,
+            ),
+            scenario(
+                "#4 result rejected BLOCK_STALE",
+                || fixture("block_stale_181"),
+                None,
+                1,
+                Expect::Rejected(NavReject::BlockStale),
+                None,
+            ),
+            scenario(
+                "#5 200 without Date",
+                || answer(200, None, &response(98, 100, 0, BLOCK_TS)),
+                None,
+                1,
+                Expect::Failed(BadResponse),
+                None,
+            ),
+            scenario(
+                "#6a HTTP 301",
+                || status(301),
+                None,
+                1,
+                Expect::Failed(BadResponse),
+                None,
+            ),
+            scenario(
+                "#6b HTTP 404",
+                || status(404),
+                None,
+                1,
+                Expect::Failed(ClientError),
+                None,
+            ),
+            scenario(
+                "#7 429 without Retry-After",
+                || status(429),
+                None,
+                1,
+                Expect::Failed(RateLimited),
+                Some(Duration::from_secs(30)),
+            ),
+            scenario(
+                "#8 HTTP 403",
+                || status(403),
+                None,
+                1,
+                Expect::Failed(Blocked),
+                Some(Duration::from_secs(60)),
+            ),
+            scenario(
+                "#9 503 then accepted",
+                || status(503),
+                Some(|| accepted(LATER)),
+                2,
+                Expect::Sample { server_time: LATER },
+                None,
+            ),
+            scenario(
+                "#10 503 without Date then accepted",
+                || answer(503, None, &Value::Null),
+                Some(|| accepted(LATER)),
+                2,
+                Expect::Sample { server_time: LATER },
+                None,
+            ),
+            scenario(
+                "#11 connect error then error code 3",
+                || Step::Fail(connect_error()),
+                Some(|| rpc_error(3)),
+                2,
+                Expect::Rejected(NavReject::RpcError),
+                None,
+            ),
+            scenario(
+                "#12 503 twice",
+                || status(503),
+                Some(|| status(503)),
+                2,
+                Expect::Failed(ServerError),
+                None,
+            ),
+            scenario(
+                "#13 connect error after 3 s",
+                || {
+                    Step::After(
+                        Duration::from_secs(3),
+                        Box::new(Step::Fail(connect_error())),
+                    )
+                },
+                None,
+                1,
+                Expect::Failed(Network),
+                None,
+            ),
+            scenario(
+                "#13 boundary: connect error after 2.75 s",
+                || {
+                    Step::After(
+                        Duration::from_millis(2_750),
+                        Box::new(Step::Fail(connect_error())),
+                    )
+                },
+                None,
+                2,
+                Expect::Sample { server_time: LATER },
+                None,
+            ),
+            scenario(
+                "#14 no answer",
+                || Step::Hang,
+                None,
+                1,
+                Expect::Failed(Timeout),
+                None,
+            ),
+        ];
+        for s in scenarios {
+            let (name, first, second) = (s.name, s.first, s.second);
+            let (poller, exchange) = wired(move |url, nth| {
+                if url != TARGET.url() {
+                    return accepted(BLOCK_TS);
+                }
+                match (nth, second) {
+                    (0, _) => first(),
+                    (1, Some(second)) => second(),
+                    _ => accepted(LATER),
+                }
+            });
+            let started = Instant::now();
+            let got = poller.take(TARGET).await;
+            assert!(started.elapsed() <= REQUEST_TIMEOUT, "{name}");
+            assert_eq!(exchange.count(TARGET.url()), s.requests, "{name}");
+            assert_eq!(
+                exchange.sent().len(),
+                OPERATORS - 1 + s.requests,
+                "{name}: the others are asked once"
+            );
+            check(name, got, &s.expect);
+
+            let Some(length) = s.pause else {
+                poller.take(TARGET).await.unwrap();
+                assert_eq!(exchange.count(TARGET.url()), s.requests + 1, "{name}");
+                continue;
+            };
+            tokio::time::sleep_until(started + length - Duration::from_millis(1)).await;
+            check(
+                name,
+                poller.take(TARGET).await,
+                &Expect::Failed(CoolingDown),
+            );
+            assert_eq!(
+                exchange.count(TARGET.url()),
+                1,
+                "{name}: no request while paused"
+            );
+            tokio::time::sleep_until(started + length).await;
+            check(
+                name,
+                poller.take(TARGET).await,
+                &Expect::Sample { server_time: LATER },
+            );
+            assert_eq!(exchange.count(TARGET.url()), 2, "{name}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spec_16_7_scenario_15_a_failed_round_does_not_carry_over() {
+        let (poller, exchange) = wired(|_, nth| match nth {
+            0 | 1 => Step::Fail(connect_error()),
+            _ => accepted(BLOCK_TS),
+        });
+        let sources = operator_sources(poller);
+        let asset = vusd_asset();
+        assert!(fetch_all(&sources, &asset).await.is_empty());
+        assert_eq!(exchange.sent().len(), 2 * OPERATORS);
+        assert_eq!(fetch_all(&sources, &asset).await.len(), OPERATORS);
+        assert_eq!(exchange.sent().len(), 3 * OPERATORS);
+        for operator in Operator::ALL {
+            assert_eq!(exchange.count(operator.url()), 3, "{operator:?}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spec_16_7_scenario_16_a_paused_operator_costs_no_extra_round() {
+        let (poller, exchange) = wired(|url, nth| match (url == TARGET.url(), nth) {
+            (true, 0) => status(429),
+            _ => accepted(BLOCK_TS),
+        });
+        let sources = operator_sources(poller);
+        let asset = vusd_asset();
+        assert_eq!(fetch_all(&sources, &asset).await.len(), OPERATORS - 1);
+        assert_eq!(exchange.sent().len(), OPERATORS);
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        for source in &sources {
+            let got = source.fetch_price(&asset).await;
+            if source.name() == TARGET.name() {
+                let err = got.unwrap_err();
+                let class = err.downcast_ref::<RequestError>().map(RequestError::class);
+                assert_eq!(class, Some(ErrorClass::CoolingDown), "{err}");
+            } else {
+                assert!(got.unwrap().is_some(), "{}", source.name());
+            }
+        }
+        assert_eq!(
+            exchange.sent().len(),
+            OPERATORS + OPERATORS - 1,
+            "one round, seven requests"
+        );
+        assert_eq!(exchange.count(TARGET.url()), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spec_16_7_scenario_17_a_retry_repeats_the_request_byte_for_byte() {
+        let retryable: [(&str, Attempt); 10] = [
+            ("connect error", || Step::Fail(connect_error())),
+            ("connection cut", || {
+                Step::Fail(HttpError::Transport {
+                    detail: "unexpected EOF".into(),
+                })
+            }),
+            ("500", || status(500)),
+            ("502", || status(502)),
+            ("503", || status(503)),
+            ("504", || status(504)),
+            ("408", || status(408)),
+            ("425", || status(425)),
+            ("429 Retry-After 1", || {
+                Step::Answer(Reply {
+                    retry_after: Some("1".into()),
+                    ..reply_of(status(429))
+                })
+            }),
+            ("429 Retry-After 0", || {
+                Step::Answer(Reply {
+                    retry_after: Some("0".into()),
+                    ..reply_of(status(429))
+                })
+            }),
+        ];
+        for (name, first) in retryable {
+            let (poller, exchange) = wired(move |url, nth| match (url == TARGET.url(), nth) {
+                (true, 0) => first(),
+                (true, _) => status(503),
+                _ => accepted(BLOCK_TS),
+            });
+            let _ = poller.take(TARGET).await;
+            let sent: Vec<Sent> = exchange
+                .sent()
+                .into_iter()
+                .filter(|s| s.url == TARGET.url())
+                .collect();
+            assert_eq!(sent.len(), 2, "#17 {name}");
+            for attempt in &sent {
+                assert_eq!(attempt.method, Method::Post, "#17 {name}");
+                assert_eq!(attempt.body, Some(REQUEST_BODY.as_slice()), "#17 {name}");
+            }
+        }
+    }
+
+    fn reply_of(step: Step) -> Reply {
+        match step {
+            Step::Answer(reply) => reply,
+            _ => unreachable!("an answer step"),
+        }
     }
 }
