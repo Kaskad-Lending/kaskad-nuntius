@@ -340,6 +340,7 @@ mod tests {
             "HEMI/USD",
             "SGOV/USD",
             "SPYM/USD",
+            "VUSD/USD",
         ];
         let cfg = load_assets().expect("assets.json must parse");
         for want in REQUIRED {
@@ -378,7 +379,7 @@ mod tests {
     #[test]
     fn source_hostnames_match_config_allowlist() {
         const EXPECTED: &[(&str, &str)] = &[
-            ("binance", "api.binance.com"),
+            ("binance", "data-api.binance.vision"),
             ("okx", "www.okx.com"),
             ("bybit", "api.bybit.com"),
             ("coinbase", "api.coinbase.com"),
@@ -394,6 +395,14 @@ mod tests {
             ("htx", "api.huobi.pro"),
             ("igralabs", "apis.igralabs.com"),
             ("robinhood", "api.robinhood.com"),
+            ("ethrpc_publicnode", "ethereum-rpc.publicnode.com"),
+            ("ethrpc_tenderly", "mainnet.gateway.tenderly.co"),
+            ("ethrpc_drpc", "eth.drpc.org"),
+            ("ethrpc_blastapi", "eth-mainnet.public.blastapi.io"),
+            ("ethrpc_mevblocker", "rpc.mevblocker.io"),
+            ("ethrpc_bloxroute", "eth.rpc.blxrbdn.com"),
+            ("ethrpc_nodies", "eth-pokt.nodies.app"),
+            ("ethrpc_0xrpc", "0xrpc.io"),
         ];
 
         let cfg = load_assets().expect("assets.json must parse");
@@ -415,6 +424,69 @@ mod tests {
             declared.len(),
             EXPECTED.len()
         );
+    }
+
+    /// The Kraken source looks its pair up verbatim in the reply, which Kraken
+    /// keys by its own pair name (`USDTZUSD`, not `USDTUSD`).
+    #[test]
+    fn kraken_pairs_are_the_reply_keys() {
+        const EXPECTED: &[(&str, &str)] = &[
+            ("ETH/USD", "XETHZUSD"),
+            ("BTC/USD", "XXBTZUSD"),
+            ("USDC/USD", "USDCUSD"),
+            ("USDT/USD", "USDTZUSD"),
+            ("USDG/USD", "USDGUSD"),
+        ];
+        let cfg = load_assets().expect("assets.json must parse");
+        let configured: Vec<(&str, &str)> = cfg
+            .assets
+            .iter()
+            .filter_map(|a| Some((a.symbol.as_str(), a.pair("kraken")?.as_str())))
+            .collect();
+        assert_eq!(configured, EXPECTED);
+    }
+
+    /// VUSD/USD is the SPEC §9 entry: eight `ethrpc_*` operators on `VUSD_NAV`, nowhere else.
+    #[test]
+    fn vusd_feed_matches_the_spec() {
+        const OPERATORS: [&str; 8] = [
+            "ethrpc_0xrpc",
+            "ethrpc_blastapi",
+            "ethrpc_bloxroute",
+            "ethrpc_drpc",
+            "ethrpc_mevblocker",
+            "ethrpc_nodies",
+            "ethrpc_publicnode",
+            "ethrpc_tenderly",
+        ];
+        let cfg = load_assets().unwrap();
+        let vusd = cfg.assets.last().expect("assets.json has assets");
+        assert_eq!(vusd.symbol, "VUSD/USD", "VUSD/USD is appended last");
+        assert_eq!(
+            vusd.id(),
+            "0x81c42b1a18630196a3ece9b9d1dec7eb75981e6e2038517804e0c249556ffcff"
+                .parse::<B256>()
+                .unwrap()
+        );
+        assert_eq!(vusd.min_sources, 3);
+        assert_eq!(vusd.deviation_threshold_bps, 50);
+        assert_eq!(vusd.max_pair_gap_bps.map(NonZeroU16::get), Some(50));
+        assert_eq!(vusd.heartbeat_seconds, 3600);
+        let mut names: Vec<&str> = vusd.sources.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, OPERATORS);
+        for (name, m) in &vusd.sources {
+            assert_eq!(m.pair, "VUSD_NAV", "{name}");
+            assert_eq!(m.quote, Quote::Usd, "{name}");
+            assert_eq!(m.scale, Scale::UNIT, "{name}");
+        }
+        for a in cfg.assets.iter().filter(|a| a.symbol != vusd.symbol) {
+            assert!(
+                a.sources.keys().all(|k| !k.starts_with("ethrpc_")),
+                "{} maps an ethrpc source",
+                a.symbol
+            );
+        }
     }
 
     #[test]

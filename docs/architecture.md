@@ -157,18 +157,36 @@ On-chain, the contract recovers the signer address via `ecrecover(ethHash, v, r,
 
 The `OracleSigner` trait makes the switch transparent — same oracle logic, different key management backend.
 
+## Source Failures and Diagnostics
+
+`HttpClient` gives every failed request one class: `rate_limited` (429/418), `blocked` (403/451), `client_error`, `server_error`, `timeout`, `network`, `bad_response`, `config` or `cooling_down`. The last two send nothing. A connect attempt that times out is `timeout`, not `network`. The text of a client error (a non-2xx body preview of 200 bytes, the transport or parse detail) and the `error` field of the fetch log line keep printable ASCII and space only; every other char becomes `?`.
+
+- **Retry:** at most 2 attempts within the call deadline (GET 10 s, VUSD JSON-RPC 4 s). Retried: `network`, 408/425/500/502/503/504, and 429 with `Retry-After` ≤ 1 s. The retry waits 250 ms (or that `Retry-After`) and needs the wait plus 1 s left before the deadline.
+- **Retry right:** per host. The first call has it, and so does every call after one that ended in a 2xx the client accepted (`Date`, size cap, JSON; a JSON-RPC `error` counts). After any other outcome that reached the network, an unaccepted 2xx included, the next call gets one attempt. Calls that send nothing leave it unchanged.
+- **Host pause:** 451 → 600 s, 403 → 60 s, 429/418 → `Retry-After` capped at 120 s, else 30 s. Monotonic clock, per host; a paused host's requests fail as `cooling_down`, and a success ends the pause.
+
+`src/diagnostics.rs` records, per configured asset and source, the last outcome, consecutive failures, success age and outlier count, plus skip reasons and their counts, outliers, host pauses, NAV operator outcomes, cycle durations and the newest 256 events. Only request outcomes and public prices enter it: URLs are cut to their host, and no key, credential or attestation body is kept. The price server answers `get_diagnostics` with at most 256 KiB.
+
+Events record changes of state; counters count every repeat. `source_failed` is added when the pair's previous outcome was not a failure of the same class and HTTP status, `outlier_dropped` when the source was not an outlier the cycle before, and `asset_skipped` when the previous cycle was not skipped for the same reason. `source_recovered` and `asset_resumed` close a run of failures or skips with its length. Failure details are printable ASCII, at most 120 chars.
+
+The method is for host-side operator tools (`host/oracle_diag.py`). The public pull API maps only `/prices`, `/prices/{SYMBOL}`, `/health` and `/attestation` to enclave methods, so diagnostics are not reachable over HTTP.
+
 ## Module Dependency Graph
 
 ```
 main.rs
 ├── types.rs          Asset enum, PricePoint struct, thresholds
+├── http_client.rs    Allowlisted HTTP, error classes, retry, host pauses
+├── diagnostics.rs    Bounded per-source diagnostics (get_diagnostics)
+├── price_server.rs   VSOCK/TCP request server
 ├── sources/
 │   ├── mod.rs        PriceSource trait, fetch_all()
 │   ├── binance.rs    Binance API client
 │   ├── okx.rs        OKX API client
 │   ├── bybit.rs      Bybit API client
 │   ├── coinbase.rs   Coinbase API client
-│   └── coingecko.rs  CoinGecko API client
+│   ├── coingecko.rs  CoinGecko API client
+│   └── ethrpc.rs     Ethereum JSON-RPC operators (VUSD backing ratio)
 ├── aggregator/
 │   └── mod.rs        weighted_median(), reject_outliers(), to_fixed_point()
 └── signer.rs         OracleSigner trait, MockSigner

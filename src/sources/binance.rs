@@ -29,8 +29,9 @@ impl PriceSource for Binance {
             None => return Ok(None),
         };
 
+        // Market-data host: api.binance.com answers 451 to US addresses.
         let url = format!(
-            "https://api.binance.com/api/v3/ticker/price?symbol={}",
+            "https://data-api.binance.vision/api/v3/ticker/price?symbol={}",
             symbol
         );
         let (resp, server_time): (BinanceTicker, u64) =

@@ -4,6 +4,7 @@ mod cob;
 mod cob_common;
 mod cob_state;
 mod collectors;
+mod diagnostics;
 mod http_client;
 #[cfg(target_os = "linux")]
 mod nsm_rng;
@@ -17,6 +18,7 @@ mod sources;
 mod types;
 
 use std::collections::HashMap;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -28,6 +30,7 @@ use keyex_oracle::spawn_blocking_listener as spawn_price_listener;
 #[cfg(not(feature = "keyex_oracle"))]
 use tokio::spawn as spawn_price_listener;
 
+use diagnostics::{AssetCycle, PricePath, SkipReason};
 #[cfg(feature = "keyex_oracle")]
 use signer::OracleSigner;
 #[cfg(not(feature = "keyex_oracle"))]
@@ -162,15 +165,22 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5001);
 
+    let diag = Arc::new(diagnostics::Diagnostics::new(
+        &config.assets,
+        &config.exchange_hostnames,
+    ));
+
     let server_store = price_store.clone();
     let server_signer = signer.clone();
     let server_signer_address = signer_address.clone();
+    let server_diag = diag.clone();
     spawn_price_listener(async move {
         if let Err(e) = price_server::run_price_server(
             vsock_port,
             server_store,
             server_signer,
             server_signer_address,
+            server_diag,
         )
         .await
         {
@@ -185,7 +195,8 @@ async fn main() -> Result<()> {
         }
     });
 
-    let client = http_client::HttpClient::new(enclave_mode, config.exchange_hostnames.clone());
+    let client = http_client::HttpClient::new(enclave_mode, config.exchange_hostnames.clone())
+        .with_observer(diag.clone());
 
     // Every coingecko id in one list: the source batches them into a single
     // request per cycle instead of one per asset.
@@ -196,7 +207,7 @@ async fn main() -> Result<()> {
         .collect();
 
     // (config loaded above — used here for source registration.)
-    let price_sources: Vec<Box<dyn PriceSource>> = vec![
+    let mut price_sources: Vec<Box<dyn PriceSource>> = vec![
         Box::new(sources::binance::Binance::new(client.clone())),
         Box::new(sources::okx::Okx::new(client.clone())),
         Box::new(sources::bybit::Bybit::new(client.clone())),
@@ -217,6 +228,8 @@ async fn main() -> Result<()> {
         Box::new(sources::igralabs::IgraLabs::new(client.clone())),
         Box::new(sources::robinhood::Robinhood::new(client.clone())),
     ];
+    // Eight Ethereum RPC operators for VUSD/USD, polled together once per cycle.
+    price_sources.extend(sources::ethrpc::sources(client.clone(), diag.clone()));
 
     // --- Spawn the WS collector manager + book-state fan-in ----------
     let (collector_tx, mut collector_rx) =
@@ -389,6 +402,7 @@ async fn main() -> Result<()> {
 
     // Main oracle loop: fetch → aggregate → sign → store
     loop {
+        let cycle_started = tokio::time::Instant::now();
         // USDT-peg sentinel, observational. USDT-quoted samples are
         // converted with the measured USDT/USD rate, so a depeg is priced
         // rather than gated; this only cross-checks that rate against the
@@ -490,15 +504,18 @@ async fn main() -> Result<()> {
                     num_sources = num_sources,
                     "cached COB price (signature on-demand)"
                 );
+                let cycle = AssetCycle::new(PricePath::Cob, usize::from(num_sources));
+                diag.asset_signed(&symbol, cycle, num_sources, price_human);
                 continue;
             }
 
             // REST fallback (and the only path for non-COB assets).
-            let raw_prices = sources::fetch_all(&price_sources, asset).await;
+            let raw_prices = sources::fetch_all(&price_sources, asset, &diag).await;
 
             // 1a. Sanitise: drop NaN / ±Infinity / non-positive prices and
             //     normalise broken volumes (audit C-4, M-5).
             let raw_count = raw_prices.len();
+            let mut cycle = AssetCycle::new(PricePath::Rest, raw_count);
             let mut prices = aggregator::sanitize(raw_prices);
             if prices.len() < raw_count {
                 warn!(
@@ -526,6 +543,11 @@ async fn main() -> Result<()> {
                     min_required = asset.min_sources,
                     "Data Quorum not met. Skipping update to prevent Liquidity Eclipse."
                 );
+                let reason = SkipReason::QuorumNotMet {
+                    have: prices.len(),
+                    need: asset.min_sources,
+                };
+                diag.asset_skipped(&asset.symbol, cycle, reason);
                 continue;
             }
 
@@ -537,7 +559,20 @@ async fn main() -> Result<()> {
 
             // 2. Outlier rejection (by price)
             let before = prices.len();
-            aggregator::reject_outliers_with_cap(&mut prices, 3.0, asset.deviation_threshold_bps);
+            cycle.outliers = aggregator::reject_outliers_with_cap(
+                &mut prices,
+                3.0,
+                asset.deviation_threshold_bps,
+            );
+            for outlier in &cycle.outliers {
+                info!(
+                    asset = %asset.symbol,
+                    source = %outlier.source,
+                    price = outlier.price,
+                    deviation_bps = format!("{:.1}", outlier.deviation_bps),
+                    "rejected price outlier"
+                );
+            }
             if prices.len() < before {
                 info!(
                     asset = %asset.symbol,
@@ -557,6 +592,7 @@ async fn main() -> Result<()> {
                         asset = %asset.symbol,
                         "no samples with valid server_time; skipping cycle"
                     );
+                    diag.asset_skipped(&asset.symbol, cycle, SkipReason::NoServerTime);
                     continue;
                 }
             };
@@ -576,6 +612,11 @@ async fn main() -> Result<()> {
                     min_required = asset.min_sources,
                     "Data Quorum lost after outlier rejection. Skipping."
                 );
+                let reason = SkipReason::QuorumLost {
+                    have: prices.len(),
+                    need: asset.min_sources,
+                };
+                diag.asset_skipped(&asset.symbol, cycle, reason);
                 continue;
             }
 
@@ -589,6 +630,11 @@ async fn main() -> Result<()> {
                     max_gap_bps = ?asset.max_pair_gap_bps,
                     "two sources disagree beyond the pair limit. Skipping."
                 );
+                let reason = SkipReason::PairGap {
+                    gap_bps,
+                    limit_bps: asset.max_pair_gap_bps.map_or(0, NonZeroU16::get),
+                };
+                diag.asset_skipped(&asset.symbol, cycle, reason);
                 continue;
             }
 
@@ -596,6 +642,8 @@ async fn main() -> Result<()> {
                 Some(m) => m,
                 None => {
                     warn!(asset = %asset.symbol, "no prices after filtering");
+                    let reason = SkipReason::NoPricesAfterFiltering;
+                    diag.asset_skipped(&asset.symbol, cycle, reason);
                     continue;
                 }
             };
@@ -613,6 +661,8 @@ async fn main() -> Result<()> {
                         error = %e,
                         "refusing to cache aggregated price — failed sanity check"
                     );
+                    let reason = SkipReason::FixedPointRejected { median };
+                    diag.asset_skipped(&asset.symbol, cycle, reason);
                     continue;
                 }
             };
@@ -640,7 +690,10 @@ async fn main() -> Result<()> {
                 num_sources = prices.len(),
                 "cached price (signature on-demand)"
             );
+            diag.asset_signed(&asset.symbol, cycle, prices.len() as u8, median);
         }
+
+        diag.cycle_finished(cycle_started.elapsed());
 
         if single_run {
             info!("Single run complete, requesting collector shutdown");

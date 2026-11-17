@@ -196,16 +196,29 @@ pub fn reject_outliers(prices: &mut Vec<PricePoint>, sigma: f64) {
     reject_outliers_with_cap(prices, sigma, 0);
 }
 
+/// A sample removed by [`reject_outliers_with_cap`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct OutlierDrop {
+    pub source: String,
+    pub price: f64,
+    /// Distance from the median in bps of the median.
+    pub deviation_bps: f64,
+}
+
 /// `reject_outliers` with a per-asset hard cap on deviation from the
-/// median.
+/// median; returns the dropped samples.
 ///
 /// A sample is dropped when it exceeds the MAD threshold OR `cap_bps` of
 /// the median, so the cap can only reject more, never fewer. It bounds
 /// how far one venue may sit from the pack on assets whose MAD is too
 /// small to be a meaningful scale. `cap_bps == 0` disables the cap.
-pub fn reject_outliers_with_cap(prices: &mut Vec<PricePoint>, sigma: f64, cap_bps: u16) {
+pub fn reject_outliers_with_cap(
+    prices: &mut Vec<PricePoint>,
+    sigma: f64,
+    cap_bps: u16,
+) -> Vec<OutlierDrop> {
     if prices.len() < 3 {
-        return; // Not enough data to detect outliers
+        return Vec::new(); // Not enough data to detect outliers
     }
 
     // Compute median price (even-aware — audit L-2).
@@ -232,10 +245,23 @@ pub fn reject_outliers_with_cap(prices: &mut Vec<PricePoint>, sigma: f64, cap_bp
 
     let threshold = mad_threshold.min(cap);
     if !threshold.is_finite() {
-        return;
+        return Vec::new();
     }
 
-    prices.retain(|p| (p.price - median).abs() <= threshold);
+    let mut dropped = Vec::new();
+    prices.retain(|p| {
+        let deviation = (p.price - median).abs();
+        let keep = deviation <= threshold;
+        if !keep {
+            dropped.push(OutlierDrop {
+                source: p.source.clone(),
+                price: p.price,
+                deviation_bps: deviation / median.abs() * 10_000.0,
+            });
+        }
+        keep
+    });
+    dropped
 }
 
 /// Multiply every `Quote::Usdt` sample of `asset` by `usdt_usd` so the
@@ -565,12 +591,18 @@ mod tests {
         // 128.0 survives it. The cap is 10.75 and does not.
         let mut prices = make_prices(&[100.0, 105.0, 110.0, 128.0]);
         let mut uncapped = prices.clone();
-        reject_outliers_with_cap(&mut uncapped, 3.0, 0);
+        assert!(reject_outliers_with_cap(&mut uncapped, 3.0, 0).is_empty());
         assert_eq!(uncapped.len(), 4, "wide MAD keeps 128.0 without a cap");
 
-        reject_outliers_with_cap(&mut prices, 3.0, 1000);
+        let dropped = reject_outliers_with_cap(&mut prices, 3.0, 1000);
         assert_eq!(prices.len(), 3);
         assert!(prices.iter().all(|p| p.price < 128.0));
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(
+            (dropped[0].source.as_str(), dropped[0].price),
+            ("source_3", 128.0)
+        );
+        assert!((dropped[0].deviation_bps - 20.5 / 107.5 * 10_000.0).abs() < 1e-9);
     }
 
     /// MAD collapses to zero when a majority agree exactly; the cap still
@@ -582,8 +614,16 @@ mod tests {
         reject_outliers_with_cap(&mut uncapped, 3.0, 0);
         assert_eq!(uncapped.len(), 4, "zero MAD alone rejects nothing");
 
-        reject_outliers_with_cap(&mut prices, 3.0, 500);
+        let dropped = reject_outliers_with_cap(&mut prices, 3.0, 500);
         assert_eq!(prices.len(), 3);
+        assert_eq!(
+            dropped,
+            [OutlierDrop {
+                source: "source_3".into(),
+                price: 108.0,
+                deviation_bps: 800.0
+            }]
+        );
     }
 
     /// The cap is measured against the median, so a uniform move (a real

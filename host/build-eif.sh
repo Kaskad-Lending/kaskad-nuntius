@@ -228,6 +228,7 @@ publish_host_bundle() {
   put_boot host/pontifex_host.py      "$hp/pontifex_host.py"
   put_boot host/genesis_capture.py    "$hp/genesis_capture.py"
   put_boot host/pull_api.py           "$hp/pull_api.py"
+  put_boot host/oracle_diag.py        "$hp/oracle_diag.py"
   put_boot host/systemd/              "$hp/systemd/" --recursive
   echo "host bundle published to $S3/$hp/ (+${#MIRRORS[@]} mirrors)"
 }

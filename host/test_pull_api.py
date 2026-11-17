@@ -166,6 +166,29 @@ class RouteTest(unittest.TestCase):
         """The 404 pattern tracks price_server.rs's get_price miss message."""
         self.assertIn("\"asset '{}' not found\"", (ROOT / "src/price_server.rs").read_text())
 
+    def test_diagnostics_is_404_without_enclave_call(self):
+        """/diagnostics in any spelling is unrouted and never reaches the enclave."""
+        for path in ("/diagnostics", "/diagnostics/", "/diagnostics?x=1", "/DIAGNOSTICS",
+                     "/get_diagnostics", "/%64iagnostics", "/health/diagnostics"):
+            with self.subTest(path=path):
+                status, _, calls = self.route(path, {"status": "ok", "diagnostics": {}})
+                self.assertEqual((status, calls), (404, []))
+
+    def test_no_path_sends_get_diagnostics(self):
+        """Every routed path asks the enclave only for one of the four public methods."""
+        public = {"get_prices", "get_price", "health", "get_attestation"}
+        paths = ("", "/", "/prices", "/prices/", "/prices/get_diagnostics", "/prices/ETH/USD",
+                 "/prices/eth%2fusd", "/health", "/health?method=get_diagnostics",
+                 "/attestation", "/attestation?method=get_diagnostics", "/prices?method=get_diagnostics")
+        sent = set()
+        for path in paths:
+            with self.subTest(path=path):
+                sent |= {method for method, _ in self.route(path, {"status": "ok"})[2]}
+        self.assertEqual(sent, public)
+        source = (ROOT / "host/pull_api.py").read_text()
+        self.assertNotIn("diagnostics", source)
+        self.assertEqual(source.count("query_enclave(\""), 4)
+
 
 class EdgeWiringTest(unittest.TestCase):
     FLEET = ROOT / "infra/modules/nitro-fleet"
@@ -268,6 +291,11 @@ class HandlerTest(unittest.TestCase):
     def test_prices_served_on_the_wire(self):
         """Signed prices reach the client as 200."""
         self.assertEqual(self.get("/prices", {"prices": [PRICE]})[0], 200)
+
+    def test_diagnostics_is_404_on_the_wire(self):
+        """GET /diagnostics reaches the client as a plain 404."""
+        status, body = self.get("/diagnostics", {"status": "ok", "diagnostics": {"assets": {}}})
+        self.assertEqual((status, body), (404, {"error": "not found"}))
 
     def test_handler_sets_a_read_timeout(self):
         """Silent connections are bounded before the semaphore."""

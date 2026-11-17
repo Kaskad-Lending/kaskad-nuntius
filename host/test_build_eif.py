@@ -105,6 +105,10 @@ class HostBundleTest(unittest.TestCase):
         """The bundle publishes host/pull_api.py; enclave/pull_api.py stays Igra's."""
         self.assertEqual(self.published()["pull_api.py"], "host/pull_api.py")
 
+    def test_bundle_ships_the_operator_diag_tool(self):
+        """The bundle publishes host/oracle_diag.py for the operator."""
+        self.assertEqual(self.published()["oracle_diag.py"], "host/oracle_diag.py")
+
     def test_every_file_boot_fetches_is_published(self):
         """Each host script user-data fetches has a source in the bundle."""
         user_data = (self.ROOT / "infra/modules/nitro-fleet/user-data-prod.sh").read_text()
