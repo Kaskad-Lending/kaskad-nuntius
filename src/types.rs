@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn source_hostnames_match_config_allowlist() {
         const EXPECTED: &[(&str, &str)] = &[
-            ("binance", "api.binance.com"),
+            ("binance", "data-api.binance.vision"),
             ("okx", "www.okx.com"),
             ("bybit", "api.bybit.com"),
             ("coinbase", "api.coinbase.com"),
