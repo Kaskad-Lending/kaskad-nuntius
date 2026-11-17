@@ -18,6 +18,7 @@ pub mod robinhood;
 
 use async_trait::async_trait;
 use eyre::Result;
+use futures::future::join_all;
 use tokio::time::Instant;
 
 use crate::diagnostics::{Diagnostics, Spent};
@@ -36,32 +37,30 @@ pub trait PriceSource: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-/// Fetch prices from all sources concurrently. Sources that don't support
-/// the asset return None and are skipped. Errors are logged and their
-/// source omitted from this cycle's sample; every answer or failure is
-/// recorded in `diag`.
+/// Fetch prices from all sources at once, in one task: the first poll of
+/// each source runs in list order and none is cancelled. Sources that don't
+/// support the asset return None and are skipped. Errors are logged and
+/// their source omitted from this cycle's sample; every answer or failure
+/// is recorded in `diag`, in list order.
 pub async fn fetch_all(
     sources: &[Box<dyn PriceSource>],
     asset: &AssetConfig,
     diag: &Diagnostics,
 ) -> Vec<PricePoint> {
-    let mut handles = Vec::new();
-
-    for source in sources {
-        let name = source.name();
-        let fut = source.fetch_price(asset);
-        handles.push((name, fut));
-    }
+    let answers = join_all(sources.iter().map(|source| async move {
+        let started = Instant::now();
+        let (outcome, tally) = tallied(source.fetch_price(asset)).await;
+        (source.name(), outcome, tally, started.elapsed())
+    }))
+    .await;
 
     let mut results = Vec::new();
-    for (name, fut) in handles {
-        let started = Instant::now();
-        let (outcome, tally) = tallied(fut).await;
+    for (name, outcome, tally, waited) in answers {
         let spent = Spent {
             duration: if tally.calls > 0 {
                 tally.elapsed
             } else {
-                started.elapsed()
+                waited
             },
             attempts: tally.attempts,
         };
@@ -139,6 +138,8 @@ pub(crate) mod log_capture {
 mod tests {
     use super::log_capture::capture;
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     /// Fails with an error whose text carries a newline, ESC and U+202E.
     struct Foreign;
@@ -180,5 +181,98 @@ mod tests {
             log.contains("error=upstream: busy?level=INFO ?[2J?fdp.exe"),
             "{log:?}"
         );
+    }
+
+    /// Answers after `delay`, noting its name when first polled.
+    struct Slow {
+        name: &'static str,
+        delay: Duration,
+        polled: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl PriceSource for Slow {
+        async fn fetch_price(&self, _: &AssetConfig) -> Result<Option<PricePoint>> {
+            self.polled.lock().unwrap().push(self.name);
+            tokio::time::sleep(self.delay).await;
+            Ok(Some(PricePoint {
+                price: 1.0,
+                volume: 0.0,
+                source: self.name.into(),
+                server_time: 0,
+            }))
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    fn hemi_usd() -> AssetConfig {
+        serde_json::from_value(serde_json::json!({
+            "symbol": "HEMI/USD", "min_sources": 3, "deviation_threshold_bps": 1500,
+            "heartbeat_seconds": 3600,
+            "sources": {
+                "binance": { "pair": "HEMIUSDT", "quote": "USDT" },
+                "gateio": { "pair": "HEMI_USDT", "quote": "USDT" },
+                "mexc": { "pair": "HEMIUSDT", "quote": "USDT" }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn slow(
+        polled: &Arc<Mutex<Vec<&'static str>>>,
+        named: impl IntoIterator<Item = (&'static str, u64)>,
+    ) -> Vec<Box<dyn PriceSource>> {
+        named
+            .into_iter()
+            .map(|(name, secs)| {
+                Box::new(Slow {
+                    name,
+                    delay: Duration::from_secs(secs),
+                    polled: Arc::clone(polled),
+                }) as Box<dyn PriceSource>
+            })
+            .collect()
+    }
+
+    /// Sources wait together: the call lasts as long as the slowest one, each
+    /// is first polled and answered in list order, and each is charged its own wait.
+    #[tokio::test(start_paused = true)]
+    async fn sources_are_polled_at_once_in_list_order() {
+        let asset = hemi_usd();
+        let diag = Diagnostics::new(std::slice::from_ref(&asset), &[]);
+        let polled = Arc::new(Mutex::new(Vec::new()));
+        let sources = slow(&polled, [("binance", 3), ("gateio", 1), ("mexc", 2)]);
+        let started = Instant::now();
+        let points = fetch_all(&sources, &asset, &diag).await;
+        assert_eq!(started.elapsed(), Duration::from_secs(3));
+        let order = ["binance", "gateio", "mexc"];
+        assert_eq!(*polled.lock().unwrap(), order);
+        let answered: Vec<&str> = points.iter().map(|p| p.source.as_str()).collect();
+        assert_eq!(answered, order);
+        let reply: serde_json::Value = serde_json::from_slice(&diag.response()).unwrap();
+        let sources = &reply["diagnostics"]["assets"]["HEMI/USD"]["sources"];
+        let waits = order.map(|name| sources[name]["last_duration_ms"].as_u64());
+        assert_eq!(waits, [Some(3000), Some(1000), Some(2000)]);
+    }
+
+    /// `join_all` drives more than 30 futures another way; the order holds.
+    #[tokio::test(start_paused = true)]
+    async fn a_long_source_list_keeps_list_order() {
+        let asset = hemi_usd();
+        let diag = Diagnostics::new(std::slice::from_ref(&asset), &[]);
+        let polled = Arc::new(Mutex::new(Vec::new()));
+        let names: Vec<&'static str> = (0..40)
+            .map(|i| &*Box::leak(format!("source{i}").into_boxed_str()))
+            .collect();
+        let sources = slow(&polled, names.iter().map(|name| (*name, 1)));
+        let started = Instant::now();
+        let points = fetch_all(&sources, &asset, &diag).await;
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        assert_eq!(*polled.lock().unwrap(), names);
+        let answered: Vec<&str> = points.iter().map(|p| p.source.as_str()).collect();
+        assert_eq!(answered, names);
     }
 }
