@@ -83,7 +83,7 @@ pub trait PriceSource: Send + Sync {
 | CoinGecko | `/api/v3/simple/price` | ETH, BTC, KAS, USDC |
 | Ethereum JSON-RPC (`ethrpc_*`, 8 operators) | `eth_call` to Multicall3 (POST) | VUSD |
 
-The `ethrpc_*` sources read the VUSD backing ratio `min(reserve / (totalSupply − amoSupply), 1)` from one Multicall3 `eth_call`. Addresses and calldata are compiled in; the only pair is `VUSD_NAV`. The eight operators share one poller: the first source asked each cycle starts one parallel round, and every result is handed out once.
+The `ethrpc_*` sources read the VUSD backing ratio `min(reserve / (totalSupply − amoSupply), 1)` from one Multicall3 `eth_call`. Addresses and calldata are compiled in; the only pair is `VUSD_NAV`. The eight operators share one poller: the first source asked each cycle starts one parallel round, and every result is handed out once, no later than 2 s after the round ended.
 
 The sources of one asset are fetched at once, so an asset takes as long as its slowest source; assets are polled one after another. On error, the source is skipped and a warning is logged. Minimum 2 sources required to proceed.
 

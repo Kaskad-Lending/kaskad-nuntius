@@ -302,34 +302,51 @@ struct NavSample {
     block: U256,
 }
 
-/// Polls every operator in parallel and hands each result out exactly once.
-/// A take that finds no pending result for its operator starts a new round,
-/// which replaces every slot; the lock keeps concurrent takes to one round.
+/// A slot is handed out no later than this after its round ended (SPEC §17.3
+/// rule 6), so a round left untaken gives nothing to the next cycle.
+const SLOT_MAX_AGE: Duration = Duration::from_secs(2);
+// The limit separates cycles only while it is shorter than the pause between them.
+const _: () = assert!(SLOT_MAX_AGE.as_secs() < crate::FETCH_INTERVAL_SECS);
+
+/// Polls every operator in parallel and hands each result out exactly once,
+/// no later than `SLOT_MAX_AGE` after its round. A take that finds no such
+/// result for its operator starts a new round, which replaces every slot;
+/// the lock keeps concurrent takes to one round.
 struct NavPoller {
     transport: Box<dyn RpcTransport>,
     diag: Arc<Diagnostics>,
-    slots: Mutex<Slots>,
+    last: Mutex<Round>,
 }
 
 /// One round's outcome per operator, with the HTTP cost of its poll charged
 /// to whichever source takes it.
 type Slots = [Option<(Result<NavSample>, Tally)>; OPERATORS];
 
+/// The slots a round left and the moment its last operator answered.
+struct Round {
+    slots: Slots,
+    ended: Instant,
+}
+
 impl NavPoller {
     fn new(transport: Box<dyn RpcTransport>, diag: Arc<Diagnostics>) -> Self {
         Self {
             transport,
             diag,
-            slots: Mutex::new([const { None }; OPERATORS]),
+            last: Mutex::new(Round {
+                slots: [const { None }; OPERATORS],
+                ended: Instant::now(),
+            }),
         }
     }
 
     async fn take(&self, operator: Operator) -> Result<NavSample> {
-        let mut slots = self.slots.lock().await;
-        if slots[operator.slot()].is_none() {
-            *slots = self.round().await;
+        let mut last = self.last.lock().await;
+        let expired = last.ended.elapsed() > SLOT_MAX_AGE;
+        if expired || last.slots[operator.slot()].is_none() {
+            *last = self.round().await;
         }
-        let Some((outcome, tally)) = slots[operator.slot()].take() else {
+        let Some((outcome, tally)) = last.slots[operator.slot()].take() else {
             return Err(eyre!("{}: round left no result", operator.name()));
         };
         add_to_tally(tally);
@@ -337,19 +354,20 @@ impl NavPoller {
     }
 
     /// Polls every operator at once; each slot holds its operator's outcome.
-    async fn round(&self) -> Slots {
+    async fn round(&self) -> Round {
         let started = Instant::now();
         let outcomes = join_all(
             Operator::ALL
                 .map(|operator| async move { (operator, tallied(self.poll(operator)).await) }),
         )
         .await;
+        let ended = Instant::now();
         let mut slots = [const { None }; OPERATORS];
         for (operator, outcome) in outcomes {
             slots[operator.slot()] = Some(outcome);
         }
 
-        let elapsed = started.elapsed();
+        let elapsed = ended - started;
         let elapsed_ms = elapsed.as_millis() as u64;
         let blocks: Vec<U256> = slots
             .iter()
@@ -371,7 +389,7 @@ impl NavPoller {
                 elapsed_ms, "VUSD NAV round: no operator answered"
             ),
         }
-        slots
+        Round { slots, ended }
     }
 
     async fn poll(&self, operator: Operator) -> Result<NavSample> {
@@ -809,6 +827,51 @@ mod tests {
             other.price_1e8, 97_000_000,
             "a new round replaces every slot"
         );
+        assert_eq!(calls.load(Ordering::SeqCst), 2 * OPERATORS);
+    }
+
+    /// SPEC §17.7 rows 23а and 23б: a slot is handed out 2 s after its round, not later.
+    #[tokio::test(start_paused = true)]
+    async fn spec_17_7_scenario_23_a_slot_expires_two_seconds_after_its_round() {
+        let (poller, calls) = poller(healthy);
+        let first = poller.take(Operator::PublicNode).await.unwrap();
+        assert_eq!(first.price_1e8, 98_000_000);
+        tokio::time::sleep(SLOT_MAX_AGE).await;
+        let at_the_limit = poller.take(Operator::BlastApi).await.unwrap();
+        assert_eq!(at_the_limit.price_1e8, 98_000_000);
+        assert_eq!(calls.load(Ordering::SeqCst), OPERATORS);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let late = poller.take(Operator::MevBlocker).await.unwrap();
+        assert_eq!(late.price_1e8, 97_000_000);
+        let next = poller.take(Operator::Drpc).await.unwrap();
+        assert_eq!(next.price_1e8, 97_000_000, "every slot is of the new round");
+        assert_eq!(calls.load(Ordering::SeqCst), 2 * OPERATORS);
+    }
+
+    /// A slot ages from the end of its round: a round longer than the limit serves its cycle.
+    #[tokio::test(start_paused = true)]
+    async fn a_slot_ages_from_the_end_of_its_round() {
+        let slow = SLOT_MAX_AGE + Duration::from_secs(1);
+        let (poller, calls) = poller_with(healthy, None, slow);
+        let sources = operator_sources(poller);
+        let points = fetch_all(&sources, &vusd_asset(), &diag()).await;
+        assert_eq!(points.len(), OPERATORS);
+        assert_eq!(calls.load(Ordering::SeqCst), OPERATORS);
+    }
+
+    /// SPEC §17.7 row 23в: a round nobody finished taking gives nothing to the next cycle.
+    #[tokio::test(start_paused = true)]
+    async fn spec_17_7_scenario_23c_a_partly_taken_round_gives_nothing_to_the_next_cycle() {
+        let (poller, calls) = poller(healthy);
+        let sources = operator_sources(Arc::clone(&poller));
+        // Not the first source of the list, so the list starts with untaken slots.
+        poller.take(Operator::Bloxroute).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(crate::FETCH_INTERVAL_SECS)).await;
+        let points = fetch_all(&sources, &vusd_asset(), &diag()).await;
+        assert_eq!(points.len(), OPERATORS);
+        for point in &points {
+            assert_eq!(point.price, healthy_price(1), "{}", point.source);
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 2 * OPERATORS);
     }
 
