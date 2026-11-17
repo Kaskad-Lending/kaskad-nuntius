@@ -112,6 +112,12 @@ def skip(reason):
     return f"{reason['reason']} {details}".strip()
 
 
+def field(key, value):
+    if isinstance(value, float) and key.endswith("_bps"):
+        return f"{value:.1f}"
+    return json.dumps(value) if isinstance(value, (dict, list, str)) else value
+
+
 def table(header, rows):
     widths = [max(len(str(cell)) for cell in column) for column in zip(header, *rows)]
     return ["  ".join(str(cell).ljust(w) for cell, w in zip(row, widths)).rstrip()
@@ -129,11 +135,15 @@ def render(diag, events=DEFAULT_EVENTS):
     ]
     assets = diag.get("assets", {})
     lines += table(
-        ["ASSET", "SIGNED", "SKIPPED", "SIGNED_AGE", "SOURCES", "LAST_SKIP"],
-        [[name, a.get("signed"), a.get("skipped"), age(a.get("since_signed_s")),
-          a.get("last_signed_sources") or "-", skip(a.get("last_skip"))]
+        ["ASSET", "PATH", "SIGNED", "SKIPPED", "SIGNED_AGE", "SOURCES", "LAST_SKIP"],
+        [[name, (a.get("last_cycle") or {}).get("path", "-"), a.get("signed"), a.get("skipped"),
+          age(a.get("since_signed_s")), a.get("last_signed_sources") or "-",
+          skip(a.get("last_skip"))]
          for name, a in assets.items()],
     )
+    polled = [(name, source, s) for name, a in assets.items()
+              for source, s in a.get("sources", {}).items() if s.get("ok") or s.get("failed")]
+    unpolled = sum(len(a.get("sources", {})) for a in assets.values()) - len(polled)
     lines.append("")
     lines += table(
         ["ASSET", "SOURCE", "LAST", "CONSEC_FAILS", "OK_AGE", "MS", "ATTEMPTS"],
@@ -141,8 +151,11 @@ def render(diag, events=DEFAULT_EVENTS):
           age(s.get("since_ok_s")),
           "-" if s.get("last_duration_ms") is None else s["last_duration_ms"],
           "-" if s.get("last_attempts") is None else s["last_attempts"]]
-         for name, a in assets.items() for source, s in a.get("sources", {}).items()],
+         for name, source, s in polled],
     )
+    if unpolled:
+        # Order-book (cob) assets sign without a REST fetch, so their sources stay unpolled.
+        lines.append(f"{unpolled} configured sources not polled yet (cob assets skip REST)")
     paused = [[host, h.get("paused_for_s"), h.get("last_cause"), h.get("last_http_status"),
                h.get("pauses"), h.get("suppressed")]
               for host, h in diag.get("hosts", {}).items() if h.get("pauses")]
@@ -167,8 +180,8 @@ def render(diag, events=DEFAULT_EVENTS):
                   f"{diag.get('events_dropped', 0)} dropped, "
                   f"{diag.get('events_truncated', 0)} left out of this reply"]
     for event in recent:
-        fields = " ".join(f"{k}={json.dumps(v) if isinstance(v, (dict, str)) else v}"
-                          for k, v in event.items() if k not in ("age_s", "event"))
+        fields = " ".join(f"{k}={field(k, v)}" for k, v in event.items()
+                          if k not in ("age_s", "event") and v is not None)
         lines.append(f"  -{age(event.get('age_s'))} {event.get('event')} {fields}".rstrip())
     return "\n".join(lines)
 

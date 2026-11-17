@@ -18,10 +18,20 @@ DIAG = {
         "HEMI/USD": {
             "signed": 4, "skipped": 0, "last_skip": None, "since_signed_s": 2.5,
             "last_signed_sources": 4, "last_price": 0.01,
+            "last_cycle": {"path": "rest", "responders": 4, "outliers": [], "skip": None},
             "sources": {
                 "binance": {"ok": 4, "failed": 0, "consecutive_failures": 0,
                             "last": {"outcome": "ok"}, "since_ok_s": 2.6,
                             "last_duration_ms": 180, "last_attempts": 1},
+            },
+        },
+        "BTC/USD": {
+            "signed": 4, "skipped": 0, "last_skip": None, "since_signed_s": 1.0,
+            "last_signed_sources": 12,
+            "last_cycle": {"path": "cob", "responders": 12, "outliers": [], "skip": None},
+            "sources": {
+                "okx": {"ok": 0, "failed": 0, "consecutive_failures": 0, "last": None,
+                        "since_ok_s": None, "last_duration_ms": None, "last_attempts": None},
             },
         },
         "USDT/USD": {
@@ -55,6 +65,10 @@ DIAG = {
         {"age_s": 3.0, "event": "source_failed", "asset": "USDT/USD", "source": "kraken",
          "class": "client_error", "http_status": 404, "attempts": 1,
          "detail": "HTTP 404 from api.kraken.com"},
+        {"age_s": 2.0, "event": "source_failed", "asset": "USDT/USD", "source": "kraken",
+         "class": "bad_response", "http_status": None, "attempts": 1, "detail": "pair not found"},
+        {"age_s": 1.0, "event": "outlier_dropped", "asset": "USDT/USD", "source": "coingecko",
+         "price": 0.999215, "deviation_bps": 3.704278441599863},
     ],
     "events_dropped": 0,
     "events_truncated": 0,
@@ -123,17 +137,29 @@ class OverTcpTest(unittest.TestCase):
         rows = [line.split() for line in out.splitlines()]
         self.assertIn(["HEMI/USD", "binance", "ok", "0", "2.6s", "180", "1"], rows)
         self.assertIn(["USDT/USD", "kraken", "client_error", "404", "4", "never", "95", "1"], rows)
-        self.assertIn(["USDT/USD", "3", "1", "20.0s", "3", "quorum_not_met", "have=2", "need=3"], rows)
+        self.assertIn(["USDT/USD", "-", "3", "1", "20.0s", "3", "quorum_not_met", "have=2", "need=3"],
+                      rows)
+        self.assertIn(["BTC/USD", "cob", "4", "0", "1.0s", "12", "-"], rows)
         self.assertIn(["api.mexc.com", "12.0", "rate_limited", "429", "1", "3"], rows)
         self.assertNotIn("api.kraken.com", [row[0] for row in rows if row])
         self.assertIn('-3.0s source_failed asset="USDT/USD" source="kraken"', out)
         self.assertIn("ethrpc_drpc  rejected  reject=RPC_ERROR rpc_code=-32005", out)
 
+    def test_table_hides_unpolled_sources_and_null_event_fields(self):
+        """Never-polled sources are counted, not listed; null fields and long bps are trimmed."""
+        _, out, _, _ = self.exchange(frame(REPLY))
+        self.assertNotIn("okx", out)
+        self.assertIn("1 configured sources not polled yet", out)
+        self.assertIn('class="bad_response" attempts=1 detail="pair not found"', out)
+        self.assertNotIn("None", out)
+        self.assertIn("price=0.999215 deviation_bps=3.7", out)
+
     def test_events_flag_limits_the_recent_events(self):
         """--events keeps only the newest events."""
         _, out, _, _ = self.exchange(frame(REPLY), "--events", "1")
-        self.assertIn("source_failed", out)
-        self.assertNotIn("-30.0s host_paused", out)
+        self.assertIn("-1.0s outlier_dropped", out)
+        self.assertNotIn("source_failed", out)
+        self.assertNotIn("host_paused", out)
 
     def test_an_oversized_reply_is_refused_before_it_is_read(self):
         """A length above --max-bytes fails with exit 1."""
