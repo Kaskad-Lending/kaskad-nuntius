@@ -467,6 +467,15 @@ struct Pause {
     cause: ErrorClass,
 }
 
+/// What the client keeps per allowlisted host between calls.
+#[derive(Debug, Clone, Copy, Default)]
+struct HostState {
+    pause: Option<Pause>,
+    /// The last call that reached the network ended in an error, so the next
+    /// call gets one attempt; a success clears it.
+    no_retry: bool,
+}
+
 /// Told about host pauses; called with no client lock held.
 pub trait HostObserver: Send + Sync {
     fn pause_started(&self, host: &str, cause: ErrorClass, http_status: u16, length: Duration);
@@ -514,7 +523,7 @@ pub fn add_to_tally(tally: Tally) {
     let _ = TALLY.try_with(|cell| cell.set(cell.get().plus(tally)));
 }
 
-/// HTTP client shared by every source; clones share the host pauses.
+/// HTTP client shared by every source; clones share the host state.
 #[derive(Clone)]
 pub struct HttpClient {
     exchange: Arc<dyn Exchange>,
@@ -523,7 +532,7 @@ pub struct HttpClient {
     /// (audit EXPLOIT-class CONNECT destination-allowlist).
     allowed_hosts: Vec<String>,
     /// Keyed by allowlisted hostname only, so bounded by the allowlist.
-    pauses: Arc<Mutex<HashMap<String, Pause>>>,
+    hosts: Arc<Mutex<HashMap<String, HostState>>>,
     observer: Option<Arc<dyn HostObserver>>,
 }
 
@@ -576,7 +585,7 @@ impl HttpClient {
         Self {
             exchange,
             allowed_hosts,
-            pauses: Arc::default(),
+            hosts: Arc::default(),
             observer: None,
         }
     }
@@ -637,11 +646,7 @@ impl HttpClient {
         let mut previous: Option<HttpError> = None;
         loop {
             if let Some(cooling) = self.cooling_down(&host) {
-                return Err(RequestError {
-                    host,
-                    attempts: *attempts,
-                    error: previous.unwrap_or(cooling),
-                });
+                return Err(self.failed(host, *attempts, previous.unwrap_or(cooling)));
             }
             *attempts += 1;
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -649,7 +654,7 @@ impl HttpClient {
             let error = match tokio::time::timeout(remaining, sent).await {
                 Ok(Ok(reply)) => match interpret(reply) {
                     Ok(value) => {
-                        self.end_pause(&host);
+                        self.succeeded(&host);
                         return Ok(value);
                     }
                     Err(error) => error,
@@ -664,18 +669,13 @@ impl HttpClient {
             match error.retry_pause(policy) {
                 Some(pause)
                     if *attempts < policy.max_attempts
-                        && left >= pause + policy.min_after_pause =>
+                        && left >= pause + policy.min_after_pause
+                        && self.may_retry(&host) =>
                 {
                     tokio::time::sleep(pause).await;
                     previous = Some(error);
                 }
-                _ => {
-                    return Err(RequestError {
-                        host,
-                        attempts: *attempts,
-                        error,
-                    })
-                }
+                _ => return Err(self.failed(host, *attempts, error)),
             }
         }
     }
@@ -709,18 +709,52 @@ impl HttpClient {
         Ok(host.to_string())
     }
 
-    fn lock_pauses(&self) -> MutexGuard<'_, HashMap<String, Pause>> {
-        self.pauses.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock_hosts(&self) -> MutexGuard<'_, HashMap<String, HostState>> {
+        self.hosts.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A retry is allowed unless the last call to `host` that reached the
+    /// network ended in an error.
+    fn may_retry(&self, host: &str) -> bool {
+        self.lock_hosts()
+            .get(host)
+            .is_none_or(|state| !state.no_retry)
+    }
+
+    /// Ends a call in `error`; one that reached the network takes the host's
+    /// retry right until a call succeeds.
+    fn failed(&self, host: String, attempts: u32, error: HttpError) -> RequestError {
+        if attempts > 0 {
+            self.lock_hosts().entry(host.clone()).or_default().no_retry = true;
+        }
+        RequestError {
+            host,
+            attempts,
+            error,
+        }
+    }
+
+    /// A 2xx the client accepted: the host gets its retry right back and its
+    /// pause, if any, ends.
+    fn succeeded(&self, host: &str) {
+        let ended = self.lock_hosts().get_mut(host).is_some_and(|state| {
+            state.no_retry = false;
+            state.pause.take().is_some()
+        });
+        if let (true, Some(observer)) = (ended, &self.observer) {
+            observer.pause_ended(host);
+        }
     }
 
     /// The pause still running for `host`; an expired one is dropped.
     fn cooling_down(&self, host: &str) -> Option<HttpError> {
         let now = Instant::now();
         let pause = {
-            let mut pauses = self.lock_pauses();
-            let pause = *pauses.get(host)?;
+            let mut hosts = self.lock_hosts();
+            let state = hosts.get_mut(host)?;
+            let pause = state.pause?;
             if now >= pause.until {
-                pauses.remove(host);
+                state.pause = None;
             }
             pause
         };
@@ -743,17 +777,9 @@ impl HttpClient {
             return;
         }
         let until = Instant::now() + length;
-        self.lock_pauses()
-            .insert(host.to_string(), Pause { until, cause });
+        self.lock_hosts().entry(host.to_string()).or_default().pause = Some(Pause { until, cause });
         if let Some(observer) = &self.observer {
             observer.pause_started(host, cause, status, length);
-        }
-    }
-
-    fn end_pause(&self, host: &str) {
-        let ended = self.lock_pauses().remove(host).is_some();
-        if let (true, Some(observer)) = (ended, &self.observer) {
-            observer.pause_ended(host);
         }
     }
 }
@@ -1215,14 +1241,15 @@ mod tests {
                 CONNECT_TIMEOUT,
                 vec!["rpc.example.com".into()],
             );
-            for expected in [2, 4] {
+            // The second call is not paused; it only lost the retry right.
+            for (attempts, expected) in [(2, 2), (1, 3)] {
                 let err = client
                     .post_json_with_time::<Value>("https://rpc.example.com/", b"{}", &RPC_LIKE)
                     .await
                     .unwrap_err();
                 assert_eq!(err.class(), ErrorClass::Network, "{status}: {err}");
                 assert_eq!(err.http_status(), None, "{status}");
-                assert_eq!(err.attempts, 2, "{status}");
+                assert_eq!(err.attempts, attempts, "{status}");
                 assert_eq!(connects.load(Ordering::SeqCst), expected, "{status}");
             }
         }
@@ -1597,6 +1624,116 @@ mod tests {
                 .expect("no pause");
             assert_eq!(exchange.count(URL), sent + 1, "{code}");
         }
+    }
+
+    /// Attempts of one GET to `url`, sent or not.
+    async fn attempts_of(client: &HttpClient, url: &str) -> u32 {
+        let (_, tally) = tallied(client.get_json_with_time::<Value>(url)).await;
+        tally.attempts
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_call_leaves_its_host_one_attempt_until_a_call_succeeds() {
+        let (client, exchange) = scripted(|url, nth| match (url, nth) {
+            (URL, 0..=2) | (OTHER_URL, 0) => status(503),
+            (URL, 4) => status(503),
+            _ => ok(),
+        });
+        assert_eq!(attempts_of(&client, URL).await, 2, "503, 503");
+        assert_eq!(
+            attempts_of(&client, OTHER_URL).await,
+            2,
+            "another host keeps its right"
+        );
+        assert_eq!(
+            attempts_of(&client, URL).await,
+            1,
+            "503 after a failed call"
+        );
+        assert_eq!(
+            attempts_of(&client, URL).await,
+            1,
+            "accepted: the right is back"
+        );
+        assert_eq!(attempts_of(&client, URL).await, 2, "503, then accepted");
+        assert_eq!(exchange.count(URL), 6);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retried_success_keeps_the_right_and_an_unaccepted_2xx_takes_it() {
+        let unaccepted: [(&str, First); 3] = [
+            ("200 without Date", || {
+                Step::Answer(reply(200, None, TARGET_BODY))
+            }),
+            ("200 not JSON", || {
+                Step::Answer(reply(200, Some(SERVER_DATE), "<html>"))
+            }),
+            ("200 oversized", || {
+                Step::Answer(Reply {
+                    oversized: true,
+                    ..reply(200, Some(SERVER_DATE), TARGET_BODY)
+                })
+            }),
+        ];
+        for (name, first) in unaccepted {
+            let (client, _) = scripted(move |_, nth| match nth {
+                0 => status(503),
+                1 => ok(),
+                2 => first(),
+                _ => status(503),
+            });
+            assert_eq!(
+                attempts_of(&client, URL).await,
+                2,
+                "{name}: 503, then accepted"
+            );
+            assert_eq!(attempts_of(&client, URL).await, 1, "{name}");
+            assert_eq!(
+                attempts_of(&client, URL).await,
+                1,
+                "{name}: no retry after it"
+            );
+        }
+        let (client, _) = scripted(|_, nth| match nth {
+            1 => ok(),
+            _ => status(503),
+        });
+        assert_eq!(attempts_of(&client, URL).await, 2, "503, then accepted");
+        assert_eq!(
+            attempts_of(&client, URL).await,
+            2,
+            "the retried success kept the right"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_held_back_by_a_pause_leaves_the_retry_right_as_it_was() {
+        let (client, exchange) = scripted(|_, nth| match nth {
+            0 => status(403),
+            _ => status(503),
+        });
+        let started = Instant::now();
+        assert_eq!(attempts_of(&client, URL).await, 1, "403 pauses the host");
+        let held = client.get_json_with_time::<Value>(URL).await.unwrap_err();
+        assert_eq!((held.class(), held.attempts), (ErrorClass::CoolingDown, 0));
+        tokio::time::sleep_until(started + Duration::from_secs(60)).await;
+        assert_eq!(
+            attempts_of(&client, URL).await,
+            1,
+            "the held call gave no right back"
+        );
+        assert_eq!(exchange.count(URL), 2);
+
+        let (client, _) = scripted(|_, _| status(503));
+        let refused = client
+            .get_json_with_time::<Value>("https://unlisted.example.com/")
+            .await
+            .unwrap_err();
+        assert_eq!((refused.class(), refused.attempts), (ErrorClass::Config, 0));
+        assert!(
+            client.lock_hosts().is_empty(),
+            "only allowlisted hosts are keys"
+        );
     }
 
     #[derive(Default)]

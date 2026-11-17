@@ -1355,4 +1355,76 @@ mod tests {
             _ => unreachable!("an answer step"),
         }
     }
+
+    /// Full rounds with `TARGET` answering its n-th request with `target(n)`;
+    /// each round expects its `TARGET` request count and sample `server_time`.
+    async fn retry_right_chain(
+        name: &str,
+        target: fn(usize) -> Step,
+        rounds: &[(usize, Option<u64>)],
+    ) {
+        let (poller, exchange) = wired(move |url, nth| {
+            if url == TARGET.url() {
+                target(nth)
+            } else {
+                accepted(BLOCK_TS)
+            }
+        });
+        let sources = operator_sources(poller);
+        let asset = vusd_asset();
+        for (round, &(requests, sample)) in rounds.iter().enumerate() {
+            let round = round + 1;
+            let (sent, asked) = (exchange.sent().len(), exchange.count(TARGET.url()));
+            let points = fetch_all(&sources, &asset, &diag()).await;
+            assert_eq!(
+                exchange.count(TARGET.url()) - asked,
+                requests,
+                "{name} round {round}"
+            );
+            assert_eq!(
+                exchange.sent().len() - sent,
+                OPERATORS - 1 + requests,
+                "{name} round {round}: the others are asked once"
+            );
+            let got = points
+                .iter()
+                .find(|p| p.source == TARGET.name())
+                .map(|p| p.server_time);
+            assert_eq!(got, sample, "{name} round {round}");
+            assert_eq!(
+                points.len(),
+                OPERATORS - 1 + usize::from(sample.is_some()),
+                "{name} round {round}: the others are accepted"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spec_16_7_scenario_18_a_failed_call_costs_the_next_round_its_retry() {
+        retry_right_chain(
+            "#18",
+            |nth| match nth {
+                0..=2 | 4 => status(503),
+                3 => rpc_error(3),
+                _ => accepted(LATER),
+            },
+            &[(2, None), (1, None), (1, None), (2, Some(LATER))],
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spec_16_7_scenario_19_a_retried_success_keeps_the_retry() {
+        retry_right_chain(
+            "#19",
+            |nth| match nth {
+                0 => Step::Fail(connect_error()),
+                1 => accepted(LATER),
+                2 => status(503),
+                _ => accepted(LATER + 20),
+            },
+            &[(2, Some(LATER)), (2, Some(LATER + 20))],
+        )
+        .await;
+    }
 }
