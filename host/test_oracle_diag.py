@@ -11,37 +11,44 @@ from unittest import mock
 
 import oracle_diag
 
+NO_SKIPS = {"quorum_not_met": 0, "no_server_time": 0, "quorum_lost": 0, "pair_gap": 0,
+            "no_prices_after_filtering": 0, "fixed_point_rejected": 0}
 DIAG = {
     "uptime_s": 61.2,
     "cycles": {"count": 4, "last_ms": 15400, "max_ms": 23600, "window": 4},
     "assets": {
         "HEMI/USD": {
-            "signed": 4, "skipped": 0, "last_skip": None, "since_signed_s": 2.5,
-            "last_signed_sources": 4, "last_price": 0.01,
+            "signed": 4, "skipped": 0, "skipped_by_reason": NO_SKIPS, "last_skip": None,
+            "since_signed_s": 2.5, "last_signed_sources": 4, "last_price": 0.01,
             "last_cycle": {"path": "rest", "responders": 4, "outliers": [], "skip": None},
             "sources": {
-                "binance": {"ok": 4, "failed": 0, "consecutive_failures": 0,
+                "binance": {"ok": 4, "failed": 0, "consecutive_failures": 0, "outliers": 0,
                             "last": {"outcome": "ok"}, "since_ok_s": 2.6,
                             "last_duration_ms": 180, "last_attempts": 1},
             },
         },
         "BTC/USD": {
-            "signed": 4, "skipped": 0, "last_skip": None, "since_signed_s": 1.0,
-            "last_signed_sources": 12,
+            "signed": 4, "skipped": 0, "skipped_by_reason": NO_SKIPS, "last_skip": None,
+            "since_signed_s": 1.0, "last_signed_sources": 12,
             "last_cycle": {"path": "cob", "responders": 12, "outliers": [], "skip": None},
             "sources": {
-                "okx": {"ok": 0, "failed": 0, "consecutive_failures": 0, "last": None,
-                        "since_ok_s": None, "last_duration_ms": None, "last_attempts": None},
+                "okx": {"ok": 0, "failed": 0, "consecutive_failures": 0, "outliers": 0,
+                        "last": None, "since_ok_s": None, "last_duration_ms": None,
+                        "last_attempts": None},
             },
         },
         "USDT/USD": {
-            "signed": 3, "skipped": 1, "since_signed_s": 20.0, "last_signed_sources": 3,
+            "signed": 3, "skipped": 3, "since_signed_s": 20.0, "last_signed_sources": 3,
+            "skipped_by_reason": {**NO_SKIPS, "quorum_not_met": 2, "pair_gap": 1},
             "last_skip": {"reason": "quorum_not_met", "have": 2, "need": 3},
             "sources": {
-                "kraken": {"ok": 0, "failed": 4, "consecutive_failures": 4,
+                "kraken": {"ok": 0, "failed": 4, "consecutive_failures": 4, "outliers": 0,
                            "last": {"outcome": "failed", "class": "client_error",
                                     "http_status": 404, "detail": "HTTP 404 from api.kraken.com"},
                            "since_ok_s": None, "last_duration_ms": 95, "last_attempts": 1},
+                "coingecko": {"ok": 4, "failed": 2, "consecutive_failures": 0, "outliers": 2,
+                              "last": {"outcome": "ok"}, "since_ok_s": 1.0,
+                              "last_duration_ms": 210, "last_attempts": 1},
             },
         },
     },
@@ -62,11 +69,14 @@ DIAG = {
     "events": [
         {"age_s": 30.0, "event": "host_paused", "host": "api.mexc.com",
          "cause": "rate_limited", "http_status": 429, "pause_s": 30.0},
+        {"age_s": 20.0, "event": "asset_resumed", "asset": "USDT/USD", "consecutive_skips": 2},
         {"age_s": 3.0, "event": "source_failed", "asset": "USDT/USD", "source": "kraken",
          "class": "client_error", "http_status": 404, "attempts": 1,
          "detail": "HTTP 404 from api.kraken.com"},
         {"age_s": 2.0, "event": "source_failed", "asset": "USDT/USD", "source": "kraken",
          "class": "bad_response", "http_status": None, "attempts": 1, "detail": "pair not found"},
+        {"age_s": 1.5, "event": "source_recovered", "asset": "USDT/USD", "source": "coingecko",
+         "consecutive_failures": 2},
         {"age_s": 1.0, "event": "outlier_dropped", "asset": "USDT/USD", "source": "coingecko",
          "price": 0.999215, "deviation_bps": 3.704278441599863},
     ],
@@ -130,20 +140,46 @@ class OverTcpTest(unittest.TestCase):
         self.assertEqual((code, out), (0, REPLY.decode() + "\n"))
         self.assertEqual(request, {"method": "get_diagnostics"})
 
-    def test_table_lists_each_source_with_outcome_failures_and_age(self):
-        """The table view shows asset, source, last outcome, consecutive failures and success age."""
+    def test_table_lists_each_source_with_outcome_failures_outliers_and_age(self):
+        """The table view shows asset, source, last outcome, consecutive failures, outliers and success age."""
         code, out, _, _ = self.exchange(frame(REPLY))
         self.assertEqual(code, 0)
         rows = [line.split() for line in out.splitlines()]
-        self.assertIn(["HEMI/USD", "binance", "ok", "0", "2.6s", "180", "1"], rows)
-        self.assertIn(["USDT/USD", "kraken", "client_error", "404", "4", "never", "95", "1"], rows)
-        self.assertIn(["USDT/USD", "-", "3", "1", "20.0s", "3", "quorum_not_met", "have=2", "need=3"],
+        self.assertIn(["HEMI/USD", "binance", "ok", "0", "0", "2.6s", "180", "1"], rows)
+        self.assertIn(["USDT/USD", "kraken", "client_error", "404", "4", "0", "never", "95", "1"],
                       rows)
-        self.assertIn(["BTC/USD", "cob", "4", "0", "1.0s", "12", "-"], rows)
+        self.assertIn(["USDT/USD", "coingecko", "ok", "0", "2", "1.0s", "210", "1"], rows)
         self.assertIn(["api.mexc.com", "12.0", "rate_limited", "429", "1", "3"], rows)
         self.assertNotIn("api.kraken.com", [row[0] for row in rows if row])
         self.assertIn('-3.0s source_failed asset="USDT/USD" source="kraken"', out)
         self.assertIn("ethrpc_drpc  rejected  reject=RPC_ERROR rpc_code=-32005", out)
+
+    def test_table_lists_each_asset_with_its_nonzero_skip_reasons(self):
+        """An asset row shows its nonzero skip counts by reason, or "-" when it never skipped."""
+        _, out, _, _ = self.exchange(frame(REPLY))
+        rows = [line.split() for line in out.splitlines()]
+        self.assertIn(["USDT/USD", "-", "3", "3", "quorum_not_met=2,pair_gap=1", "20.0s", "3",
+                       "quorum_not_met", "have=2", "need=3"], rows)
+        self.assertIn(["BTC/USD", "cob", "4", "0", "-", "1.0s", "12", "-"], rows)
+        self.assertIn(["HEMI/USD", "rest", "4", "0", "-", "2.5s", "4", "-"], rows)
+
+    def test_table_shows_recovery_and_resume_events(self):
+        """source_recovered and asset_resumed print with their counts."""
+        _, out, _, _ = self.exchange(frame(REPLY))
+        self.assertIn('-1.5s source_recovered asset="USDT/USD" source="coingecko" '
+                      "consecutive_failures=2", out)
+        self.assertIn('-20.0s asset_resumed asset="USDT/USD" consecutive_skips=2', out)
+
+    def test_table_reads_a_reply_without_the_outlier_and_skip_counts(self):
+        """A reply from an enclave without the new counters renders them as "-"."""
+        diag = json.loads(REPLY)["diagnostics"]
+        for asset in diag["assets"].values():
+            del asset["skipped_by_reason"]
+            for source in asset["sources"].values():
+                del source["outliers"]
+        rows = [line.split() for line in oracle_diag.render(diag).splitlines()]
+        self.assertIn(["HEMI/USD", "binance", "ok", "0", "-", "2.6s", "180", "1"], rows)
+        self.assertIn(["BTC/USD", "cob", "4", "0", "-", "1.0s", "12", "-"], rows)
 
     def test_table_hides_unpolled_sources_and_null_event_fields(self):
         """Never-polled sources are counted, not listed; null fields and long bps are trimmed."""

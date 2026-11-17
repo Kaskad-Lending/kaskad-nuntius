@@ -3,6 +3,7 @@
 //! `get_diagnostics` on the enclave socket; the public pull API never routes it.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::mem::discriminant;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -35,6 +36,31 @@ pub enum SkipReason {
     PairGap { gap_bps: f64, limit_bps: u16 },
     NoPricesAfterFiltering,
     FixedPointRejected { median: f64 },
+}
+
+/// Skips of one asset per [`SkipReason`] variant; each field is named by its tag.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+struct SkipCounts {
+    quorum_not_met: u64,
+    no_server_time: u64,
+    quorum_lost: u64,
+    pair_gap: u64,
+    no_prices_after_filtering: u64,
+    fixed_point_rejected: u64,
+}
+
+impl SkipCounts {
+    fn count(&mut self, reason: SkipReason) {
+        let counter = match reason {
+            SkipReason::QuorumNotMet { .. } => &mut self.quorum_not_met,
+            SkipReason::NoServerTime => &mut self.no_server_time,
+            SkipReason::QuorumLost { .. } => &mut self.quorum_lost,
+            SkipReason::PairGap { .. } => &mut self.pair_gap,
+            SkipReason::NoPricesAfterFiltering => &mut self.no_prices_after_filtering,
+            SkipReason::FixedPointRejected { .. } => &mut self.fixed_point_rejected,
+        };
+        *counter += 1;
+    }
 }
 
 /// Which path priced an asset's cycle.
@@ -122,6 +148,8 @@ struct SourceStats {
     ok: u64,
     failed: u64,
     consecutive_failures: u64,
+    /// Samples the outlier filter dropped.
+    outliers: u64,
     last: Option<Outcome>,
     last_ok: Option<Instant>,
     last_spent: Option<Spent>,
@@ -131,6 +159,9 @@ struct SourceStats {
 struct AssetStats {
     signed: u64,
     skipped: u64,
+    skipped_by_reason: SkipCounts,
+    /// Skipped cycles since the last signed one.
+    consecutive_skips: u64,
     last_skip: Option<SkipReason>,
     last_signed: Option<Instant>,
     last_signed_sources: Option<u8>,
@@ -162,9 +193,12 @@ struct EthRpcStats {
     operators: BTreeMap<String, (Instant, OperatorOutcome)>,
 }
 
+/// A change of state; a repeat of the previous outcome adds no event.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum EventKind {
+    /// The pair failed, and its previous outcome was not a failure of the
+    /// same class and HTTP status.
     SourceFailed {
         asset: String,
         source: String,
@@ -172,6 +206,12 @@ enum EventKind {
         http_status: Option<u16>,
         attempts: u32,
         detail: String,
+    },
+    /// The pair succeeded after `consecutive_failures` failures.
+    SourceRecovered {
+        asset: String,
+        source: String,
+        consecutive_failures: u64,
     },
     HostPaused {
         host: String,
@@ -182,10 +222,17 @@ enum EventKind {
     HostResumed {
         host: String,
     },
+    /// The previous cycle of the asset was not skipped for the same reason.
     AssetSkipped {
         asset: String,
         skip: SkipReason,
     },
+    /// The asset was signed after `consecutive_skips` skipped cycles.
+    AssetResumed {
+        asset: String,
+        consecutive_skips: u64,
+    },
+    /// The source was not an outlier in the previous cycle of the asset.
     OutlierDropped {
         asset: String,
         source: String,
@@ -262,11 +309,20 @@ impl Diagnostics {
         let Some(stats) = state.source(asset, source) else {
             return;
         };
+        let recovered = (stats.consecutive_failures > 0).then_some(stats.consecutive_failures);
         stats.ok += 1;
         stats.consecutive_failures = 0;
         stats.last = Some(Outcome::Ok);
         stats.last_ok = Some(now);
         stats.last_spent = Some(spent);
+        if let Some(consecutive_failures) = recovered {
+            let kind = EventKind::SourceRecovered {
+                asset: asset.into(),
+                source: source.into(),
+                consecutive_failures,
+            };
+            state.push(now, kind);
+        }
     }
 
     /// A request held back by a host pause counts as a failure but adds no event.
@@ -278,6 +334,10 @@ impl Diagnostics {
         let Some(stats) = state.source(asset, source) else {
             return;
         };
+        let repeated = matches!(
+            &stats.last,
+            Some(Outcome::Failed { class: c, http_status: s, .. }) if *c == class && *s == http_status
+        );
         stats.failed += 1;
         stats.consecutive_failures += 1;
         stats.last = Some(Outcome::Failed {
@@ -286,7 +346,7 @@ impl Diagnostics {
             detail: detail.clone(),
         });
         stats.last_spent = Some(spent);
-        if class != ErrorClass::CoolingDown {
+        if class != ErrorClass::CoolingDown && !repeated {
             let kind = EventKind::SourceFailed {
                 asset: asset.into(),
                 source: source.into(),
@@ -313,10 +373,12 @@ impl Diagnostics {
         cycle.skip = Some(reason);
         self.asset_cycle(asset, cycle, |stats, _| {
             stats.skipped += 1;
+            stats.skipped_by_reason.count(reason);
             stats.last_skip = Some(reason);
         });
     }
 
+    /// Records one signed (`cycle.skip` is None) or skipped cycle of `asset`.
     fn asset_cycle(
         &self,
         asset: &str,
@@ -329,21 +391,46 @@ impl Diagnostics {
             return;
         };
         update(stats, now);
-        let mut events: Vec<EventKind> = cycle
-            .outliers
-            .iter()
-            .map(|drop| EventKind::OutlierDropped {
-                asset: asset.into(),
-                source: drop.source.clone(),
-                price: drop.price,
-                deviation_bps: drop.deviation_bps,
-            })
-            .collect();
-        if let Some(skip) = cycle.skip {
-            events.push(EventKind::AssetSkipped {
-                asset: asset.into(),
-                skip,
-            });
+        let previous = stats.last_cycle.take();
+        let mut events = Vec::new();
+        for drop in &cycle.outliers {
+            if let Some(source) = stats.sources.get_mut(&drop.source) {
+                source.outliers += 1;
+            }
+            let repeated = previous
+                .as_ref()
+                .is_some_and(|p| p.outliers.iter().any(|o| o.source == drop.source));
+            if !repeated {
+                events.push(EventKind::OutlierDropped {
+                    asset: asset.into(),
+                    source: drop.source.clone(),
+                    price: drop.price,
+                    deviation_bps: drop.deviation_bps,
+                });
+            }
+        }
+        match cycle.skip {
+            Some(skip) => {
+                stats.consecutive_skips += 1;
+                let repeated = previous
+                    .as_ref()
+                    .and_then(|p| p.skip)
+                    .is_some_and(|p| discriminant(&p) == discriminant(&skip));
+                if !repeated {
+                    events.push(EventKind::AssetSkipped {
+                        asset: asset.into(),
+                        skip,
+                    });
+                }
+            }
+            None if stats.consecutive_skips > 0 => {
+                events.push(EventKind::AssetResumed {
+                    asset: asset.into(),
+                    consecutive_skips: stats.consecutive_skips,
+                });
+                stats.consecutive_skips = 0;
+            }
+            None => {}
         }
         stats.last_cycle = Some(cycle);
         for kind in events {
@@ -554,6 +641,7 @@ struct CyclesView {
 struct AssetView<'a> {
     signed: u64,
     skipped: u64,
+    skipped_by_reason: SkipCounts,
     last_skip: Option<SkipReason>,
     since_signed_s: Option<f64>,
     last_signed_sources: Option<u8>,
@@ -567,6 +655,7 @@ struct SourceView<'a> {
     ok: u64,
     failed: u64,
     consecutive_failures: u64,
+    outliers: u64,
     last: Option<&'a Outcome>,
     since_ok_s: Option<f64>,
     last_duration_ms: Option<u64>,
@@ -623,6 +712,7 @@ impl State {
             ok: stats.ok,
             failed: stats.failed,
             consecutive_failures: stats.consecutive_failures,
+            outliers: stats.outliers,
             last: stats.last.as_ref(),
             since_ok_s: stats.last_ok.map(age),
             last_duration_ms: stats.last_spent.map(|spent| ms(spent.duration)),
@@ -635,6 +725,7 @@ impl State {
                 let view = AssetView {
                     signed: stats.signed,
                     skipped: stats.skipped,
+                    skipped_by_reason: stats.skipped_by_reason,
                     last_skip: stats.last_skip,
                     since_signed_s: stats.last_signed.map(age),
                     last_signed_sources: stats.last_signed_sources,
@@ -758,6 +849,36 @@ mod tests {
         eyre::Report::new(error).wrap_err("binance BTCUSDT")
     }
 
+    /// Failure `n`: 502 for even `n`, 503 for odd, so each one differs from the last.
+    fn flapping(n: usize) -> eyre::Report {
+        http_failure(502 + (n % 2) as u16, &format!("failure {n}"))
+    }
+
+    fn timeout() -> eyre::Report {
+        eyre::Report::new(RequestError {
+            host: HOST.into(),
+            attempts: 1,
+            error: HttpError::Timeout,
+        })
+    }
+
+    fn event_names(got: &Value) -> Vec<&str> {
+        got["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["event"].as_str().unwrap())
+            .collect()
+    }
+
+    fn outlier(source: &str) -> OutlierDrop {
+        OutlierDrop {
+            source: source.into(),
+            price: 95_000.0,
+            deviation_bps: 412.5,
+        }
+    }
+
     fn keys(value: &Value) -> Vec<&str> {
         value
             .as_object()
@@ -799,13 +920,20 @@ mod tests {
         assert_eq!(btc["since_signed_s"], 3.0);
         assert_eq!(btc["last_signed_sources"], 1);
         assert_eq!(
+            btc["skipped_by_reason"],
+            json!({
+                "quorum_not_met": 0, "no_server_time": 0, "quorum_lost": 0, "pair_gap": 0,
+                "no_prices_after_filtering": 0, "fixed_point_rejected": 0
+            })
+        );
+        assert_eq!(
             btc["last_cycle"],
             json!({ "path": "rest", "responders": 1, "outliers": [], "skip": null })
         );
         assert_eq!(
             btc["sources"]["binance"],
             json!({
-                "ok": 1, "failed": 0, "consecutive_failures": 0,
+                "ok": 1, "failed": 0, "consecutive_failures": 0, "outliers": 0,
                 "last": { "outcome": "ok" }, "since_ok_s": 3.0,
                 "last_duration_ms": 120, "last_attempts": 1
             })
@@ -865,13 +993,14 @@ mod tests {
     async fn the_ring_keeps_the_newest_256_events_and_counts_the_rest() {
         let diag = diag();
         for n in 0..300 {
-            diag.source_failed(BTC, "kraken", &eyre::eyre!("failure {n}"), spent(1, 1));
+            diag.source_failed(BTC, "kraken", &flapping(n), spent(1, 1));
         }
         let got = read(&diag);
         let events = got["events"].as_array().unwrap();
+        let detail = |i: usize| events[i]["detail"].as_str().unwrap().to_string();
         assert_eq!(events.len(), MAX_EVENTS);
-        assert_eq!(events[0]["detail"], "failure 44");
-        assert_eq!(events[MAX_EVENTS - 1]["detail"], "failure 299");
+        assert!(detail(0).ends_with(": failure 44"), "{}", detail(0));
+        assert!(detail(MAX_EVENTS - 1).ends_with(": failure 299"));
         assert_eq!(got["events_dropped"], 44);
         assert_eq!(
             got["assets"][BTC]["sources"]["kraken"]["consecutive_failures"],
@@ -903,13 +1032,7 @@ mod tests {
             got["assets"][BTC]["sources"]["binance"]["last"]["class"],
             "cooling_down"
         );
-        let events: Vec<&str> = got["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|e| e["event"].as_str().unwrap())
-            .collect();
-        assert_eq!(events, ["host_paused"]);
+        assert_eq!(event_names(&got), ["host_paused"]);
 
         diag.pause_ended(HOST);
         let got = read(&diag);
@@ -921,16 +1044,14 @@ mod tests {
     async fn a_skip_records_its_reason_responders_and_outliers_in_order() {
         let diag = diag();
         let mut cycle = AssetCycle::new(PricePath::Rest, 2);
-        cycle.outliers.push(OutlierDrop {
-            source: "kraken".into(),
-            price: 95_000.0,
-            deviation_bps: 412.5,
-        });
+        cycle.outliers.push(outlier("kraken"));
         diag.asset_skipped(BTC, cycle, SkipReason::QuorumLost { have: 1, need: 2 });
         let got = read(&diag);
         let skip = json!({ "reason": "quorum_lost", "have": 1, "need": 2 });
         let btc = &got["assets"][BTC];
         assert_eq!((&btc["skipped"], &btc["last_skip"]), (&json!(1), &skip));
+        assert_eq!(btc["skipped_by_reason"]["quorum_lost"], 1);
+        assert_eq!(btc["sources"]["kraken"]["outliers"], 1);
         assert_eq!(btc["last_cycle"]["responders"], 2);
         assert_eq!(btc["last_cycle"]["skip"], skip);
         assert_eq!(
@@ -943,8 +1064,151 @@ mod tests {
         assert_eq!(got["events"][1]["skip"], skip);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn repeated_failures_of_one_class_and_status_add_one_event_but_count_each() {
+        let diag = diag();
+        for _ in 0..5 {
+            diag.source_failed(BTC, "kraken", &http_failure(503, "busy"), spent(1, 2));
+        }
+        let got = read(&diag);
+        assert_eq!(event_names(&got), ["source_failed"]);
+        let kraken = &got["assets"][BTC]["sources"]["kraken"];
+        assert_eq!(
+            (&kraken["failed"], &kraken["consecutive_failures"]),
+            (&json!(5), &json!(5))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_of_another_class_or_status_adds_an_event() {
+        let diag = diag();
+        let failures = [
+            http_failure(503, "a"),
+            http_failure(503, "b"),
+            http_failure(502, "c"),
+            http_failure(404, "d"),
+            timeout(),
+            timeout(),
+            eyre::eyre!("not json"),
+        ];
+        for failure in &failures {
+            diag.source_failed(BTC, "kraken", failure, spent(1, 1));
+        }
+        let got = read(&diag);
+        let seen: Vec<(Value, Value)> = got["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["class"].clone(), e["http_status"].clone()))
+            .collect();
+        let want = [
+            ("server_error", json!(503)),
+            ("server_error", json!(502)),
+            ("client_error", json!(404)),
+            ("timeout", Value::Null),
+            ("bad_response", Value::Null),
+        ];
+        assert_eq!(seen, want.map(|(class, status)| (json!(class), status)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_success_after_failures_adds_a_recovery_with_their_count() {
+        let diag = diag();
+        for _ in 0..3 {
+            diag.source_failed(BTC, "kraken", &timeout(), spent(1, 1));
+        }
+        diag.source_ok(BTC, "kraken", spent(1, 1));
+        diag.source_ok(BTC, "kraken", spent(1, 1));
+        diag.source_failed(BTC, "kraken", &timeout(), spent(1, 1));
+        let got = read(&diag);
+        assert_eq!(
+            event_names(&got),
+            ["source_failed", "source_recovered", "source_failed"]
+        );
+        assert_eq!(
+            got["events"][1],
+            json!({
+                "age_s": 0.0, "event": "source_recovered", "asset": BTC, "source": "kraken",
+                "consecutive_failures": 3
+            })
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_outlier_adds_an_event_only_when_it_was_not_one_the_cycle_before() {
+        let diag = diag();
+        let cycles: [&[&str]; 5] = [&["kraken"], &["kraken"], &["binance"], &[], &["kraken"]];
+        for sources in cycles {
+            let mut cycle = AssetCycle::new(PricePath::Rest, 2);
+            cycle.outliers = sources.iter().map(|s| outlier(s)).collect();
+            diag.asset_signed(BTC, cycle, 1, 91_000.0);
+        }
+        let got = read(&diag);
+        let dropped: Vec<&str> = got["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["source"].as_str().unwrap())
+            .collect();
+        assert_eq!(dropped, ["kraken", "binance", "kraken"]);
+        let sources = &got["assets"][BTC]["sources"];
+        assert_eq!(
+            (
+                &sources["kraken"]["outliers"],
+                &sources["binance"]["outliers"]
+            ),
+            (&json!(3), &json!(1))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_skip_adds_an_event_only_when_its_reason_changes_and_a_sign_ends_the_run() {
+        let diag = diag();
+        let skips = [
+            SkipReason::QuorumLost { have: 1, need: 2 },
+            SkipReason::QuorumLost { have: 0, need: 2 },
+            SkipReason::QuorumLost { have: 1, need: 2 },
+            SkipReason::PairGap {
+                gap_bps: 80.0,
+                limit_bps: 50,
+            },
+        ];
+        for skip in skips {
+            diag.asset_skipped(BTC, AssetCycle::new(PricePath::Rest, 1), skip);
+        }
+        for _ in 0..2 {
+            diag.asset_signed(BTC, AssetCycle::new(PricePath::Rest, 2), 2, 91_000.0);
+        }
+        diag.asset_skipped(BTC, AssetCycle::new(PricePath::Rest, 1), skips[0]);
+        let got = read(&diag);
+        let events = got["events"].as_array().unwrap();
+        let reasons: Vec<&Value> = events.iter().map(|e| &e["skip"]["reason"]).collect();
+        assert_eq!(
+            reasons,
+            [
+                &json!("quorum_lost"),
+                &json!("pair_gap"),
+                &Value::Null,
+                &json!("quorum_lost")
+            ]
+        );
+        assert_eq!(
+            events[2],
+            json!({ "age_s": 0.0, "event": "asset_resumed", "asset": BTC, "consecutive_skips": 4 })
+        );
+        let btc = &got["assets"][BTC];
+        assert_eq!(btc["skipped"], 5);
+        assert_eq!(
+            btc["skipped_by_reason"],
+            json!({
+                "quorum_not_met": 0, "no_server_time": 0, "quorum_lost": 4, "pair_gap": 1,
+                "no_prices_after_filtering": 0, "fixed_point_rejected": 0
+            })
+        );
+    }
+
     #[test]
-    fn every_skip_reason_has_its_own_tag() {
+    fn every_skip_reason_has_its_own_tag_and_counter() {
         let reasons = [
             SkipReason::QuorumNotMet { have: 0, need: 2 },
             SkipReason::NoServerTime,
@@ -971,6 +1235,15 @@ mod tests {
                 "fixed_point_rejected"
             ]
         );
+        let mut counts = SkipCounts::default();
+        for reason in reasons {
+            counts.count(reason);
+        }
+        let counts = serde_json::to_value(counts).unwrap();
+        let mut tags: Vec<&str> = tags.iter().map(|t| t.as_str().unwrap()).collect();
+        tags.sort_unstable();
+        assert_eq!(keys(&counts), tags);
+        assert!(counts.as_object().unwrap().values().all(|n| n == 1));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1066,7 +1339,7 @@ mod tests {
         assert_eq!(sanitize_detail(&"x".repeat(120)), "x".repeat(120));
     }
 
-    /// Every pair of the bundled config failed with the widest detail, every host paused, a full ring of the widest events.
+    /// Every pair of the bundled config failed with the widest detail, every host paused, a full ring of the widest events, alternating so each one is recorded.
     fn worst_case() -> Diagnostics {
         let config = load_assets().unwrap();
         let diag = Diagnostics::new(&config.assets, &config.exchange_hostnames);
@@ -1121,8 +1394,12 @@ mod tests {
             })
             .max_by_key(|(a, s)| a.len() + s.len())
             .unwrap();
-        for _ in 0..MAX_EVENTS {
-            diag.source_failed(asset, source, &eyre::eyre!("{wide}"), spent(4000, 2));
+        for n in 0..MAX_EVENTS {
+            let error = match n % 2 {
+                0 => eyre::eyre!("{wide}"),
+                _ => http_failure(503, &wide),
+            };
+            diag.source_failed(asset, source, &error, spent(4000, 2));
         }
         diag
     }
@@ -1143,7 +1420,7 @@ mod tests {
     async fn an_over_budget_response_leaves_out_the_oldest_events_first() {
         let diag = diag();
         for n in 0..50 {
-            diag.source_failed(BTC, "kraken", &eyre::eyre!("failure {n}"), spent(1, 1));
+            diag.source_failed(BTC, "kraken", &flapping(n), spent(1, 1));
         }
         let full = diag.response();
         let budget = full.len() - 1000;
@@ -1154,7 +1431,8 @@ mod tests {
         let truncated = got["diagnostics"]["events_truncated"].as_u64().unwrap();
         assert!(truncated > 0);
         assert_eq!(events.len() as u64 + truncated, 50);
-        assert_eq!(events.last().unwrap()["detail"], "failure 49");
+        let last = events.last().unwrap()["detail"].as_str().unwrap();
+        assert!(last.ends_with(": failure 49"), "{last}");
         assert_eq!(diag.response_within(10), TOO_LARGE);
     }
 }

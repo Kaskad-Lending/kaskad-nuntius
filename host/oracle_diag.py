@@ -112,6 +112,11 @@ def skip(reason):
     return f"{reason['reason']} {details}".strip()
 
 
+def skip_counts(counts):
+    """Nonzero skip counts as reason=n joined by commas; "-" when there are none."""
+    return ",".join(f"{reason}={n}" for reason, n in (counts or {}).items() if n) or "-"
+
+
 def field(key, value):
     if isinstance(value, float) and key.endswith("_bps"):
         return f"{value:.1f}"
@@ -135,10 +140,11 @@ def render(diag, events=DEFAULT_EVENTS):
     ]
     assets = diag.get("assets", {})
     lines += table(
-        ["ASSET", "PATH", "SIGNED", "SKIPPED", "SIGNED_AGE", "SOURCES", "LAST_SKIP"],
+        ["ASSET", "PATH", "SIGNED", "SKIPPED", "SKIP_REASONS", "SIGNED_AGE", "SOURCES",
+         "LAST_SKIP"],
         [[name, (a.get("last_cycle") or {}).get("path", "-"), a.get("signed"), a.get("skipped"),
-          age(a.get("since_signed_s")), a.get("last_signed_sources") or "-",
-          skip(a.get("last_skip"))]
+          skip_counts(a.get("skipped_by_reason")), age(a.get("since_signed_s")),
+          a.get("last_signed_sources") or "-", skip(a.get("last_skip"))]
          for name, a in assets.items()],
     )
     polled = [(name, source, s) for name, a in assets.items()
@@ -146,9 +152,9 @@ def render(diag, events=DEFAULT_EVENTS):
     unpolled = sum(len(a.get("sources", {})) for a in assets.values()) - len(polled)
     lines.append("")
     lines += table(
-        ["ASSET", "SOURCE", "LAST", "CONSEC_FAILS", "OK_AGE", "MS", "ATTEMPTS"],
+        ["ASSET", "SOURCE", "LAST", "CONSEC_FAILS", "OUTLIERS", "OK_AGE", "MS", "ATTEMPTS"],
         [[name, source, outcome(s.get("last")), s.get("consecutive_failures"),
-          age(s.get("since_ok_s")),
+          s.get("outliers", "-"), age(s.get("since_ok_s")),
           "-" if s.get("last_duration_ms") is None else s["last_duration_ms"],
           "-" if s.get("last_attempts") is None else s["last_attempts"]]
          for name, source, s in polled],
