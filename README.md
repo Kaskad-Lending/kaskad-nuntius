@@ -97,19 +97,23 @@ Every failed request has one class, logged with its HTTP status, attempt count a
 | `blocked` | HTTP 403 or 451 |
 | `client_error` | any other 4xx |
 | `server_error` | 5xx |
-| `timeout` | the call deadline expired |
+| `timeout` | the call deadline expired, or a connect attempt timed out |
 | `network` | connect, TLS or proxy refusal; connection cut mid-response |
 | `bad_response` | unexpected status, redirect loop, missing or bad `Date`, oversized or non-JSON body |
 | `config` | invalid URL or host outside the allowlist; nothing sent |
 | `cooling_down` | host paused; nothing sent |
 
-**Retry.** At most 2 attempts inside one deadline (GET 10 s; the VUSD JSON-RPC POST 4 s, shared by both attempts). Only `network`, HTTP 408/425/500/502/503/504 and a 429 whose `Retry-After` is ≤ 1 s are retried. The retry waits 250 ms (a 429 waits its `Retry-After`) and runs only if at least that wait plus 1 s is left before the deadline.
+The body preview in a non-2xx error (its first 200 bytes) keeps only printable ASCII and space, and so does the logged `error` field; every other char becomes `?`.
+
+**Retry.** At most 2 attempts inside one deadline (GET 10 s; the VUSD JSON-RPC POST 4 s, shared by both attempts). Only `network`, HTTP 408/425/500/502/503/504 and a 429 whose `Retry-After` is ≤ 1 s are retried. The retry waits 250 ms (a 429 waits its `Retry-After`) and runs only if at least that wait plus 1 s is left before the deadline. A retry also needs the host's retry right: the first call to a host has it, and so does every call after one that ended in a 2xx the client accepted (`Date` present, body within the cap and JSON, a JSON-RPC `error` included). After any other outcome that reached the network, including an unaccepted 2xx, the next call gets one attempt. A `config` or `cooling_down` refusal sends nothing and leaves the right as it was.
 
 **Host pauses.** After 451 a host gets no requests for 600 s, after 403 for 60 s, after 429/418 for its `Retry-After` capped at 120 s (30 s without one). Pauses use the monotonic clock and are per host; requests to a paused host fail at once as `cooling_down`, and the first success on the host ends its pause. CoinGecko keeps serving its last snapshot (at most 120 s old) while its refresh fails, so its pairs stay `ok` through a short pause.
 
 ### Diagnostics (`src/diagnostics.rs`, `host/oracle_diag.py`)
 
-The enclave keeps bounded, in-memory diagnostics: per asset and source the last outcome, consecutive failures and success age; per asset the last skip reason, responders and outliers with their deviation; host pauses; the VUSD NAV operator outcomes; cycle durations; and the newest 256 events. They hold request outcomes and public prices only, never URLs past the host, keys, credentials or attestation bodies. The reply to the `get_diagnostics` VSOCK method is at most 256 KiB (oldest events are left out first).
+The enclave keeps bounded, in-memory diagnostics: per asset and source the last outcome, consecutive failures, success age and samples dropped as outliers; per asset the last skip reason, skip counts by reason, responders and outliers with their deviation; host pauses; the VUSD NAV operator outcomes; cycle durations; and the newest 256 events. They hold request outcomes and public prices only, never URLs past the host, keys, credentials or attestation bodies. The reply to the `get_diagnostics` VSOCK method is at most 256 KiB (oldest events are left out first).
+
+Events mark changes of state, not repeats. `source_failed` is added when the pair's previous outcome was not a failure of the same class and HTTP status, and `source_recovered` on its first success after failures. `outlier_dropped` is added when the source was not an outlier the cycle before. `asset_skipped` is added when the previous cycle was not skipped for the same reason, and `asset_resumed` on the first sign after skips. The counters still count every repeat. A failure detail is cut to 120 chars, URLs keep only their host, and every char outside printable ASCII and space becomes `?`.
 
 `get_diagnostics` is for operators on the host only: the public pull API (`host/pull_api.py`) never routes it, and `/diagnostics` is a 404. Read it with `python3 host/oracle_diag.py` (VSOCK) or `--tcp 127.0.0.1:5001` for a local run; `--json` prints the raw reply.
 
