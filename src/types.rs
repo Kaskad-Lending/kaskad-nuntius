@@ -426,6 +426,26 @@ mod tests {
         );
     }
 
+    /// The Kraken source looks its pair up verbatim in the reply, which Kraken
+    /// keys by its own pair name (`USDTZUSD`, not `USDTUSD`).
+    #[test]
+    fn kraken_pairs_are_the_reply_keys() {
+        const EXPECTED: &[(&str, &str)] = &[
+            ("ETH/USD", "XETHZUSD"),
+            ("BTC/USD", "XXBTZUSD"),
+            ("USDC/USD", "USDCUSD"),
+            ("USDT/USD", "USDTZUSD"),
+            ("USDG/USD", "USDGUSD"),
+        ];
+        let cfg = load_assets().expect("assets.json must parse");
+        let configured: Vec<(&str, &str)> = cfg
+            .assets
+            .iter()
+            .filter_map(|a| Some((a.symbol.as_str(), a.pair("kraken")?.as_str())))
+            .collect();
+        assert_eq!(configured, EXPECTED);
+    }
+
     /// VUSD/USD is the SPEC §9 entry: eight `ethrpc_*` operators on `VUSD_NAV`, nowhere else.
     #[test]
     fn vusd_feed_matches_the_spec() {

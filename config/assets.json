@@ -243,7 +243,7 @@
           "quote": "USD"
         },
         "kraken": {
-          "pair": "USDTUSD",
+          "pair": "USDTZUSD",
           "quote": "USD"
         },
         "bitstamp": {
