@@ -168,7 +168,8 @@ main.rs
 │   ├── okx.rs        OKX API client
 │   ├── bybit.rs      Bybit API client
 │   ├── coinbase.rs   Coinbase API client
-│   └── coingecko.rs  CoinGecko API client
+│   ├── coingecko.rs  CoinGecko API client
+│   └── ethrpc.rs     Ethereum JSON-RPC operators (VUSD backing ratio)
 ├── aggregator/
 │   └── mod.rs        weighted_median(), reject_outliers(), to_fixed_point()
 └── signer.rs         OracleSigner trait, MockSigner

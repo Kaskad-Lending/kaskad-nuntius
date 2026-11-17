@@ -81,6 +81,9 @@ pub trait PriceSource: Send + Sync {
 | Bybit | `/v5/market/tickers` | ETH, BTC, KAS |
 | Coinbase | `/v2/prices/.../spot` | ETH, BTC |
 | CoinGecko | `/api/v3/simple/price` | ETH, BTC, KAS, USDC |
+| Ethereum JSON-RPC (`ethrpc_*`, 8 operators) | `eth_call` to Multicall3 (POST) | VUSD |
+
+The `ethrpc_*` sources read the VUSD backing ratio `min(reserve / (totalSupply − amoSupply), 1)` from one Multicall3 `eth_call`. Addresses and calldata are compiled in; the only pair is `VUSD_NAV`. The eight operators share one poller: the first source asked each cycle starts one parallel round, and every result is handed out once.
 
 All sources are fetched sequentially per asset. On error, the source is skipped and a warning is logged. Minimum 2 sources required to proceed.
 
@@ -143,6 +146,7 @@ This minimizes gas cost while keeping prices fresh — same model as Chainlink.
 | KAS/USD | Exotic L1 | 2-3 | Bybit, CoinGecko; limited exchange support |
 | USDC/USD | Stablecoin | 2-3 | Depeg detection via multi-source |
 | IGRA/USD | Presale | — | Governance-set price (planned) |
+| VUSD/USD | Backed stablecoin | 8 | On-chain backing ratio via Ethereum RPC, capped at 1.00; `min_sources` 3 |
 
 ## Quick Start
 

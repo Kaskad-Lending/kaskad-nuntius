@@ -6,6 +6,7 @@ pub mod bybit;
 pub mod coinbase;
 pub mod coingecko;
 pub mod crypto_com;
+pub mod ethrpc;
 pub mod gateio;
 pub mod htx;
 pub mod igralabs;

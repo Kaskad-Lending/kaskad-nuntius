@@ -12,3 +12,12 @@ Public data: a COSE document, its certificate chain and PCRs. No secret material
 Leaf validity ends a few hours after capture, so the tests pin
 `NOW = 1789682698` (2026-09-17 22:04:58Z) instead of reading the clock. The same
 bytes live in `kaskad-pontifex/test/fixtures` for the Solidity verifier tests.
+
+# VUSD NAV fixtures
+
+Byte-identical copies of the VUSD/USD spec files, used by `src/sources/ethrpc.rs` tests.
+
+| file | content |
+|---|---|
+| `vusd_nav_fixtures.json` | 37 response vectors with the expected price or reject reason |
+| `vusd_nav_calldata.hex` | Multicall3 `aggregate` calldata sent to every RPC operator |

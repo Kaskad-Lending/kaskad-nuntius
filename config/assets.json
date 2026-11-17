@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "_note": "This file is baked into the enclave EIF via include_str! and is therefore measured in PCR0. Any change to its content produces a different PCR0 and requires on-chain re-registration of the oracle. Keys under `sources` MUST match a registered PriceSource::name() \u2014 otherwise the mapping is silently ignored for that source. Each source carries the quote currency of its pair; USDT-quoted samples are multiplied by USDT/USD before aggregation, so USDT/USD itself must stay USD-quoted. `deviation_threshold_bps` is a hard cap on one venue's distance from the median (0 = MAD only). `max_pair_gap_bps`, when set, skips the cycle if exactly two samples remain and sit further apart than that. A source `scale` multiplies that venue's price, for a pair that trades a proxy of the asset at a fixed ratio. `exchange_hostnames` is the allowlist of hostnames the enclave's HttpClient may connect to \u2014 startup validates that every source's hardcoded URL hostname appears here.",
+  "_note": "This file is baked into the enclave EIF via include_str! and is therefore measured in PCR0. Any change to its content produces a different PCR0 and requires on-chain re-registration of the oracle. Keys under `sources` MUST match a registered PriceSource::name() \u2014 otherwise the mapping is silently ignored for that source. Each source carries the quote currency of its pair; USDT-quoted samples are multiplied by USDT/USD before aggregation, so USDT/USD itself must stay USD-quoted. `deviation_threshold_bps` is a hard cap on one venue's distance from the median (0 = MAD only). `max_pair_gap_bps`, when set, skips the cycle if exactly two samples remain and sit further apart than that. A source `scale` multiplies that venue's price, for a pair that trades a proxy of the asset at a fixed ratio. `exchange_hostnames` is the allowlist of hostnames the enclave's HttpClient may connect to \u2014 startup validates that every source's hardcoded URL hostname appears here. `ethrpc_*` sources read the VUSD backing ratio from Ethereum with one Multicall3 eth_call; their pair `VUSD_NAV` selects addresses and calldata compiled into the image, and any other pair is an error.",
   "exchange_hostnames": [
     "api.binance.com",
     "www.okx.com",
@@ -17,7 +17,15 @@
     "api.crypto.com",
     "api.huobi.pro",
     "apis.igralabs.com",
-    "api.robinhood.com"
+    "api.robinhood.com",
+    "ethereum-rpc.publicnode.com",
+    "mainnet.gateway.tenderly.co",
+    "eth.drpc.org",
+    "eth-mainnet.public.blastapi.io",
+    "rpc.mevblocker.io",
+    "eth.rpc.blxrbdn.com",
+    "eth-pokt.nodies.app",
+    "0xrpc.io"
   ],
   "assets": [
     {
@@ -582,6 +590,47 @@
           "pair": "SPYX_USDT",
           "quote": "USDT",
           "scale": 0.1177
+        }
+      }
+    },
+    {
+      "symbol": "VUSD/USD",
+      "min_sources": 3,
+      "deviation_threshold_bps": 50,
+      "max_pair_gap_bps": 50,
+      "heartbeat_seconds": 3600,
+      "sources": {
+        "ethrpc_publicnode": {
+          "pair": "VUSD_NAV",
+          "quote": "USD"
+        },
+        "ethrpc_tenderly": {
+          "pair": "VUSD_NAV",
+          "quote": "USD"
+        },
+        "ethrpc_drpc": {
+          "pair": "VUSD_NAV",
+          "quote": "USD"
+        },
+        "ethrpc_blastapi": {
+          "pair": "VUSD_NAV",
+          "quote": "USD"
+        },
+        "ethrpc_mevblocker": {
+          "pair": "VUSD_NAV",
+          "quote": "USD"
+        },
+        "ethrpc_bloxroute": {
+          "pair": "VUSD_NAV",
+          "quote": "USD"
+        },
+        "ethrpc_nodies": {
+          "pair": "VUSD_NAV",
+          "quote": "USD"
+        },
+        "ethrpc_0xrpc": {
+          "pair": "VUSD_NAV",
+          "quote": "USD"
         }
       }
     }

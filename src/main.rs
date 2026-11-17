@@ -196,7 +196,7 @@ async fn main() -> Result<()> {
         .collect();
 
     // (config loaded above — used here for source registration.)
-    let price_sources: Vec<Box<dyn PriceSource>> = vec![
+    let mut price_sources: Vec<Box<dyn PriceSource>> = vec![
         Box::new(sources::binance::Binance::new(client.clone())),
         Box::new(sources::okx::Okx::new(client.clone())),
         Box::new(sources::bybit::Bybit::new(client.clone())),
@@ -217,6 +217,8 @@ async fn main() -> Result<()> {
         Box::new(sources::igralabs::IgraLabs::new(client.clone())),
         Box::new(sources::robinhood::Robinhood::new(client.clone())),
     ];
+    // Eight Ethereum RPC operators for VUSD/USD, polled together once per cycle.
+    price_sources.extend(sources::ethrpc::sources(client.clone()));
 
     // --- Spawn the WS collector manager + book-state fan-in ----------
     let (collector_tx, mut collector_rx) =
