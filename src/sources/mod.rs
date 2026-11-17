@@ -18,7 +18,9 @@ pub mod robinhood;
 
 use async_trait::async_trait;
 use eyre::Result;
+use tokio::time::Instant;
 
+use crate::http_client::{ErrorClass, RequestError};
 use crate::types::{AssetConfig, PricePoint};
 
 /// Trait for all price data sources. The source looks up its specific
@@ -47,7 +49,10 @@ pub async fn fetch_all(sources: &[Box<dyn PriceSource>], asset: &AssetConfig) ->
 
     let mut results = Vec::new();
     for (name, fut) in handles {
-        match fut.await {
+        let started = Instant::now();
+        let outcome = fut.await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match outcome {
             Ok(Some(pp)) => {
                 tracing::info!(source = name, price = pp.price, "fetched {}", asset.symbol);
                 results.push(pp);
@@ -56,7 +61,17 @@ pub async fn fetch_all(sources: &[Box<dyn PriceSource>], asset: &AssetConfig) ->
                 tracing::debug!(source = name, "doesn't support {}", asset.symbol);
             }
             Err(e) => {
-                tracing::warn!(source = name, error = %e, "failed to fetch {}", asset.symbol);
+                let request = e.downcast_ref::<RequestError>();
+                tracing::warn!(
+                    source = name,
+                    error = %e,
+                    class = %request.map_or(ErrorClass::BadResponse, RequestError::class),
+                    http_status = request.and_then(RequestError::http_status),
+                    attempts = request.map(|r| r.attempts),
+                    duration_ms,
+                    "failed to fetch {}",
+                    asset.symbol
+                );
             }
         }
     }

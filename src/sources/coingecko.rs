@@ -75,7 +75,7 @@ impl CoinGecko {
                 Err(e) if cache.snapshot.is_some() => {
                     tracing::warn!(error = %e, "coingecko batch refresh failed; serving snapshot")
                 }
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             }
         }
 

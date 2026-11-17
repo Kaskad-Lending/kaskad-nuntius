@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use super::PriceSource;
-use crate::http_client::HttpClient;
+use crate::http_client::{HttpClient, RetryPolicy, GET_POLICY};
 use crate::types::{AssetConfig, PricePoint};
 
 /// The only pair these sources serve; any other pair is a config error.
@@ -29,6 +29,12 @@ const MULTICALL3: Address = address!("0xcA11bde05977b3631167028862bE2a173976CA11
 
 /// Covers the p95 latency of every operator in the SPEC §8 soak.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// GET transport rules under one deadline shared by both attempts (SPEC §16).
+const RPC_POLICY: RetryPolicy = RetryPolicy {
+    deadline: REQUEST_TIMEOUT,
+    ..GET_POLICY
+};
 
 // `aggregate` returns (blockNumber, bytes[6]) and every element is one word.
 const WORD_BYTES: usize = 32;
@@ -281,7 +287,7 @@ trait RpcTransport: Send + Sync {
 #[async_trait]
 impl RpcTransport for HttpClient {
     async fn post(&self, url: &'static str, body: &'static [u8]) -> Result<(Value, u64)> {
-        self.post_json_with_time(url, body, REQUEST_TIMEOUT).await
+        Ok(self.post_json_with_time(url, body, &RPC_POLICY).await?)
     }
 }
 
