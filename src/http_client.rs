@@ -81,7 +81,7 @@ pub enum ErrorClass {
     ClientError,
     /// 5xx.
     ServerError,
-    /// The call deadline expired.
+    /// The call deadline or the connect timeout expired.
     Timeout,
     /// Connect, TLS or proxy refusal, or the connection cut before the response ended.
     Network,
@@ -379,16 +379,17 @@ async fn read_capped(
     }
 }
 
-/// Maps a reqwest failure; a refused CONNECT is a connect error.
+/// Maps a reqwest failure. Expired time at any stage, the connect timeout
+/// included, is `Timeout`; a refused CONNECT is a connect error.
 fn transport_error(err: reqwest::Error) -> HttpError {
     let err = err.without_url();
     let detail = root_cause(&err);
     if err.is_builder() {
         HttpError::InvalidUrl { detail }
-    } else if err.is_connect() {
-        HttpError::Connect { detail }
     } else if err.is_timeout() {
         HttpError::Timeout
+    } else if err.is_connect() {
+        HttpError::Connect { detail }
     } else if err.is_redirect() {
         HttpError::TooManyRedirects
     } else {
@@ -526,10 +527,14 @@ pub struct HttpClient {
     observer: Option<Arc<dyn HostObserver>>,
 }
 
-fn build_client(proxy: Option<&str>, redirect: reqwest::redirect::Policy) -> reqwest::Client {
+fn build_client(
+    proxy: Option<&str>,
+    redirect: reqwest::redirect::Policy,
+    connect_timeout: Duration,
+) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .timeout(GET_POLICY.deadline)
-        .connect_timeout(CONNECT_TIMEOUT)
+        .connect_timeout(connect_timeout)
         .redirect(redirect)
         .user_agent(USER_AGENT);
     if let Some(proxy) = proxy {
@@ -543,13 +548,26 @@ fn build_client(proxy: Option<&str>, redirect: reqwest::redirect::Policy) -> req
 
 impl HttpClient {
     pub fn new(enclave_mode: bool, allowed_hosts: Vec<String>) -> Self {
-        Self::with_proxy(enclave_mode.then_some(ENCLAVE_PROXY), allowed_hosts)
+        Self::with_proxy(
+            enclave_mode.then_some(ENCLAVE_PROXY),
+            CONNECT_TIMEOUT,
+            allowed_hosts,
+        )
     }
 
-    fn with_proxy(proxy: Option<&str>, allowed_hosts: Vec<String>) -> Self {
+    /// `connect_timeout` bounds the TCP connect, proxy tunnel and TLS handshake.
+    fn with_proxy(
+        proxy: Option<&str>,
+        connect_timeout: Duration,
+        allowed_hosts: Vec<String>,
+    ) -> Self {
         let exchange = ReqwestExchange {
-            get: build_client(proxy, reqwest::redirect::Policy::limited(2)),
-            post: build_client(proxy, reqwest::redirect::Policy::none()),
+            get: build_client(
+                proxy,
+                reqwest::redirect::Policy::limited(2),
+                connect_timeout,
+            ),
+            post: build_client(proxy, reqwest::redirect::Policy::none(), connect_timeout),
         };
         Self::with_exchange(Arc::new(exchange), allowed_hosts)
     }
@@ -1065,6 +1083,46 @@ mod tests {
         drop(held_rx);
     }
 
+    #[tokio::test]
+    async fn an_expired_connect_timeout_is_a_timeout_and_is_not_retried() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("https://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            // Accept every connection and never answer the TLS handshake.
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let client =
+            HttpClient::with_proxy(None, Duration::from_millis(200), vec!["127.0.0.1".into()]);
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.get_json_with_time::<Value>(&url),
+        )
+        .await
+        .expect("the connect timeout must fire before the guard")
+        .unwrap_err();
+        assert_eq!(
+            (&err.error, err.attempts),
+            (&HttpError::Timeout, 1),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_network_and_is_retried() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}/", listener.local_addr().unwrap());
+        drop(listener);
+        let err = local_client()
+            .get_json_with_time::<Value>(&url)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.error, HttpError::Connect { .. }), "{err}");
+        assert_eq!((err.class(), err.attempts), (ErrorClass::Network, 2));
+    }
+
     /// Answers `/status/<code>` with that status, no `Date` and a body of `/len/<n>` bytes.
     fn raw(status: &str, date: bool, content_length: bool, body_len: usize) -> Vec<u8> {
         let mut head = format!("HTTP/1.1 {status}\r\nConnection: close\r\n");
@@ -1152,7 +1210,11 @@ mod tests {
     async fn a_refused_connect_is_network_and_never_pauses_the_host() {
         for status in ["403 Forbidden", "429 Too Many Requests", "502 Bad Gateway"] {
             let (proxy, connects) = refusing_proxy(status).await;
-            let client = HttpClient::with_proxy(Some(&proxy), vec!["rpc.example.com".into()]);
+            let client = HttpClient::with_proxy(
+                Some(&proxy),
+                CONNECT_TIMEOUT,
+                vec!["rpc.example.com".into()],
+            );
             for expected in [2, 4] {
                 let err = client
                     .post_json_with_time::<Value>("https://rpc.example.com/", b"{}", &RPC_LIKE)
