@@ -87,6 +87,32 @@ The `ethrpc_*` sources read the VUSD backing ratio `min(reserve / (totalSupply �
 
 All sources are fetched sequentially per asset. On error, the source is skipped and a warning is logged. Minimum 2 sources required to proceed.
 
+### HTTP failures (`src/http_client.rs`)
+
+Every failed request has one class, logged with its HTTP status, attempt count and duration:
+
+| Class | Cause |
+|-------|-------|
+| `rate_limited` | HTTP 429 or 418 |
+| `blocked` | HTTP 403 or 451 |
+| `client_error` | any other 4xx |
+| `server_error` | 5xx |
+| `timeout` | the call deadline expired |
+| `network` | connect, TLS or proxy refusal; connection cut mid-response |
+| `bad_response` | unexpected status, redirect loop, missing or bad `Date`, oversized or non-JSON body |
+| `config` | invalid URL or host outside the allowlist; nothing sent |
+| `cooling_down` | host paused; nothing sent |
+
+**Retry.** At most 2 attempts inside one deadline (GET 10 s; the VUSD JSON-RPC POST 4 s, shared by both attempts). Only `network`, HTTP 408/425/500/502/503/504 and a 429 whose `Retry-After` is ≤ 1 s are retried. The retry waits 250 ms (a 429 waits its `Retry-After`) and runs only if at least that wait plus 1 s is left before the deadline.
+
+**Host pauses.** After 451 a host gets no requests for 600 s, after 403 for 60 s, after 429/418 for its `Retry-After` capped at 120 s (30 s without one). Pauses use the monotonic clock and are per host; requests to a paused host fail at once as `cooling_down`, and the first success on the host ends its pause. CoinGecko keeps serving its last snapshot (at most 120 s old) while its refresh fails, so its pairs stay `ok` through a short pause.
+
+### Diagnostics (`src/diagnostics.rs`, `host/oracle_diag.py`)
+
+The enclave keeps bounded, in-memory diagnostics: per asset and source the last outcome, consecutive failures and success age; per asset the last skip reason, responders and outliers with their deviation; host pauses; the VUSD NAV operator outcomes; cycle durations; and the newest 256 events. They hold request outcomes and public prices only, never URLs past the host, keys, credentials or attestation bodies. The reply to the `get_diagnostics` VSOCK method is at most 256 KiB (oldest events are left out first).
+
+`get_diagnostics` is for operators on the host only: the public pull API (`host/pull_api.py`) never routes it, and `/diagnostics` is a 404. Read it with `python3 host/oracle_diag.py` (VSOCK) or `--tcp 127.0.0.1:5001` for a local run; `--json` prints the raw reply.
+
 ### Aggregator (`src/aggregator/`)
 
 Pipeline: **outlier rejection → weighted median → fixed-point conversion**

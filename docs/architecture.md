@@ -157,11 +157,25 @@ On-chain, the contract recovers the signer address via `ecrecover(ethHash, v, r,
 
 The `OracleSigner` trait makes the switch transparent — same oracle logic, different key management backend.
 
+## Source Failures and Diagnostics
+
+`HttpClient` gives every failed request one class: `rate_limited` (429/418), `blocked` (403/451), `client_error`, `server_error`, `timeout`, `network`, `bad_response`, `config` or `cooling_down`. The last two send nothing.
+
+- **Retry:** at most 2 attempts within the call deadline (GET 10 s, VUSD JSON-RPC 4 s). Retried: `network`, 408/425/500/502/503/504, and 429 with `Retry-After` ≤ 1 s. The retry waits 250 ms (or that `Retry-After`) and needs the wait plus 1 s left before the deadline.
+- **Host pause:** 451 → 600 s, 403 → 60 s, 429/418 → `Retry-After` capped at 120 s, else 30 s. Monotonic clock, per host; a paused host's requests fail as `cooling_down`, and a success ends the pause.
+
+`src/diagnostics.rs` records, per configured asset and source, the last outcome, consecutive failures and success age, plus skip reasons, outliers, host pauses, NAV operator outcomes, cycle durations and the newest 256 events. Only request outcomes and public prices enter it: URLs are cut to their host, and no key, credential or attestation body is kept. The price server answers `get_diagnostics` with at most 256 KiB.
+
+The method is for host-side operator tools (`host/oracle_diag.py`). The public pull API maps only `/prices`, `/prices/{SYMBOL}`, `/health` and `/attestation` to enclave methods, so diagnostics are not reachable over HTTP.
+
 ## Module Dependency Graph
 
 ```
 main.rs
 ├── types.rs          Asset enum, PricePoint struct, thresholds
+├── http_client.rs    Allowlisted HTTP, error classes, retry, host pauses
+├── diagnostics.rs    Bounded per-source diagnostics (get_diagnostics)
+├── price_server.rs   VSOCK/TCP request server
 ├── sources/
 │   ├── mod.rs        PriceSource trait, fetch_all()
 │   ├── binance.rs    Binance API client
