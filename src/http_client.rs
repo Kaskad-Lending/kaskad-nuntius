@@ -141,7 +141,8 @@ pub enum HttpError {
         detail: String,
     },
     TooManyRedirects,
-    /// Any non-2xx status; `retry_after` is already resolved against the response `Date`.
+    /// Any non-2xx status; `retry_after` is already resolved against the response `Date`,
+    /// `preview` is the body start as [`printable_ascii`].
     Status {
         code: u16,
         retry_after: Option<Duration>,
@@ -405,6 +406,14 @@ fn root_cause(err: &(dyn std::error::Error + 'static)) -> String {
     cause.to_string()
 }
 
+/// `text` with every char outside printable ASCII and space replaced by `?`,
+/// so foreign text cannot put control or bidi chars into a log line.
+pub fn printable_ascii(text: &str) -> String {
+    text.chars()
+        .map(|c| if matches!(c, ' '..='~') { c } else { '?' })
+        .collect()
+}
+
 /// Status first, then `Date`, the body cap and JSON.
 fn interpret<T: DeserializeOwned>(reply: Reply) -> Result<(T, u64), HttpError> {
     let date = reply.date.as_deref().map(parse_http_date);
@@ -417,7 +426,7 @@ fn interpret<T: DeserializeOwned>(reply: Reply) -> Result<(T, u64), HttpError> {
         return Err(HttpError::Status {
             code: reply.status,
             retry_after,
-            preview: String::from_utf8_lossy(preview).into_owned(),
+            preview: printable_ascii(&String::from_utf8_lossy(preview)),
         });
     }
     let server_unix = match date {
@@ -1860,5 +1869,37 @@ mod tests {
         assert_eq!(err.http_status(), Some(503));
         let boxed: eyre::Report = err.clone().into();
         assert_eq!(boxed.downcast_ref::<RequestError>(), Some(&err));
+    }
+
+    /// A 503 body with \n, ESC and U+202E reaches error text and detail as printable ASCII.
+    #[tokio::test(start_paused = true)]
+    async fn a_foreign_body_reaches_the_error_text_and_the_detail_as_printable_ascii() {
+        use crate::diagnostics::{Diagnostics, Spent};
+        let body = "busy\nlevel=INFO \u{1b}[2J\u{202e}fdp.exe";
+        let (client, _) = scripted(move |_, _| Step::Answer(reply(503, Some(SERVER_DATE), body)));
+        let err = client.get_json_with_time::<Value>(URL).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "HTTP 503 Service Unavailable from api.example.com: busy?level=INFO ?[2J?fdp.exe"
+        );
+        let report = eyre::Report::new(err).wrap_err("binance BTCUSDT");
+        let asset = serde_json::from_value(serde_json::json!({
+            "symbol": "BTC/USD", "min_sources": 1, "deviation_threshold_bps": 50,
+            "heartbeat_seconds": 60,
+            "sources": { "binance": { "pair": "BTCUSDT", "quote": "USDT" } }
+        }))
+        .unwrap();
+        let diag = Diagnostics::new(&[asset], &[HOST.into()]);
+        let spent = Spent {
+            duration: Duration::ZERO,
+            attempts: 2,
+        };
+        diag.source_failed("BTC/USD", "binance", &report, spent);
+        let got: Value = serde_json::from_slice(&diag.response()).unwrap();
+        let detail = got["diagnostics"]["events"][0]["detail"].as_str().unwrap();
+        for text in [&report.to_string(), &format!("{report:#}"), detail] {
+            assert!(!text.contains(['\n', '\u{1b}', '\u{202e}']), "{text:?}");
+        }
+        assert!(detail.ends_with("busy?level=INFO ?[2J?fdp.exe"), "{detail}");
     }
 }

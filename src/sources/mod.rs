@@ -21,7 +21,7 @@ use eyre::Result;
 use tokio::time::Instant;
 
 use crate::diagnostics::{Diagnostics, Spent};
-use crate::http_client::{classify, tallied};
+use crate::http_client::{classify, printable_ascii, tallied};
 use crate::types::{AssetConfig, PricePoint};
 
 /// Trait for all price data sources. The source looks up its specific
@@ -78,7 +78,7 @@ pub async fn fetch_all(
                 let (class, http_status) = classify(&e);
                 tracing::warn!(
                     source = name,
-                    error = %e,
+                    error = %printable_ascii(&e.to_string()),
                     %class,
                     http_status,
                     attempts = spent.attempts,
@@ -92,4 +92,72 @@ pub async fn fetch_all(
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    /// Fails with an error whose text carries a newline, ESC and U+202E.
+    struct Foreign;
+
+    #[async_trait]
+    impl PriceSource for Foreign {
+        async fn fetch_price(&self, _: &AssetConfig) -> Result<Option<PricePoint>> {
+            Err(eyre::eyre!(
+                "upstream: busy\nlevel=INFO \u{1b}[2J\u{202e}fdp.exe"
+            ))
+        }
+
+        fn name(&self) -> &'static str {
+            "binance"
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A failed fetch logs one line, its error text as printable ASCII only.
+    #[tokio::test]
+    async fn a_failure_is_logged_on_one_line_of_printable_ascii() {
+        let asset: AssetConfig = serde_json::from_value(serde_json::json!({
+            "symbol": "BTC/USD", "min_sources": 1, "deviation_threshold_bps": 50,
+            "heartbeat_seconds": 60,
+            "sources": { "binance": { "pair": "BTCUSDT", "quote": "USDT" } }
+        }))
+        .unwrap();
+        let diag = Diagnostics::new(std::slice::from_ref(&asset), &[]);
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let sources: Vec<Box<dyn PriceSource>> = vec![Box::new(Foreign)];
+        let points = {
+            let _log = tracing::subscriber::set_default(subscriber);
+            fetch_all(&sources, &asset, &diag).await
+        };
+        assert!(points.is_empty());
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(log.lines().count(), 1, "{log:?}");
+        assert!(!log.contains(['\u{1b}', '\u{202e}']), "{log:?}");
+        assert!(
+            log.contains("error=upstream: busy?level=INFO ?[2J?fdp.exe"),
+            "{log:?}"
+        );
+    }
 }

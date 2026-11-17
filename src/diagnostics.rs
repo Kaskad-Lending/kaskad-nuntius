@@ -11,7 +11,7 @@ use serde::Serialize;
 use tokio::time::Instant;
 
 use crate::aggregator::OutlierDrop;
-use crate::http_client::{classify, ErrorClass, HostObserver, RequestError};
+use crate::http_client::{classify, printable_ascii, ErrorClass, HostObserver, RequestError};
 use crate::sources::ethrpc::NavReject;
 use crate::types::AssetConfig;
 
@@ -571,11 +571,7 @@ pub fn sanitize_detail(text: &str) -> String {
         rest = &tail[end..];
     }
     out.push_str(rest);
-    let mut clean: String = out
-        .trim()
-        .chars()
-        .map(|c| if matches!(c, ' '..='~') { c } else { '?' })
-        .collect();
+    let mut clean = printable_ascii(out.trim());
     if clean.len() > MAX_DETAIL_CHARS {
         clean.truncate(MAX_DETAIL_CHARS - ELLIPSIS.len());
         clean.push_str(ELLIPSIS);
