@@ -19,5 +19,5 @@ Byte-identical copies of the VUSD/USD spec files, used by `src/sources/ethrpc.rs
 
 | file | content |
 |---|---|
-| `vusd_nav_fixtures.json` | 37 response vectors with the expected price or reject reason |
+| `vusd_nav_fixtures.json` | 42 response vectors with the expected price or reject reason |
 | `vusd_nav_calldata.hex` | Multicall3 `aggregate` calldata sent to every RPC operator |

@@ -439,9 +439,9 @@ mod tests {
 
     const FIXTURES: &str = include_str!("../../testdata/vusd_nav_fixtures.json");
     const CALLDATA_HEX: &str = include_str!("../../testdata/vusd_nav_calldata.hex");
-    const FIXTURE_COUNT: usize = 37;
+    const FIXTURE_COUNT: usize = 42;
     const FIXTURES_SHA256: &str =
-        "8050900bafff1aca5d10a468bb92f075c4117cf385fae3b47e092e86d2b7489b";
+        "7e92565840b5546a511a83556aebed54467bb111e806da574a7bdd22198066ba";
     const CALLDATA_SHA256: &str =
         "7e7a2d810f05a02170b7308901e673a8c8247bc347f85a7d4613a2e7ed8adc91";
     const REQUEST_SHA256: &str = "def59f63c7ec1b9fe56b27896151fdb489c91a9a5834aee679777c928635d716";
