@@ -126,6 +126,9 @@ aws s3 cp "s3://$${BUCKET}/host${eif_release_suffix}/http_connect_proxy.py" "$${
 aws s3 cp "s3://$${BUCKET}/host${eif_release_suffix}/pontifex_host.py"      "$${KASKAD_DIR}/pontifex_host.py"      --region "$${ARTIFACT_REGION}"
 aws s3 cp "s3://$${BUCKET}/host${eif_release_suffix}/pull_api.py"           "$${KASKAD_DIR}/pull_api.py"           --region "$${ARTIFACT_REGION}"
 aws s3 cp "s3://$${BUCKET}/host${eif_release_suffix}/genesis_capture.py"    "$${KASKAD_DIR}/genesis_capture.py"    --region "$${ARTIFACT_REGION}"
+# Operator tool, not needed to boot: a bundle published before it existed lacks it.
+aws s3 cp "s3://$${BUCKET}/host${eif_release_suffix}/oracle_diag.py"        "$${KASKAD_DIR}/oracle_diag.py"        --region "$${ARTIFACT_REGION}" \
+  || echo "oracle_diag.py is not in the host bundle; booting without it"
 chmod +x "$${KASKAD_DIR}"/*.py
 
 # Enclaves boot inline below (tf-sized allocator). Front-ends (pull-api,
