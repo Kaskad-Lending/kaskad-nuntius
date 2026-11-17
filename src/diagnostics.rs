@@ -17,7 +17,7 @@ use crate::types::AssetConfig;
 
 /// Events kept; once full, the oldest is dropped and counted.
 pub const MAX_EVENTS: usize = 256;
-/// Longest failure detail kept, in chars.
+/// Longest failure detail kept, in ASCII chars.
 pub const MAX_DETAIL_CHARS: usize = 120;
 /// Cycles that `cycles.max_ms` looks back over.
 pub const CYCLE_WINDOW: usize = 32;
@@ -555,8 +555,8 @@ impl HostObserver for Diagnostics {
     }
 }
 
-/// `text` with every http(s) URL cut to its host, control characters
-/// blanked, and at most [`MAX_DETAIL_CHARS`] chars.
+/// `text` with every http(s) URL cut to its host, every char outside
+/// printable ASCII replaced by `?`, and at most [`MAX_DETAIL_CHARS`] chars.
 pub fn sanitize_detail(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
@@ -571,18 +571,20 @@ pub fn sanitize_detail(text: &str) -> String {
         rest = &tail[end..];
     }
     out.push_str(rest);
-    let blanked: String = out
+    let mut clean: String = out
+        .trim()
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if matches!(c, ' '..='~') { c } else { '?' })
         .collect();
-    let clean = blanked.trim();
-    if clean.chars().count() <= MAX_DETAIL_CHARS {
-        return clean.to_string();
+    if clean.len() > MAX_DETAIL_CHARS {
+        clean.truncate(MAX_DETAIL_CHARS - ELLIPSIS.len());
+        clean.push_str(ELLIPSIS);
     }
-    let mut cut: String = clean.chars().take(MAX_DETAIL_CHARS - 1).collect();
-    cut.push('…');
-    cut
+    clean
 }
+
+/// Marks a detail cut to [`MAX_DETAIL_CHARS`].
+const ELLIPSIS: &str = "...";
 
 fn url_start(text: &str) -> Option<usize> {
     // ASCII lowercasing keeps byte offsets.
@@ -1328,30 +1330,56 @@ mod tests {
     }
 
     #[test]
-    fn a_detail_is_cut_to_120_chars_with_control_characters_blanked() {
-        assert_eq!(
-            sanitize_detail("line one\nline\ttwo\u{1b}[31m\r\n"),
-            "line one line two [31m"
-        );
+    fn a_detail_is_cut_to_120_chars_ending_in_an_ascii_ellipsis() {
         let long = sanitize_detail(&"é".repeat(500));
-        assert_eq!(long.chars().count(), MAX_DETAIL_CHARS);
-        assert!(long.ends_with('…'));
+        assert_eq!(long, format!("{}...", "?".repeat(117)));
+        assert_eq!(
+            sanitize_detail(&"x".repeat(121)),
+            format!("{}...", "x".repeat(117))
+        );
         assert_eq!(sanitize_detail(&"x".repeat(120)), "x".repeat(120));
     }
 
-    /// Every pair of the bundled config failed with the widest detail, every host paused, a full ring of the widest events, alternating so each one is recorded.
-    fn worst_case() -> Diagnostics {
+    #[test]
+    fn every_char_outside_printable_ascii_becomes_a_question_mark() {
+        let cases = [
+            (
+                "line one\nline\ttwo\u{1b}[31m\r\n",
+                "line one?line?two?[31m",
+            ),
+            ("a\u{0}b\u{7f}c\u{85}d", "a?b?c?d"),
+            ("price \u{202e}0001\u{202c} ok", "price ?0001? ok"),
+            ("Ошибка café", "?????? caf?"),
+            ("down 😀👍🏽 now", "down ??? now"),
+            (" !~ printable ASCII stays ", "!~ printable ASCII stays"),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(sanitize_detail(raw), want, "{raw:?}");
+        }
+    }
+
+    /// The bundled config after a year of uptime: every pair failed with the
+    /// widest detail, every host paused, every counter at its type maximum and
+    /// a full ring of the widest event, pushed directly since repeats add none.
+    async fn worst_case() -> Diagnostics {
         let config = load_assets().unwrap();
         let diag = Diagnostics::new(&config.assets, &config.exchange_hostnames);
-        let wide = "😀".repeat(500);
+        let wide = eyre::eyre!("{}", "\"".repeat(MAX_DETAIL_CHARS));
+        let pair_gap = SkipReason::PairGap {
+            gap_bps: f64::MAX,
+            limit_bps: u16::MAX,
+        };
         for asset in &config.assets {
             for source in asset.sources.keys() {
-                diag.source_failed(
-                    &asset.symbol,
-                    source,
-                    &eyre::eyre!("{wide}"),
-                    spent(4000, 2),
-                );
+                diag.source_ok(&asset.symbol, source, spent(1, 1));
+            }
+            let signed = AssetCycle::new(PricePath::Rest, asset.sources.len());
+            diag.asset_signed(&asset.symbol, signed, u8::MAX, f64::MAX);
+        }
+        tokio::time::advance(Duration::from_secs(365 * 86_400)).await;
+        for asset in &config.assets {
+            for source in asset.sources.keys() {
+                diag.source_failed(&asset.symbol, source, &wide, spent(u64::MAX, u32::MAX));
                 diag.operator(
                     source,
                     OperatorOutcome::Rejected {
@@ -1360,9 +1388,7 @@ mod tests {
                     },
                 );
             }
-            let signed = AssetCycle::new(PricePath::Rest, asset.sources.len());
-            diag.asset_signed(&asset.symbol, signed, u8::MAX, f64::MAX);
-            let mut cycle = AssetCycle::new(PricePath::Rest, asset.sources.len());
+            let mut cycle = AssetCycle::new(PricePath::Rest, usize::MAX);
             cycle.outliers = asset
                 .sources
                 .keys()
@@ -1372,17 +1398,15 @@ mod tests {
                     deviation_bps: f64::MAX,
                 })
                 .collect();
-            diag.asset_skipped(
-                &asset.symbol,
-                cycle,
-                SkipReason::PairGap {
-                    gap_bps: f64::MAX,
-                    limit_bps: u16::MAX,
-                },
-            );
+            diag.asset_skipped(&asset.symbol, cycle, pair_gap);
         }
         for host in &config.exchange_hostnames {
-            diag.pause_started(host, ErrorClass::Blocked, 451, Duration::from_secs(600));
+            let length = Duration::from_secs(600);
+            diag.pause_started(host, ErrorClass::RateLimited, 429, length);
+        }
+        diag.nav_round(usize::MAX, Duration::from_millis(u64::MAX));
+        for _ in 0..CYCLE_WINDOW {
+            diag.cycle_finished(Duration::from_millis(u64::MAX));
         }
         let (asset, source) = config
             .assets
@@ -1394,26 +1418,63 @@ mod tests {
             })
             .max_by_key(|(a, s)| a.len() + s.len())
             .unwrap();
-        for n in 0..MAX_EVENTS {
-            let error = match n % 2 {
-                0 => eyre::eyre!("{wide}"),
-                _ => http_failure(503, &wide),
-            };
-            diag.source_failed(asset, source, &error, spent(4000, 2));
+        let widest = EventKind::SourceFailed {
+            asset: asset.into(),
+            source: source.into(),
+            class: ErrorClass::ServerError,
+            http_status: Some(u16::MAX),
+            attempts: u32::MAX,
+            detail: sanitize_detail(&format!("{wide}")),
+        };
+        let mut state = diag.lock();
+        for _ in 0..MAX_EVENTS {
+            state.push(diag.started, widest.clone());
         }
+        state.cycles = u64::MAX;
+        state.events_dropped = u64::MAX;
+        state.ethrpc.rounds = u64::MAX;
+        for host in state.hosts.values_mut() {
+            (host.pauses, host.suppressed) = (u64::MAX, u64::MAX);
+        }
+        for asset in state.assets.values_mut() {
+            (asset.signed, asset.skipped) = (u64::MAX, u64::MAX);
+            asset.skipped_by_reason = SkipCounts {
+                quorum_not_met: u64::MAX,
+                no_server_time: u64::MAX,
+                quorum_lost: u64::MAX,
+                pair_gap: u64::MAX,
+                no_prices_after_filtering: u64::MAX,
+                fixed_point_rejected: u64::MAX,
+            };
+            for source in asset.sources.values_mut() {
+                source.ok = u64::MAX;
+                source.failed = u64::MAX;
+                source.consecutive_failures = u64::MAX;
+                source.outliers = u64::MAX;
+            }
+        }
+        drop(state);
         diag
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_worst_case_response_fits_the_limit_as_valid_json() {
-        let diag = worst_case();
+    async fn the_worst_case_response_fits_the_limit_with_every_event() {
+        let diag = worst_case().await;
         let bytes = diag.response();
-        assert!(bytes.len() <= MAX_RESPONSE_BYTES, "{} bytes", bytes.len());
         let got: Value = serde_json::from_slice(&bytes).unwrap();
         let events = got["diagnostics"]["events"].as_array().unwrap();
-        let truncated = got["diagnostics"]["events_truncated"].as_u64().unwrap() as usize;
-        assert_eq!(events.len() + truncated, MAX_EVENTS);
-        assert!(!events.is_empty(), "the newest events survive");
+        assert_eq!(
+            got["diagnostics"]["events_truncated"],
+            0,
+            "{} bytes",
+            bytes.len()
+        );
+        assert_eq!(events.len(), MAX_EVENTS);
+        assert_eq!(
+            events[0]["detail"].as_str().unwrap().len(),
+            MAX_DETAIL_CHARS
+        );
+        assert!(bytes.len() <= MAX_RESPONSE_BYTES, "{} bytes", bytes.len());
     }
 
     #[tokio::test(start_paused = true)]
