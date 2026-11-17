@@ -12,6 +12,10 @@
 ///   {"method": "get_price", "asset": "ETH/USD"}  → single asset (freshly signed)
 ///   {"method": "get_attestation"}                → attestation doc
 ///   {"method": "health"}                         → server status
+///   {"method": "get_diagnostics"}                → request outcomes, skips and pauses;
+///                                                  for host-side operator tools only,
+///                                                  the public pull API never routes it
+use crate::diagnostics::Diagnostics;
 use crate::signer::OracleSigner;
 use crate::types::SignedPriceUpdate;
 use crate::{PriceStore, SharedSigner};
@@ -47,6 +51,8 @@ const REQUEST_DEADLINE: Duration = Duration::from_secs(15);
 /// indirectly. AWS Nitro leaf certs live ~3 h, so caching for 5 min
 /// is well inside the validity window and removes the DoS primitive.
 const ATTESTATION_CACHE_TTL: Duration = Duration::from_secs(300);
+
+const DIAGNOSTICS_METHOD: &str = "get_diagnostics";
 
 #[derive(Deserialize)]
 struct PriceRequest {
@@ -94,6 +100,7 @@ pub async fn run_price_server(
     store: PriceStore,
     signer: SharedSigner,
     signer_address: String,
+    diag: Arc<Diagnostics>,
 ) -> Result<()> {
     info!(port = port, "Starting VSOCK price server");
 
@@ -124,12 +131,13 @@ pub async fn run_price_server(
         let store = store.clone();
         let signer = signer.clone();
         let signer_addr = signer_address.clone();
+        let diag = Arc::clone(&diag);
 
         tokio::task::spawn_blocking(move || {
             // `_permit` is dropped (released) when the closure returns,
             // so the semaphore count tracks live handlers exactly.
             let _permit = permit;
-            if handle_connection(stream, &store, &signer, &signer_addr).is_err() {
+            if handle_connection(stream, &store, &signer, &signer_addr, &diag).is_err() {
                 // Audit R-8: do NOT include the raw error message — a
                 // serde_json parse error on attacker-controlled bytes
                 // would otherwise echo those bytes into host-readable
@@ -148,6 +156,7 @@ fn handle_connection(
     store: &PriceStore,
     signer: &SharedSigner,
     signer_address: &str,
+    diag: &Diagnostics,
 ) -> Result<()> {
     use std::io::Write;
 
@@ -166,9 +175,7 @@ fn handle_connection(
     read_exact_with_deadline(&mut stream, &mut req_buf, deadline)?;
 
     let request: PriceRequest = serde_json::from_slice(&req_buf)?;
-    let response = process_request(&request, store, signer, signer_address);
-
-    let resp_bytes = serde_json::to_vec(&response)?;
+    let resp_bytes = respond(&request, store, signer, signer_address, diag)?;
     stream.write_all(&(resp_bytes.len() as u32).to_be_bytes())?;
     stream.write_all(&resp_bytes)?;
     stream.flush()?;
@@ -305,6 +312,21 @@ fn attestation_gate(signer: &dyn OracleSigner) -> Option<PriceResponse> {
         return None;
     }
     Some(attestation_unavailable_response())
+}
+
+/// Serialized response to one request.
+fn respond(
+    request: &PriceRequest,
+    store: &PriceStore,
+    signer: &SharedSigner,
+    signer_address: &str,
+    diag: &Diagnostics,
+) -> Result<Vec<u8>> {
+    if request.method == DIAGNOSTICS_METHOD {
+        return Ok(diag.response());
+    }
+    let response = process_request(request, store, signer, signer_address);
+    Ok(serde_json::to_vec(&response)?)
 }
 
 fn process_request(
@@ -693,6 +715,76 @@ mod tests {
             Some(false),
             "health must surface attestation_unhealthy for a Nitro signer with no NSM"
         );
+    }
+
+    fn keys_of(value: &serde_json::Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// The parsed wire response of `method` from a mock-signer enclave holding ETH/USD.
+    async fn answer(method: &str, asset: Option<&str>) -> serde_json::Value {
+        let store = empty_store();
+        store.write().await.insert("ETH/USD".into(), fake_price());
+        let signer: SharedSigner = Arc::new(crate::signer::MockSigner::random());
+        let diag = Diagnostics::new(&[], &[]);
+        let req = PriceRequest {
+            method: method.into(),
+            asset: asset.map(Into::into),
+        };
+        let bytes =
+            tokio::task::block_in_place(|| respond(&req, &store, &signer, "0xab", &diag)).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn public_methods_keep_their_response_keys() {
+        let prices = answer("get_prices", None).await;
+        assert_eq!(keys_of(&prices), ["num_assets", "prices", "signer"]);
+        let update = [
+            "asset_id",
+            "asset_symbol",
+            "num_sources",
+            "price",
+            "price_human",
+            "signature",
+            "signer",
+            "sources_hash",
+            "timestamp",
+        ];
+        assert_eq!(keys_of(&prices["prices"][0]), update);
+        let price = answer("get_price", Some("ETH/USD")).await;
+        assert_eq!(keys_of(&price), ["price", "signer"]);
+        assert_eq!(keys_of(&price["price"]), update);
+        assert_eq!(
+            keys_of(&answer("health", None).await),
+            [
+                "equal_weight_fallbacks",
+                "num_assets",
+                "signer",
+                "status",
+                "usdt_rate_assumed"
+            ]
+        );
+        assert_eq!(
+            keys_of(&answer("get_attestation", None).await),
+            ["error", "signer"]
+        );
+        assert_eq!(keys_of(&answer("get_prices ", None).await), ["error"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_diagnostics_answers_with_the_diagnostics_only() {
+        let got = answer(DIAGNOSTICS_METHOD, None).await;
+        assert_eq!(keys_of(&got), ["diagnostics", "status"]);
+        assert_eq!(got["status"], "ok");
+        assert!(got["diagnostics"]["events"].is_array());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

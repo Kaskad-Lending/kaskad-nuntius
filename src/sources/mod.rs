@@ -20,7 +20,8 @@ use async_trait::async_trait;
 use eyre::Result;
 use tokio::time::Instant;
 
-use crate::http_client::{ErrorClass, RequestError};
+use crate::diagnostics::{Diagnostics, Spent};
+use crate::http_client::{classify, tallied};
 use crate::types::{AssetConfig, PricePoint};
 
 /// Trait for all price data sources. The source looks up its specific
@@ -37,8 +38,13 @@ pub trait PriceSource: Send + Sync {
 
 /// Fetch prices from all sources concurrently. Sources that don't support
 /// the asset return None and are skipped. Errors are logged and their
-/// source omitted from this cycle's sample.
-pub async fn fetch_all(sources: &[Box<dyn PriceSource>], asset: &AssetConfig) -> Vec<PricePoint> {
+/// source omitted from this cycle's sample; every answer or failure is
+/// recorded in `diag`.
+pub async fn fetch_all(
+    sources: &[Box<dyn PriceSource>],
+    asset: &AssetConfig,
+    diag: &Diagnostics,
+) -> Vec<PricePoint> {
     let mut handles = Vec::new();
 
     for source in sources {
@@ -50,28 +56,37 @@ pub async fn fetch_all(sources: &[Box<dyn PriceSource>], asset: &AssetConfig) ->
     let mut results = Vec::new();
     for (name, fut) in handles {
         let started = Instant::now();
-        let outcome = fut.await;
-        let duration_ms = started.elapsed().as_millis() as u64;
+        let (outcome, tally) = tallied(fut).await;
+        let spent = Spent {
+            duration: if tally.calls > 0 {
+                tally.elapsed
+            } else {
+                started.elapsed()
+            },
+            attempts: tally.attempts,
+        };
         match outcome {
             Ok(Some(pp)) => {
                 tracing::info!(source = name, price = pp.price, "fetched {}", asset.symbol);
+                diag.source_ok(&asset.symbol, name, spent);
                 results.push(pp);
             }
             Ok(None) => {
                 tracing::debug!(source = name, "doesn't support {}", asset.symbol);
             }
             Err(e) => {
-                let request = e.downcast_ref::<RequestError>();
+                let (class, http_status) = classify(&e);
                 tracing::warn!(
                     source = name,
                     error = %e,
-                    class = %request.map_or(ErrorClass::BadResponse, RequestError::class),
-                    http_status = request.and_then(RequestError::http_status),
-                    attempts = request.map(|r| r.attempts),
-                    duration_ms,
+                    %class,
+                    http_status,
+                    attempts = spent.attempts,
+                    duration_ms = spent.duration.as_millis() as u64,
                     "failed to fetch {}",
                     asset.symbol
                 );
+                diag.source_failed(&asset.symbol, name, &e, spent);
             }
         }
     }

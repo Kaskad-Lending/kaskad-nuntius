@@ -17,7 +17,8 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use super::PriceSource;
-use crate::http_client::{HttpClient, RetryPolicy, GET_POLICY};
+use crate::diagnostics::{Diagnostics, OperatorOutcome};
+use crate::http_client::{add_to_tally, tallied, HttpClient, RetryPolicy, Tally, GET_POLICY};
 use crate::types::{AssetConfig, PricePoint};
 
 /// The only pair these sources serve; any other pair is a config error.
@@ -176,8 +177,9 @@ impl Operator {
 
 /// Why a response yields no sample. Variants follow the SPEC §4 check order;
 /// the first failing check decides.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NavReject {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum NavReject {
     RpcError,
     BadEncoding,
     BadLength,
@@ -305,13 +307,19 @@ struct NavSample {
 /// which replaces every slot; the lock keeps concurrent takes to one round.
 struct NavPoller {
     transport: Box<dyn RpcTransport>,
-    slots: Mutex<[Option<Result<NavSample>>; OPERATORS]>,
+    diag: Arc<Diagnostics>,
+    slots: Mutex<Slots>,
 }
 
+/// One round's outcome per operator, with the HTTP cost of its poll charged
+/// to whichever source takes it.
+type Slots = [Option<(Result<NavSample>, Tally)>; OPERATORS];
+
 impl NavPoller {
-    fn new(transport: Box<dyn RpcTransport>) -> Self {
+    fn new(transport: Box<dyn RpcTransport>, diag: Arc<Diagnostics>) -> Self {
         Self {
             transport,
+            diag,
             slots: Mutex::new([const { None }; OPERATORS]),
         }
     }
@@ -321,16 +329,19 @@ impl NavPoller {
         if slots[operator.slot()].is_none() {
             *slots = self.round().await;
         }
-        slots[operator.slot()]
-            .take()
-            .unwrap_or_else(|| Err(eyre!("{}: round left no result", operator.name())))
+        let Some((outcome, tally)) = slots[operator.slot()].take() else {
+            return Err(eyre!("{}: round left no result", operator.name()));
+        };
+        add_to_tally(tally);
+        outcome
     }
 
     /// Polls every operator at once; each slot holds its operator's outcome.
-    async fn round(&self) -> [Option<Result<NavSample>>; OPERATORS] {
+    async fn round(&self) -> Slots {
         let started = Instant::now();
         let outcomes = join_all(
-            Operator::ALL.map(|operator| async move { (operator, self.poll(operator).await) }),
+            Operator::ALL
+                .map(|operator| async move { (operator, tallied(self.poll(operator)).await) }),
         )
         .await;
         let mut slots = [const { None }; OPERATORS];
@@ -338,12 +349,14 @@ impl NavPoller {
             slots[operator.slot()] = Some(outcome);
         }
 
-        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let elapsed = started.elapsed();
+        let elapsed_ms = elapsed.as_millis() as u64;
         let blocks: Vec<U256> = slots
             .iter()
             .flatten()
-            .filter_map(|r| r.as_ref().ok().map(|s| s.block))
+            .filter_map(|(r, _)| r.as_ref().ok().map(|s| s.block))
             .collect();
+        self.diag.nav_round(blocks.len(), elapsed);
         match (blocks.iter().min(), blocks.iter().max()) {
             (Some(min_block), Some(max_block)) => info!(
                 accepted = blocks.len(),
@@ -362,12 +375,31 @@ impl NavPoller {
     }
 
     async fn poll(&self, operator: Operator) -> Result<NavSample> {
-        let (body, server_time) = self
+        let posted = self
             .transport
             .post(operator.url(), REQUEST_BODY.as_slice())
-            .await?;
-        let reading = parse_nav(&body, server_time)
-            .map_err(|reject| eyre!("{} response rejected: {}", VUSD_NAV, reject))?;
+            .await;
+        let (body, server_time) = match posted {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.diag
+                    .operator(operator.name(), OperatorOutcome::failed(&error));
+                return Err(error);
+            }
+        };
+        let reading = match parse_nav(&body, server_time) {
+            Ok(reading) => reading,
+            Err(reject) => {
+                let rpc_code = body.pointer("/error/code").and_then(Value::as_i64);
+                let outcome = OperatorOutcome::Rejected { reject, rpc_code };
+                self.diag.operator(operator.name(), outcome);
+                return Err(eyre!("{} response rejected: {}", VUSD_NAV, reject));
+            }
+        };
+        let accepted = OperatorOutcome::Accepted {
+            price_1e8: reading.price_1e8,
+        };
+        self.diag.operator(operator.name(), accepted);
         debug!(
             source = operator.name(),
             block = %reading.block,
@@ -430,9 +462,10 @@ fn operator_sources(poller: Arc<NavPoller>) -> Vec<Box<dyn PriceSource>> {
         .collect()
 }
 
-/// The eight operator sources, sharing one poller over `client`.
-pub fn sources(client: HttpClient) -> Vec<Box<dyn PriceSource>> {
-    operator_sources(Arc::new(NavPoller::new(Box::new(client))))
+/// The eight operator sources, sharing one poller over `client` that
+/// records each operator's outcome in `diag`.
+pub fn sources(client: HttpClient, diag: Arc<Diagnostics>) -> Vec<Box<dyn PriceSource>> {
+    operator_sources(Arc::new(NavPoller::new(Box::new(client), diag)))
 }
 
 #[cfg(test)]
@@ -728,7 +761,12 @@ mod tests {
             barrier,
             delay,
         };
-        (Arc::new(NavPoller::new(Box::new(transport))), calls)
+        (Arc::new(NavPoller::new(Box::new(transport), diag())), calls)
+    }
+
+    fn diag() -> Arc<Diagnostics> {
+        let config = load_assets().unwrap();
+        Arc::new(Diagnostics::new(&config.assets, &config.exchange_hostnames))
     }
 
     fn vusd_asset() -> AssetConfig {
@@ -746,7 +784,7 @@ mod tests {
         let sources = operator_sources(poller);
         let asset = vusd_asset();
         for cycle in 0..2 {
-            let points = fetch_all(&sources, &asset).await;
+            let points = fetch_all(&sources, &asset, &diag()).await;
             assert_eq!(calls.load(Ordering::SeqCst), OPERATORS * (cycle + 1));
             assert_eq!(points.len(), OPERATORS);
             for (point, operator) in points.iter().zip(Operator::ALL) {
@@ -802,13 +840,52 @@ mod tests {
             }
         }
         assert_eq!(calls.load(Ordering::SeqCst), OPERATORS);
-        let points = fetch_all(&sources, &asset).await;
+        let points = fetch_all(&sources, &asset, &diag()).await;
         assert_eq!(
             points.len(),
             OPERATORS,
             "every operator recovers next cycle"
         );
         assert!(points.iter().all(|p| p.price == healthy_price(1)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_round_records_each_operator_outcome_and_charges_each_source_its_own_poll() {
+        let (poller, _) = wired(|url, _| {
+            if url == Operator::Tenderly.url() {
+                status(404)
+            } else if url == Operator::Drpc.url() {
+                rpc_error(-32005)
+            } else {
+                accepted(BLOCK_TS)
+            }
+        });
+        let diag = Arc::clone(&poller.diag);
+        let sources = operator_sources(poller);
+        let points = fetch_all(&sources, &vusd_asset(), &diag).await;
+        assert_eq!(points.len(), OPERATORS - 2);
+
+        let got: Value = serde_json::from_slice(&diag.response()).unwrap();
+        let ethrpc = &got["diagnostics"]["ethrpc"];
+        assert_eq!(ethrpc["rounds"], 1);
+        assert_eq!(ethrpc["last_round"]["accepted"], OPERATORS - 2);
+        let operators = ethrpc["operators"].as_object().unwrap();
+        assert_eq!(operators.len(), OPERATORS);
+        assert_eq!(
+            operators["ethrpc_tenderly"],
+            serde_json::json!({ "age_s": 0.0, "outcome": "failed", "class": "client_error", "http_status": 404, "attempts": 1 })
+        );
+        assert_eq!(
+            operators["ethrpc_drpc"],
+            serde_json::json!({ "age_s": 0.0, "outcome": "rejected", "reject": "RPC_ERROR", "rpc_code": -32005 })
+        );
+        assert_eq!(operators["ethrpc_nodies"]["outcome"], "accepted");
+        let pairs = &got["diagnostics"]["assets"][VUSD_SYMBOL]["sources"];
+        for operator in Operator::ALL {
+            assert_eq!(pairs[operator.name()]["last_attempts"], 1, "{operator:?}");
+        }
+        assert_eq!(pairs["ethrpc_drpc"]["last"]["class"], "bad_response");
+        assert_eq!(pairs["ethrpc_tenderly"]["last"]["http_status"], 404);
     }
 
     #[tokio::test]
@@ -931,7 +1008,7 @@ mod tests {
         let exchange = MockExchange::new(plan);
         let hosts = load_assets().unwrap().exchange_hostnames;
         let client = HttpClient::with_exchange(exchange.clone(), hosts);
-        (Arc::new(NavPoller::new(Box::new(client))), exchange)
+        (Arc::new(NavPoller::new(Box::new(client), diag())), exchange)
     }
 
     #[derive(Debug)]
@@ -1182,9 +1259,9 @@ mod tests {
         });
         let sources = operator_sources(poller);
         let asset = vusd_asset();
-        assert!(fetch_all(&sources, &asset).await.is_empty());
+        assert!(fetch_all(&sources, &asset, &diag()).await.is_empty());
         assert_eq!(exchange.sent().len(), 2 * OPERATORS);
-        assert_eq!(fetch_all(&sources, &asset).await.len(), OPERATORS);
+        assert_eq!(fetch_all(&sources, &asset, &diag()).await.len(), OPERATORS);
         assert_eq!(exchange.sent().len(), 3 * OPERATORS);
         for operator in Operator::ALL {
             assert_eq!(exchange.count(operator.url()), 3, "{operator:?}");
@@ -1199,7 +1276,10 @@ mod tests {
         });
         let sources = operator_sources(poller);
         let asset = vusd_asset();
-        assert_eq!(fetch_all(&sources, &asset).await.len(), OPERATORS - 1);
+        assert_eq!(
+            fetch_all(&sources, &asset, &diag()).await.len(),
+            OPERATORS - 1
+        );
         assert_eq!(exchange.sent().len(), OPERATORS);
 
         tokio::time::sleep(Duration::from_secs(5)).await;

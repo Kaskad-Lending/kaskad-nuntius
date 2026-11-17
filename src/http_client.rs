@@ -5,8 +5,10 @@
 //! the server `Date`; the enclave never reads its own clock for signing
 //! (audit C-3/H-9).
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -448,11 +450,67 @@ fn parse_retry_after(value: &str, date: Option<u64>) -> Option<Duration> {
     Some(Duration::from_secs(at.saturating_sub(date?)))
 }
 
+/// Class and HTTP status of a source error; an error that did not come from
+/// [`HttpClient`] is `BadResponse`.
+pub fn classify(error: &eyre::Report) -> (ErrorClass, Option<u16>) {
+    match error.downcast_ref::<RequestError>() {
+        Some(request) => (request.class(), request.http_status()),
+        None => (ErrorClass::BadResponse, None),
+    }
+}
+
 /// A host pause: when it ends and the class that started it.
 #[derive(Debug, Clone, Copy)]
 struct Pause {
     until: Instant,
     cause: ErrorClass,
+}
+
+/// Told about host pauses; called with no client lock held.
+pub trait HostObserver: Send + Sync {
+    fn pause_started(&self, host: &str, cause: ErrorClass, http_status: u16, length: Duration);
+    /// The pause was found expired, or a success on the host cleared it.
+    fn pause_ended(&self, host: &str);
+    /// A request was not sent because the host is paused.
+    fn suppressed(&self, host: &str);
+}
+
+/// What the [`HttpClient`] calls made inside one [`tallied`] future cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub calls: u32,
+    pub attempts: u32,
+    pub elapsed: Duration,
+}
+
+impl Tally {
+    fn plus(self, other: Tally) -> Tally {
+        Tally {
+            calls: self.calls + other.calls,
+            attempts: self.attempts + other.attempts,
+            elapsed: self.elapsed + other.elapsed,
+        }
+    }
+}
+
+tokio::task_local! {
+    static TALLY: Cell<Tally>;
+}
+
+/// Runs `fut` and returns its output with the cost of its HTTP calls.
+pub async fn tallied<F: Future>(fut: F) -> (F::Output, Tally) {
+    TALLY
+        .scope(Cell::new(Tally::default()), async move {
+            let output = fut.await;
+            (output, TALLY.with(Cell::get))
+        })
+        .await
+}
+
+/// Adds `tally` to the enclosing [`tallied`] scope; a no-op outside one.
+pub fn add_to_tally(tally: Tally) {
+    // AccessError only means no scope is measuring.
+    let _ = TALLY.try_with(|cell| cell.set(cell.get().plus(tally)));
 }
 
 /// HTTP client shared by every source; clones share the host pauses.
@@ -465,6 +523,7 @@ pub struct HttpClient {
     allowed_hosts: Vec<String>,
     /// Keyed by allowlisted hostname only, so bounded by the allowlist.
     pauses: Arc<Mutex<HashMap<String, Pause>>>,
+    observer: Option<Arc<dyn HostObserver>>,
 }
 
 fn build_client(proxy: Option<&str>, redirect: reqwest::redirect::Policy) -> reqwest::Client {
@@ -500,7 +559,14 @@ impl HttpClient {
             exchange,
             allowed_hosts,
             pauses: Arc::default(),
+            observer: None,
         }
+    }
+
+    /// Reports host pauses to `observer`; clones made after this share it.
+    pub fn with_observer(mut self, observer: Arc<dyn HostObserver>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// GET under [`GET_POLICY`]: the parsed body and the server `Date` as unix seconds.
@@ -529,25 +595,43 @@ impl HttpClient {
         body: Option<&'static [u8]>,
         policy: &RetryPolicy,
     ) -> Result<(T, u64), RequestError> {
+        let started = Instant::now();
+        let mut attempts = 0;
+        let result = self.attempt(method, url, body, policy, &mut attempts).await;
+        add_to_tally(Tally {
+            calls: 1,
+            attempts,
+            elapsed: started.elapsed(),
+        });
+        result
+    }
+
+    async fn attempt<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&'static [u8]>,
+        policy: &RetryPolicy,
+        attempts: &mut u32,
+    ) -> Result<(T, u64), RequestError> {
         let host = self.check_host(url)?;
         let deadline = Instant::now() + policy.deadline;
-        let mut attempts = 0;
         let mut previous: Option<HttpError> = None;
         loop {
             if let Some(cooling) = self.cooling_down(&host) {
                 return Err(RequestError {
                     host,
-                    attempts,
+                    attempts: *attempts,
                     error: previous.unwrap_or(cooling),
                 });
             }
-            attempts += 1;
+            *attempts += 1;
             let remaining = deadline.saturating_duration_since(Instant::now());
             let sent = self.exchange.send(method, url, body, remaining);
             let error = match tokio::time::timeout(remaining, sent).await {
                 Ok(Ok(reply)) => match interpret(reply) {
                     Ok(value) => {
-                        self.lock_pauses().remove(&host);
+                        self.end_pause(&host);
                         return Ok(value);
                     }
                     Err(error) => error,
@@ -555,13 +639,14 @@ impl HttpClient {
                 Ok(Err(error)) => error,
                 Err(_) => HttpError::Timeout,
             };
-            if let Some((_, length)) = error.host_pause(&HOST_PAUSES) {
-                self.start_pause(&host, error.class(), length);
+            if let Some((status, length)) = error.host_pause(&HOST_PAUSES) {
+                self.start_pause(&host, error.class(), status, length);
             }
             let left = deadline.saturating_duration_since(Instant::now());
             match error.retry_pause(policy) {
                 Some(pause)
-                    if attempts < policy.max_attempts && left >= pause + policy.min_after_pause =>
+                    if *attempts < policy.max_attempts
+                        && left >= pause + policy.min_after_pause =>
                 {
                     tokio::time::sleep(pause).await;
                     previous = Some(error);
@@ -569,7 +654,7 @@ impl HttpClient {
                 _ => {
                     return Err(RequestError {
                         host,
-                        attempts,
+                        attempts: *attempts,
                         error,
                     })
                 }
@@ -613,25 +698,45 @@ impl HttpClient {
     /// The pause still running for `host`; an expired one is dropped.
     fn cooling_down(&self, host: &str) -> Option<HttpError> {
         let now = Instant::now();
-        let mut pauses = self.lock_pauses();
-        let pause = *pauses.get(host)?;
-        if now >= pause.until {
-            pauses.remove(host);
-            return None;
+        let pause = {
+            let mut pauses = self.lock_pauses();
+            let pause = *pauses.get(host)?;
+            if now >= pause.until {
+                pauses.remove(host);
+            }
+            pause
+        };
+        let expired = now >= pause.until;
+        if let Some(observer) = &self.observer {
+            if expired {
+                observer.pause_ended(host);
+            } else {
+                observer.suppressed(host);
+            }
         }
-        Some(HttpError::CoolingDown {
+        (!expired).then(|| HttpError::CoolingDown {
             remaining: pause.until - now,
             cause: pause.cause,
         })
     }
 
-    fn start_pause(&self, host: &str, cause: ErrorClass, length: Duration) {
+    fn start_pause(&self, host: &str, cause: ErrorClass, status: u16, length: Duration) {
         if length.is_zero() {
             return;
         }
         let until = Instant::now() + length;
         self.lock_pauses()
             .insert(host.to_string(), Pause { until, cause });
+        if let Some(observer) = &self.observer {
+            observer.pause_started(host, cause, status, length);
+        }
+    }
+
+    fn end_pause(&self, host: &str) {
+        let ended = self.lock_pauses().remove(host).is_some();
+        if let (true, Some(observer)) = (ended, &self.observer) {
+            observer.pause_ended(host);
+        }
     }
 }
 
@@ -1430,6 +1535,87 @@ mod tests {
                 .expect("no pause");
             assert_eq!(exchange.count(URL), sent + 1, "{code}");
         }
+    }
+
+    #[derive(Default)]
+    struct Heard(Mutex<Vec<String>>);
+
+    impl Heard {
+        fn push(&self, line: String) {
+            self.0.lock().unwrap().push(line);
+        }
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    impl HostObserver for Heard {
+        fn pause_started(&self, host: &str, cause: ErrorClass, status: u16, length: Duration) {
+            self.push(format!(
+                "start {host} {cause} {status} {}s",
+                length.as_secs()
+            ));
+        }
+        fn pause_ended(&self, host: &str) {
+            self.push(format!("end {host}"));
+        }
+        fn suppressed(&self, host: &str) {
+            self.push(format!("suppressed {host}"));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_observer_hears_each_pause_start_suppression_and_end_once() {
+        let heard = Arc::new(Heard::default());
+        let (client, _) = scripted(|url, nth| match (url, nth) {
+            (URL, 0) => status(429),
+            _ => ok(),
+        });
+        let client = client.with_observer(heard.clone());
+        let started = Instant::now();
+        client.get_json_with_time::<Value>(URL).await.unwrap_err();
+        client.get_json_with_time::<Value>(URL).await.unwrap_err();
+        assert_eq!(
+            heard.take(),
+            [
+                format!("start {HOST} rate_limited 429 30s"),
+                format!("suppressed {HOST}")
+            ]
+        );
+        tokio::time::sleep_until(started + Duration::from_secs(30)).await;
+        client.get_json_with_time::<Value>(URL).await.unwrap();
+        client.get_json_with_time::<Value>(URL).await.unwrap();
+        assert_eq!(heard.take(), [format!("end {HOST}")]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tallied_measures_only_the_calls_inside_its_own_scope() {
+        let (client, _) = scripted(|url, nth| match (url, nth) {
+            (URL, 0) => status(503),
+            _ => Step::After(Duration::from_millis(40), Box::new(ok())),
+        });
+        client.get_json_with_time::<Value>(OTHER_URL).await.unwrap();
+        let (inner, outer) = tallied(async {
+            let (_, inner) = tallied(client.get_json_with_time::<Value>(URL)).await;
+            client.get_json_with_time::<Value>(OTHER_URL).await.unwrap();
+            add_to_tally(inner);
+            inner
+        })
+        .await;
+        let retried = Tally {
+            calls: 1,
+            attempts: 2,
+            elapsed: Duration::from_millis(290),
+        };
+        assert_eq!(inner, retried);
+        assert_eq!(
+            outer,
+            Tally {
+                calls: 2,
+                attempts: 3,
+                elapsed: Duration::from_millis(330)
+            }
+        );
     }
 
     #[test]
