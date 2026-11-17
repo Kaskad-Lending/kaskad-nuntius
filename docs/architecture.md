@@ -159,7 +159,7 @@ The `OracleSigner` trait makes the switch transparent — same oracle logic, dif
 
 ## Source Failures and Diagnostics
 
-`HttpClient` gives every failed request one class: `rate_limited` (429/418), `blocked` (403/451), `client_error`, `server_error`, `timeout`, `network`, `bad_response`, `config` or `cooling_down`. The last two send nothing. A connect attempt that times out is `timeout`, not `network`. A non-2xx body preview (200 bytes) and the logged `error` field keep printable ASCII and space only; every other char becomes `?`.
+`HttpClient` gives every failed request one class: `rate_limited` (429/418), `blocked` (403/451), `client_error`, `server_error`, `timeout`, `network`, `bad_response`, `config` or `cooling_down`. The last two send nothing. A connect attempt that times out is `timeout`, not `network`. The text of a client error (a non-2xx body preview of 200 bytes, the transport or parse detail) and the `error` field of the fetch log line keep printable ASCII and space only; every other char becomes `?`.
 
 - **Retry:** at most 2 attempts within the call deadline (GET 10 s, VUSD JSON-RPC 4 s). Retried: `network`, 408/425/500/502/503/504, and 429 with `Retry-After` ≤ 1 s. The retry waits 250 ms (or that `Retry-After`) and needs the wait plus 1 s left before the deadline.
 - **Retry right:** per host. The first call has it, and so does every call after one that ended in a 2xx the client accepted (`Date`, size cap, JSON; a JSON-RPC `error` counts). After any other outcome that reached the network, an unaccepted 2xx included, the next call gets one attempt. Calls that send nothing leave it unchanged.

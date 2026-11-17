@@ -103,7 +103,7 @@ Every failed request has one class, logged with its HTTP status, attempt count a
 | `config` | invalid URL or host outside the allowlist; nothing sent |
 | `cooling_down` | host paused; nothing sent |
 
-The body preview in a non-2xx error (its first 200 bytes) keeps only printable ASCII and space, and so does the logged `error` field; every other char becomes `?`.
+The text of a client error keeps only printable ASCII and space: the body preview of a non-2xx reply (its first 200 bytes) and the transport or parse detail. So does the `error` field of the fetch log line. Every other char becomes `?`.
 
 **Retry.** At most 2 attempts inside one deadline (GET 10 s; the VUSD JSON-RPC POST 4 s, shared by both attempts). Only `network`, HTTP 408/425/500/502/503/504 and a 429 whose `Retry-After` is ≤ 1 s are retried. The retry waits 250 ms (a 429 waits its `Retry-After`) and runs only if at least that wait plus 1 s is left before the deadline. A retry also needs the host's retry right: the first call to a host has it, and so does every call after one that ended in a 2xx the client accepted (`Date` present, body within the cap and JSON, a JSON-RPC `error` included). After any other outcome that reached the network, including an unaccepted 2xx, the next call gets one attempt. A `config` or `cooling_down` refusal sends nothing and leaves the right as it was.
 

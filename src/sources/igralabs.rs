@@ -4,6 +4,7 @@ use eyre::{eyre, Result};
 use serde::Deserialize;
 
 use super::PriceSource;
+use crate::http_client::printable_ascii;
 use crate::types::{AssetConfig, PricePoint};
 
 /// Igra Labs TWAP aggregator — `apis.igralabs.com/twap/prices`.
@@ -62,7 +63,7 @@ impl PriceSource for IgraLabs {
             Ok(dt) => dt.timestamp() as u64,
             Err(e) => {
                 tracing::warn!(
-                    updated_at = %ticker.updated_at,
+                    updated_at = %printable_ascii(&ticker.updated_at),
                     error = %e,
                     "igralabs: failed to parse updated_at, using HTTP Date"
                 );
@@ -80,7 +81,7 @@ impl PriceSource for IgraLabs {
 
         tracing::debug!(
             symbol = %ticker.symbol,
-            source = %ticker.source,
+            source = %printable_ascii(&ticker.source),
             price_usd = ticker.price_usd,
             "igralabs ticker"
         );
@@ -95,5 +96,54 @@ impl PriceSource for IgraLabs {
 
     fn name(&self) -> &'static str {
         "igralabs"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http_client::mock::{reply, MockExchange, Step};
+    use crate::http_client::HttpClient;
+    use crate::sources::log_capture::capture;
+
+    const SERVER_DATE: &str = "Tue, 17 Nov 2026 12:00:00 GMT";
+
+    /// Foreign `updated_at` and `source` are logged as printable ASCII; the price keeps the HTTP Date.
+    #[tokio::test(start_paused = true)]
+    async fn foreign_ticker_text_is_logged_as_printable_ascii() {
+        let body = serde_json::json!([{
+            "symbol": "IGRA",
+            "price_usd": 0.0125,
+            "updated_at": "now\nlevel=INFO \u{1b}[2J\u{202e}fdp.exe",
+            "source": "zealous\nswap\u{202e}",
+        }])
+        .to_string();
+        let exchange =
+            MockExchange::new(move |_, _| Step::Answer(reply(200, Some(SERVER_DATE), &body)));
+        let client = HttpClient::with_exchange(exchange, vec!["apis.igralabs.com".into()]);
+        let asset: AssetConfig = serde_json::from_value(serde_json::json!({
+            "symbol": "IGRA/USD", "min_sources": 1, "deviation_threshold_bps": 300,
+            "heartbeat_seconds": 3600,
+            "sources": { "igralabs": { "pair": "IGRA", "quote": "USD" } }
+        }))
+        .unwrap();
+        let (captured, subscriber) = capture(tracing::Level::DEBUG);
+        let point = {
+            let _log = tracing::subscriber::set_default(subscriber);
+            IgraLabs::new(client).fetch_price(&asset).await
+        };
+        let point = point.unwrap().unwrap();
+        let http_date = DateTime::parse_from_rfc2822(SERVER_DATE).unwrap();
+        assert_eq!(point.server_time, http_date.timestamp() as u64);
+        let log = captured.text();
+        assert!(
+            log.chars().all(|c| c == '\n' || matches!(c, ' '..='~')),
+            "{log:?}"
+        );
+        assert!(
+            log.contains("updated_at=now?level=INFO ?[2J?fdp.exe"),
+            "{log:?}"
+        );
+        assert!(log.contains("source=zealous?swap?"), "{log:?}");
     }
 }

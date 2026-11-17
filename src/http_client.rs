@@ -125,7 +125,8 @@ fn status_class(code: u16) -> ErrorClass {
     }
 }
 
-/// Outcome of a failed attempt or call.
+/// Outcome of a failed attempt or call. Text taken from the peer or the
+/// transport (`detail`, `preview`) is stored as [`printable_ascii`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HttpError {
     DisallowedHost,
@@ -384,7 +385,7 @@ async fn read_capped(
 /// included, is `Timeout`; a refused CONNECT is a connect error.
 fn transport_error(err: reqwest::Error) -> HttpError {
     let err = err.without_url();
-    let detail = root_cause(&err);
+    let detail = printable_ascii(&root_cause(&err));
     if err.is_builder() {
         HttpError::InvalidUrl { detail }
     } else if err.is_timeout() {
@@ -437,8 +438,9 @@ fn interpret<T: DeserializeOwned>(reply: Reply) -> Result<(T, u64), HttpError> {
     if reply.oversized {
         return Err(HttpError::BodyTooLarge);
     }
+    // A serde message quotes body text, non-ASCII letters included.
     let parsed = serde_json::from_slice(&reply.body).map_err(|e| HttpError::NotJson {
-        detail: e.to_string(),
+        detail: printable_ascii(&e.to_string()),
     })?;
     Ok((parsed, server_unix))
 }
@@ -1901,5 +1903,17 @@ mod tests {
             assert!(!text.contains(['\n', '\u{1b}', '\u{202e}']), "{text:?}");
         }
         assert!(detail.ends_with("busy?level=INFO ?[2J?fdp.exe"), "{detail}");
+    }
+
+    /// A 2xx body that fails to parse reaches the error text as printable ASCII.
+    #[tokio::test(start_paused = true)]
+    async fn a_foreign_body_in_a_parse_error_is_printable_ascii() {
+        let body = "\"caf\u{e9} \u{202e}fdp.exe\"";
+        let (client, _) = scripted(move |_, _| Step::Answer(reply(200, Some(SERVER_DATE), body)));
+        let err = client.get_json_with_time::<u64>(URL).await.unwrap_err();
+        assert!(matches!(err.error, HttpError::NotJson { .. }), "{err:?}");
+        let text = err.to_string();
+        assert!(text.chars().all(|c| matches!(c, ' '..='~')), "{text:?}");
+        assert!(text.contains("string \"caf? "), "{text}");
     }
 }

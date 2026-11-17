@@ -94,11 +94,51 @@ pub async fn fetch_all(
     results
 }
 
+/// Log capture for tests that pin what reaches a log line.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod log_capture {
     use std::io;
     use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    pub(crate) struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Captured {
+        pub(crate) fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A buffer and a plain-text subscriber writing events up to `level` into it.
+    pub(crate) fn capture(
+        level: tracing::Level,
+    ) -> (Captured, impl tracing::Subscriber + Send + Sync) {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(level)
+            .with_writer(move || writer.clone())
+            .finish();
+        (captured, subscriber)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_capture::capture;
+    use super::*;
 
     /// Fails with an error whose text carries a newline, ESC and U+202E.
     struct Foreign;
@@ -116,20 +156,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
-    struct Captured(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for Captured {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
     /// A failed fetch logs one line, its error text as printable ASCII only.
     #[tokio::test]
     async fn a_failure_is_logged_on_one_line_of_printable_ascii() {
@@ -140,19 +166,14 @@ mod tests {
         }))
         .unwrap();
         let diag = Diagnostics::new(std::slice::from_ref(&asset), &[]);
-        let captured = Captured::default();
-        let writer = captured.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
+        let (captured, subscriber) = capture(tracing::Level::INFO);
         let sources: Vec<Box<dyn PriceSource>> = vec![Box::new(Foreign)];
         let points = {
             let _log = tracing::subscriber::set_default(subscriber);
             fetch_all(&sources, &asset, &diag).await
         };
         assert!(points.is_empty());
-        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let log = captured.text();
         assert_eq!(log.lines().count(), 1, "{log:?}");
         assert!(!log.contains(['\u{1b}', '\u{202e}']), "{log:?}");
         assert!(
